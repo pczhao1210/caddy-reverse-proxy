@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>AI Docker Farm Gateway</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+    <script src="/vendor/alpine.min.js" defer></script>
+  </head>
+  <body x-data="gatewayApp" x-init="init()" x-cloak>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">AG</div>
+          <div><strong>AI Docker Farm</strong><span>Edge Gateway</span></div>
+        </div>
+
+        <nav class="nav" :aria-label="t('nav.primary')">
+          <template x-for="item in navItems" :key="item.view">
+            <button class="nav-item" :class="{ active: activeView === item.view }" type="button" @click="activeView = item.view">
+              <span x-text="t(item.label)"></span>
+            </button>
+          </template>
+        </nav>
+
+        <div class="sidebar-footer">
+          <label class="language-select"><span x-text="t('language.label')"></span><select x-model="locale"><option value="en">English</option><option value="zh-CN">中文</option></select></label>
+          <button type="button" class="ghost-button" @click="refreshAll()" x-text="t('actions.refresh')"></button>
+          <button type="button" class="ghost-button danger" @click="signOut()" x-text="t('actions.signOut')"></button>
+        </div>
+      </aside>
+
+      <main class="main">
+        <header class="topbar">
+          <div><h1 x-text="t('app.heading')"></h1><p id="subtitle" x-text="subtitle()"></p></div>
+          <div class="topbar-actions">
+            <button type="button" class="secondary-button" @click="refreshCertificate()" x-text="t('actions.refreshCertificates')"></button>
+            <button type="button" class="primary-button" @click="reconcile()" x-text="t('actions.apply')"></button>
+          </div>
+        </header>
+
+        <section class="alert" x-show="alert" x-text="alert"></section>
+        <section class="notice" x-show="notice" x-text="notice"></section>
+
+        <section id="dashboard" class="view" x-show="activeView === 'dashboard'">
+          <div class="metric-grid">
+            <div class="metric"><span x-text="t('metrics.profile')"></span><strong x-text="status?.profile || '-'"></strong></div>
+            <div class="metric"><span x-text="t('metrics.routes')"></span><strong x-text="routes().length"></strong></div>
+            <div class="metric"><span x-text="t('metrics.docker')"></span><strong x-text="dockerActiveText()"></strong></div>
+            <div class="metric"><span x-text="t('metrics.caddy')"></span><strong x-text="caddyLoadedText()"></strong></div>
+          </div>
+          <div class="panel"><div class="panel-header"><h2 x-text="t('sections.recentReconcile')"></h2></div><dl class="details"><template x-for="detail in reconcileDetails()" :key="detail.label"><div class="detail-row"><dt x-text="detail.label"></dt><dd x-text="detail.value"></dd></div></template></dl></div>
+        </section>
+
+        <section id="routes" class="view" x-show="activeView === 'routes'">
+          <div class="split">
+            <div class="panel">
+              <div class="panel-header"><h2 x-text="t('sections.activeRoutes')"></h2></div>
+              <div class="table-wrap"><table><thead><tr><th x-text="t('tables.host')"></th><th x-text="t('tables.exposure')"></th><th x-text="t('tables.source')"></th><th x-text="t('tables.upstream')"></th><th x-text="t('tables.health')"></th><th x-text="t('tables.https')"></th><th></th></tr></thead><tbody>
+                <template x-for="route in routes()" :key="route.id">
+                  <tr><td x-text="route.host"></td><td><span class="pill" :class="exposureClass(route.exposure)" x-text="exposureLabel(route.exposure)"></span></td><td x-text="sourceLabel(route.source)"></td><td><template x-for="upstream in route.upstreams || []" :key="upstream.url"><div x-text="upstream.url"></div></template></td><td><span class="pill" :class="routeHealth(route).className" x-text="routeHealth(route).text"></span></td><td><span class="pill" :class="route.https ? 'ok' : 'warn'" x-text="route.https ? t('status.on') : t('status.off')"></span></td><td><button x-show="route.source === 'explicit'" class="link-button" type="button" @click="deleteRoute(route.id)" x-text="t('actions.delete')"></button></td></tr>
+                </template>
+                <tr x-show="routes().length === 0"><td colspan="7" x-text="t('empty.noRoutes')"></td></tr>
+              </tbody></table></div>
+            </div>
+            <form class="panel form-panel" @submit.prevent="saveRoute()">
+              <div class="panel-header"><h2 x-text="t('sections.addRoute')"></h2></div>
+              <label><span x-text="t('forms.host')"></span><input x-model.trim="routeForm.host" placeholder="app.example.com" required></label>
+              <label><span x-text="t('forms.upstreamUrl')"></span><input x-model.trim="routeForm.upstream" placeholder="http://service:8080" required></label>
+              <label><span x-text="t('forms.healthPath')"></span><input x-model.trim="routeForm.healthPath" placeholder="/healthz"></label>
+              <label><span x-text="t('forms.exposure')"></span><select x-model="routeForm.exposure"><option value="public" x-text="t('exposure.public')"></option><option value="protected" x-text="t('exposure.protected')"></option><option value="internal" x-text="t('exposure.internal')"></option></select></label>
+              <label class="check"><input type="checkbox" x-model="routeForm.https"> <span x-text="t('forms.https')"></span></label>
+              <label class="check"><input type="checkbox" x-model="routeForm.websocket"> <span x-text="t('forms.websocket')"></span></label>
+              <button class="primary-button" type="submit" x-text="t('actions.add')"></button>
+            </form>
+          </div>
+        </section>
+
+        <section id="discovery" class="view" x-show="activeView === 'discovery'">
+          <div class="panel">
+            <div class="panel-header"><h2 x-text="t('sections.dockerDiscovery')"></h2></div>
+            <dl class="details compact"><template x-for="detail in dockerDetails()" :key="detail.label"><div class="detail-row"><dt x-text="detail.label"></dt><dd x-text="detail.value"></dd></div></template></dl>
+            <div class="table-wrap"><table><thead><tr><th x-text="t('tables.container')"></th><th x-text="t('tables.image')"></th><th x-text="t('tables.status')"></th><th x-text="t('tables.ports')"></th><th x-text="t('tables.bind')"></th></tr></thead><tbody>
+              <tr x-show="discoveryWarning"><td colspan="5" x-text="translateBackendText(discoveryWarning)"></td></tr>
+              <template x-for="container in containers" :key="container.id">
+                <tr x-show="!discoveryWarning"><td x-text="container.name"></td><td x-text="container.image"></td><td x-text="container.status"></td><td x-text="portsText(container)"></td><td><div x-show="tcpPorts(container).length === 0" class="muted" x-text="t('status.noTcpPort')"></div><div x-show="tcpPorts(container).length > 0" class="bind-controls"><span class="pill" :class="container.routeHint ? 'ok' : 'warn'" x-text="container.routeHint?.host || t('status.manual')"></span><input x-model="bindForms[container.id].host" :aria-label="t('aria.routeHost')"><select x-model.number="bindForms[container.id].port" :aria-label="t('aria.upstreamPort')"><template x-for="port in tcpPorts(container)" :key="port.privatePort"><option :value="port.privatePort" x-text="port.privatePort + '/' + port.type"></option></template></select><select x-model="bindForms[container.id].exposure" :aria-label="t('aria.exposure')"><option value="public" x-text="t('exposure.public')"></option><option value="protected" x-text="t('exposure.protected')"></option><option value="internal" x-text="t('exposure.internal')"></option></select><label class="mini-check"><input type="checkbox" x-model="bindForms[container.id].https"> <span x-text="t('forms.https')"></span></label><button class="primary-button small" type="button" @click="bindContainer(container)" x-text="t('actions.bind')"></button></div></td></tr>
+              </template>
+              <tr x-show="!discoveryWarning && containers.length === 0"><td colspan="5" x-text="t('empty.noContainers')"></td></tr>
+            </tbody></table></div>
+          </div>
+        </section>
+
+        <section id="network" class="view" x-show="activeView === 'network'">
+          <div class="network-grid">
+            <div class="panel"><div class="panel-header"><h2 x-text="t('sections.azureNetwork')"></h2></div><dl class="details"><template x-for="detail in networkDetails()" :key="detail.label"><div class="detail-row"><dt x-text="detail.label"></dt><dd x-text="detail.value"></dd></div></template></dl></div>
+            <form class="panel form-panel" @submit.prevent="saveCertificate()">
+              <div class="panel-header"><h2 x-text="t('sections.certificates')"></h2><span class="pill" x-text="certificateForm.runtimeOnly ? t('status.runtimeOnly') : t('status.persisted')"></span></div>
+              <label><span x-text="t('forms.certificateIssuer')"></span><select x-model="certificateForm.issuer"><option value="default" x-text="t('certificate.default')"></option><option value="letsencrypt" x-text="t('certificate.letsencrypt')"></option><option value="zerossl" x-text="t('certificate.zerossl')"></option><option value="custom" x-text="t('certificate.custom')"></option></select></label>
+              <label><span x-text="t('forms.certificateEmail')"></span><input type="email" x-model.trim="certificateForm.email" placeholder="ops@example.com"></label>
+              <label><span x-text="t('forms.caDirectory')"></span><input x-model.trim="certificateForm.caDirectory" placeholder="https://acme-v02.api.letsencrypt.org/directory"></label>
+              <label class="check"><input type="checkbox" x-model="certificateForm.staging"> <span x-text="t('forms.certificateStaging')"></span></label>
+              <div class="form-actions"><button class="primary-button" type="submit" x-text="t('actions.saveAndApply')"></button><button class="secondary-button" type="button" @click="refreshCertificate()" x-text="t('actions.requestRefresh')"></button></div>
+              <p class="form-note" x-text="t('certificate.runtimeNote')"></p>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog x-ref="loginDialog" class="login-dialog">
+      <form method="dialog" @submit.prevent="login()">
+        <h2 x-text="t('auth.signIn')"></h2>
+        <label><span x-text="t('auth.adminToken')"></span><input x-model.trim="loginToken" type="password" autocomplete="current-password" required></label>
+        <button class="primary-button" type="submit" x-text="t('actions.continue')"></button>
+      </form>
+    </dialog>
+  </body>
+</html>

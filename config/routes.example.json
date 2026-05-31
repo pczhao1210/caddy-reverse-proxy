@@ -1,0 +1,20 @@
+{
+  "routes": [
+    {
+      "id": "sample-httpbin",
+      "host": "httpbin.localhost",
+      "exposure": "public",
+      "enabled": true,
+      "public": true,
+      "https": false,
+      "websocket": false,
+      "source": "explicit",
+      "upstreams": [
+        {
+          "name": "httpbin",
+          "url": "http://httpbin:8080"
+        }
+      ]
+    }
+  ]
+}

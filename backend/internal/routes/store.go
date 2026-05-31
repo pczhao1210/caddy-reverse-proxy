@@ -1,0 +1,220 @@
+package routes
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/aidockerfarm/gateway/internal/model"
+)
+
+type fileFormat struct {
+	Routes []model.RouteConfig `json:"routes"`
+}
+
+type Store struct {
+	path   string
+	mu     sync.RWMutex
+	routes []model.RouteConfig
+}
+
+func NewStore(path string) *Store {
+	return &Store{path: path}
+}
+
+func (s *Store) Load() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	var payload fileFormat
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	for index := range payload.Routes {
+		normalize(&payload.Routes[index])
+	}
+	s.routes = payload.Routes
+	return nil
+}
+
+func (s *Store) List() []model.RouteConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	output := make([]model.RouteConfig, len(s.routes))
+	copy(output, s.routes)
+	return output
+}
+
+func (s *Store) SetRuntimeStatus(statuses []model.RouteHealthStatus) {
+	if len(statuses) == 0 {
+		return
+	}
+	byID := make(map[string]model.RouteHealthStatus, len(statuses))
+	for _, status := range statuses {
+		byID[status.RouteID] = status
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.routes {
+		status, ok := byID[s.routes[index].ID]
+		if !ok {
+			continue
+		}
+		if status.Healthy {
+			s.routes[index].LastError = ""
+		} else {
+			s.routes[index].LastError = status.Error
+		}
+	}
+}
+
+func (s *Store) Add(route model.RouteConfig) (model.RouteConfig, error) {
+	if err := validate(route); err != nil {
+		return route, err
+	}
+	normalize(&route)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if route.ID == "" {
+		route.ID = fmt.Sprintf("route-%d", time.Now().UnixNano())
+	}
+	for _, existing := range s.routes {
+		if existing.ID == route.ID {
+			return route, fmt.Errorf("route id %q already exists", route.ID)
+		}
+		if existing.Host == route.Host && existing.PathPrefix == route.PathPrefix {
+			return route, fmt.Errorf("route for host %q already exists", route.Host)
+		}
+	}
+	route.Source = sourceOr(route.Source, "explicit")
+	route.LastUpdated = time.Now().UTC()
+	s.routes = append(s.routes, route)
+	if err := s.saveLocked(); err != nil {
+		s.routes = s.routes[:len(s.routes)-1]
+		return route, err
+	}
+	return route, nil
+}
+
+func (s *Store) Replace(route model.RouteConfig) (model.RouteConfig, error) {
+	if route.ID == "" {
+		return route, fmt.Errorf("route id is required")
+	}
+	if err := validate(route); err != nil {
+		return route, err
+	}
+	normalize(&route)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.routes {
+		if s.routes[index].ID == route.ID {
+			previous := s.routes[index]
+			route.LastUpdated = time.Now().UTC()
+			s.routes[index] = route
+			if err := s.saveLocked(); err != nil {
+				s.routes[index] = previous
+				return route, err
+			}
+			return route, nil
+		}
+	}
+	return route, fmt.Errorf("route id %q not found", route.ID)
+}
+
+func (s *Store) Delete(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for index := range s.routes {
+		if s.routes[index].ID == id {
+			previous := s.routes[index]
+			s.routes = append(s.routes[:index], s.routes[index+1:]...)
+			if err := s.saveLocked(); err != nil {
+				s.routes = append(s.routes[:index], append([]model.RouteConfig{previous}, s.routes[index:]...)...)
+				return err
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("route id %q not found", id)
+}
+
+func (s *Store) saveLocked() error {
+	if s.path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o755); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(fileFormat{Routes: s.routes}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.path, append(data, '\n'), 0o600)
+}
+
+func validate(route model.RouteConfig) error {
+	if strings.TrimSpace(route.Host) == "" {
+		return fmt.Errorf("host is required")
+	}
+	if len(route.Upstreams) == 0 {
+		return fmt.Errorf("at least one upstream is required")
+	}
+	for _, upstream := range route.Upstreams {
+		parsed, err := url.Parse(upstream.URL)
+		if err != nil || parsed.Host == "" || parsed.Scheme == "" {
+			return fmt.Errorf("upstream url %q must include scheme and host", upstream.URL)
+		}
+	}
+	return nil
+}
+
+func normalize(route *model.RouteConfig) {
+	route.Host = strings.ToLower(strings.TrimSpace(route.Host))
+	route.Exposure = strings.ToLower(strings.TrimSpace(route.Exposure))
+	if route.Source == "" {
+		route.Source = "explicit"
+	}
+	if route.Exposure == "" {
+		if route.Public || route.Source == "explicit" {
+			route.Exposure = "public"
+		} else {
+			route.Exposure = "internal"
+		}
+	}
+	switch route.Exposure {
+	case "internal":
+		route.Public = false
+		route.Protected = false
+	case "protected":
+		route.Public = true
+		route.Protected = true
+	default:
+		route.Exposure = "public"
+		route.Public = true
+		route.Protected = false
+	}
+	if !route.Enabled && route.LastUpdated.IsZero() {
+		route.Enabled = true
+	}
+}
+
+func sourceOr(value string, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
+}

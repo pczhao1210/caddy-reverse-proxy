@@ -1,0 +1,57 @@
+{
+  "profile": "vm",
+  "control": {
+    "listen": ":8080",
+    "managementHost": ""
+  },
+  "gateway": {
+    "httpListen": ":80",
+    "httpsListen": ":443",
+    "caddyAdminEndpoint": "http://127.0.0.1:2019",
+    "caddyBin": "caddy",
+    "stateDir": "/data/platform",
+    "caddyDataDir": "/data/caddy",
+    "certificate": {
+      "issuer": "default",
+      "email": "",
+      "staging": false,
+      "caDirectory": ""
+    }
+  },
+  "docker": {
+    "enabled": true,
+    "socketPath": "/var/run/docker.sock",
+    "endpoint": ""
+  },
+  "auth": {
+    "required": true,
+    "protectedRoutes": {
+      "allowBearerToken": true,
+      "allowAdminTokenHeader": true,
+      "additionalHeaderName": ""
+    }
+  },
+  "health": {
+    "enabled": true,
+    "timeoutSeconds": 3,
+    "defaultPath": "/"
+  },
+  "audit": {
+    "enabled": true,
+    "file": "/data/platform/audit.jsonl"
+  },
+  "routesFile": "/data/platform/routes.json",
+  "reconcileIntervalSeconds": 30,
+  "azure": {
+    "enabled": false,
+    "manageDNS": true,
+    "manageNSG": true,
+    "subscriptionId": "",
+    "resourceGroup": "",
+    "dnsZoneName": "",
+    "networkSecurityGroupName": "",
+    "publicIpAddress": "",
+    "nsgPriority": 120,
+    "nsgSourceAddressPrefixes": ["*"]
+  }
+}

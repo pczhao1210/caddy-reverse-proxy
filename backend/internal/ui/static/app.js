@@ -1,0 +1,688 @@
+const supportedLocales = ['en', 'zh-CN'];
+const defaultLocale = navigator.language && navigator.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+
+const messages = {
+  en: {
+    title: 'AI Docker Farm Gateway',
+    'nav.primary': 'Primary',
+    'nav.dashboard': 'Dashboard',
+    'nav.routes': 'Routes',
+    'nav.discovery': 'Discovery',
+    'nav.network': 'Network',
+    'language.label': 'Language',
+    'actions.refresh': 'Refresh',
+    'actions.signOut': 'Sign out',
+    'actions.apply': 'Apply',
+    'actions.add': 'Add',
+    'actions.continue': 'Continue',
+    'actions.delete': 'Delete',
+    'actions.bind': 'Bind',
+    'actions.refreshCertificates': 'Refresh certificates',
+    'actions.requestRefresh': 'Request refresh',
+    'actions.saveAndApply': 'Save and apply',
+    'app.heading': 'Gateway Control Plane',
+    'app.loading': 'Loading current state',
+    'app.subtitle': 'Profile {profile} · {time}',
+    'metrics.profile': 'Profile',
+    'metrics.routes': 'Routes',
+    'metrics.docker': 'Docker',
+    'metrics.caddy': 'Caddy',
+    'sections.recentReconcile': 'Recent Reconcile',
+    'sections.activeRoutes': 'Active Routes',
+    'sections.addRoute': 'Add Route',
+    'sections.dockerDiscovery': 'Docker Discovery',
+    'sections.azureNetwork': 'Azure & Network',
+    'sections.certificates': 'Certificates',
+    'tables.host': 'Host',
+    'tables.exposure': 'Exposure',
+    'tables.source': 'Source',
+    'tables.upstream': 'Upstream',
+    'tables.health': 'Health',
+    'tables.https': 'HTTPS',
+    'tables.container': 'Container',
+    'tables.image': 'Image',
+    'tables.status': 'Status',
+    'tables.ports': 'Ports',
+    'tables.bind': 'Bind',
+    'forms.host': 'Host',
+    'forms.upstreamUrl': 'Upstream URL',
+    'forms.healthPath': 'Health path',
+    'forms.exposure': 'Exposure',
+    'forms.https': 'HTTPS',
+    'forms.websocket': 'WebSocket',
+    'forms.certificateIssuer': 'Issuer',
+    'forms.certificateEmail': 'ACME account email',
+    'forms.certificateStaging': 'Use staging CA',
+    'forms.caDirectory': 'CA directory URL',
+    'auth.signIn': 'Sign in',
+    'auth.adminToken': 'Admin token',
+    'status.active': 'Active',
+    'status.disabled': 'Disabled',
+    'status.loaded': 'Loaded',
+    'status.pending': 'Pending',
+    'status.on': 'On',
+    'status.off': 'Off',
+    'status.yes': 'Yes',
+    'status.no': 'No',
+    'status.none': 'None',
+    'status.healthy': 'Healthy',
+    'status.unhealthy': 'Unhealthy',
+    'status.unknown': 'Unknown',
+    'status.manual': 'Manual',
+    'status.noTcpPort': 'No TCP port',
+    'status.runtimeOnly': 'Runtime',
+    'status.persisted': 'Persisted',
+    'empty.noRoutes': 'No routes',
+    'empty.noContainers': 'No containers discovered',
+    'exposure.public': 'Public',
+    'exposure.protected': 'Protected',
+    'exposure.internal': 'Internal',
+    'certificate.default': 'Caddy default',
+    'certificate.letsencrypt': "Let's Encrypt",
+    'certificate.zerossl': 'ZeroSSL',
+    'certificate.custom': 'Custom ACME',
+    'certificate.runtimeNote': 'Certificate changes apply immediately to the running gateway and are not written back to .env.',
+    'details.started': 'Started',
+    'details.finished': 'Finished',
+    'details.explicit': 'Explicit',
+    'details.discovered': 'Discovered',
+    'details.applied': 'Applied',
+    'details.healthChecks': 'Health Checks',
+    'details.unhealthyRoutes': 'Unhealthy Routes',
+    'details.azureDns': 'Azure DNS',
+    'details.dnsDeleted': 'DNS Deleted',
+    'details.azureNsg': 'Azure NSG',
+    'details.nsgDeleted': 'NSG Deleted',
+    'details.error': 'Error',
+    'details.active': 'Active',
+    'details.enabled': 'Enabled',
+    'details.profile': 'Profile',
+    'details.socket': 'Socket',
+    'details.endpoint': 'Endpoint',
+    'details.reason': 'Reason',
+    'details.nextActions': 'Next Actions',
+    'details.configured': 'Configured',
+    'details.manageDns': 'Manage DNS',
+    'details.manageNsg': 'Manage NSG',
+    'details.mode': 'Mode',
+    'details.capabilities': 'Capabilities',
+    'details.missingSettings': 'Missing Settings',
+    'details.publicIp': 'Public IP',
+    'details.dnsUpserts': 'DNS Upserts',
+    'details.nsgUpserts': 'NSG Upserts',
+    'details.warnings': 'Warnings',
+    'details.certificateIssuer': 'Certificate Issuer',
+    'details.certificateEmail': 'Certificate Email',
+    'details.certificateStaging': 'Certificate Staging',
+    'details.caDirectory': 'CA Directory',
+    'details.healthEnabled': 'Health Checks',
+    'details.healthTimeout': 'Health Timeout',
+    'details.auditEnabled': 'Audit Log',
+    'details.auditFile': 'Audit File',
+    'source.explicit': 'Explicit',
+    'source.docker': 'Docker',
+    'source.management': 'Management',
+    'aria.routeHost': 'Route host',
+    'aria.upstreamPort': 'Upstream port',
+    'aria.exposure': 'Exposure',
+    'msg.certificateSaved': 'Certificate policy applied and Caddy reloaded',
+    'msg.certificateRefreshed': 'Certificate refresh requested',
+    'msg.customCARequired': 'Custom ACME issuer requires a CA directory URL',
+    'msg.aciNoDockerDiscovery': 'ACI mode does not support local Docker discovery',
+    'msg.azureDisabled': 'Azure managers are disabled',
+    'msg.enableAzure': 'Enable Azure integration',
+    'msg.assignManagedIdentityRoles': 'Assign managed identity roles',
+    'msg.setAzureIdentifiers': 'Set subscription, resource group, DNS zone, and NSG names',
+    'msg.runApplyAzure': 'Run Apply to reconcile DNS records and NSG rules',
+    'msg.vmOnlyDockerDiscovery': 'Local Docker discovery is only available in the vm profile',
+    'msg.useExplicitRoutesForAci': 'Use explicit routes for ACI',
+    'msg.deployOnVmForDiscovery': 'Deploy the gateway on the same VM as Docker workloads to enable discovery',
+    'msg.dockerDisabled': 'Docker discovery is disabled by configuration or GATEWAY_DOCKER_ENABLED',
+    'msg.enableDockerDiscovery': 'Set GATEWAY_DOCKER_ENABLED=true',
+    'msg.mountDockerSocket': 'Mount /var/run/docker.sock read-only or provide a Docker socket proxy',
+    'msg.dockerNotInitialized': 'Docker discovery is configured but the discoverer was not initialized',
+    'msg.checkStartupLogs': 'Check the gateway startup logs',
+    'msg.verifyDockerSocketPath': 'Verify the Docker socket path is reachable from the container',
+    'msg.dockerActive': 'Docker discovery is active',
+    'msg.addDockerLabels': 'Add caddy.enable=true, caddy.host, and caddy.port labels to workload containers',
+    'msg.noPublicRoutesAzure': 'no public routes require Azure reconciliation',
+    'msg.managedDnsNoRelativeName': 'managed DNS record without a relative name was skipped',
+    'msg.nsgSourcePolicy': 'NSG priority and source-prefix policy'
+  },
+  'zh-CN': {
+    title: 'AI Docker Farm 网关',
+    'nav.primary': '主导航',
+    'nav.dashboard': '仪表盘',
+    'nav.routes': '路由',
+    'nav.discovery': '发现',
+    'nav.network': '网络',
+    'language.label': '语言',
+    'actions.refresh': '刷新',
+    'actions.signOut': '退出登录',
+    'actions.apply': '应用',
+    'actions.add': '添加',
+    'actions.continue': '继续',
+    'actions.delete': '删除',
+    'actions.bind': '绑定',
+    'actions.refreshCertificates': '刷新证书',
+    'actions.requestRefresh': '请求刷新',
+    'actions.saveAndApply': '保存并应用',
+    'app.heading': '网关控制平面',
+    'app.loading': '正在加载当前状态',
+    'app.subtitle': '配置档 {profile} · {time}',
+    'metrics.profile': '配置档',
+    'metrics.routes': '路由',
+    'metrics.docker': 'Docker',
+    'metrics.caddy': 'Caddy',
+    'sections.recentReconcile': '最近一次协调',
+    'sections.activeRoutes': '活动路由',
+    'sections.addRoute': '添加路由',
+    'sections.dockerDiscovery': 'Docker 发现',
+    'sections.azureNetwork': 'Azure 与网络',
+    'sections.certificates': '证书',
+    'tables.host': '主机名',
+    'tables.exposure': '暴露方式',
+    'tables.source': '来源',
+    'tables.upstream': '上游',
+    'tables.health': '健康',
+    'tables.https': 'HTTPS',
+    'tables.container': '容器',
+    'tables.image': '镜像',
+    'tables.status': '状态',
+    'tables.ports': '端口',
+    'tables.bind': '绑定',
+    'forms.host': '主机名',
+    'forms.upstreamUrl': '上游 URL',
+    'forms.healthPath': '健康检查路径',
+    'forms.exposure': '暴露方式',
+    'forms.https': 'HTTPS',
+    'forms.websocket': 'WebSocket',
+    'forms.certificateIssuer': '签发器',
+    'forms.certificateEmail': 'ACME 账户邮箱',
+    'forms.certificateStaging': '使用测试 CA',
+    'forms.caDirectory': 'CA Directory URL',
+    'auth.signIn': '登录',
+    'auth.adminToken': '管理员令牌',
+    'status.active': '活动',
+    'status.disabled': '已禁用',
+    'status.loaded': '已加载',
+    'status.pending': '待处理',
+    'status.on': '开',
+    'status.off': '关',
+    'status.yes': '是',
+    'status.no': '否',
+    'status.none': '无',
+    'status.healthy': '健康',
+    'status.unhealthy': '异常',
+    'status.unknown': '未知',
+    'status.manual': '手动',
+    'status.noTcpPort': '没有 TCP 端口',
+    'status.runtimeOnly': '运行时',
+    'status.persisted': '已持久化',
+    'empty.noRoutes': '没有路由',
+    'empty.noContainers': '未发现容器',
+    'exposure.public': '公开',
+    'exposure.protected': '受保护',
+    'exposure.internal': '内部',
+    'certificate.default': 'Caddy 默认',
+    'certificate.letsencrypt': "Let's Encrypt",
+    'certificate.zerossl': 'ZeroSSL',
+    'certificate.custom': '自定义 ACME',
+    'certificate.runtimeNote': '证书配置会立即应用到当前运行的网关，但不会回写 .env。',
+    'details.started': '开始时间',
+    'details.finished': '完成时间',
+    'details.explicit': '显式路由',
+    'details.discovered': '发现路由',
+    'details.applied': '已应用',
+    'details.healthChecks': '健康检查',
+    'details.unhealthyRoutes': '异常路由',
+    'details.azureDns': 'Azure DNS',
+    'details.dnsDeleted': 'DNS 已删除',
+    'details.azureNsg': 'Azure NSG',
+    'details.nsgDeleted': 'NSG 已删除',
+    'details.error': '错误',
+    'details.active': '活动',
+    'details.enabled': '启用',
+    'details.profile': '配置档',
+    'details.socket': '套接字',
+    'details.endpoint': '端点',
+    'details.reason': '原因',
+    'details.nextActions': '下一步操作',
+    'details.configured': '已配置',
+    'details.manageDns': '管理 DNS',
+    'details.manageNsg': '管理 NSG',
+    'details.mode': '模式',
+    'details.capabilities': '能力',
+    'details.missingSettings': '缺失设置',
+    'details.publicIp': '公网 IP',
+    'details.dnsUpserts': 'DNS 写入',
+    'details.nsgUpserts': 'NSG 写入',
+    'details.warnings': '警告',
+    'details.certificateIssuer': '证书签发器',
+    'details.certificateEmail': '证书邮箱',
+    'details.certificateStaging': '证书测试模式',
+    'details.caDirectory': 'CA Directory',
+    'details.healthEnabled': '健康检查',
+    'details.healthTimeout': '健康超时',
+    'details.auditEnabled': '审计日志',
+    'details.auditFile': '审计文件',
+    'source.explicit': '显式',
+    'source.docker': 'Docker',
+    'source.management': '管理',
+    'aria.routeHost': '路由主机名',
+    'aria.upstreamPort': '上游端口',
+    'aria.exposure': '暴露方式',
+    'msg.certificateSaved': '证书策略已应用，Caddy 已重新加载',
+    'msg.certificateRefreshed': '已请求证书刷新',
+    'msg.customCARequired': '自定义 ACME 签发器需要 CA Directory URL',
+    'msg.aciNoDockerDiscovery': 'ACI 模式不支持本地 Docker 自动发现',
+    'msg.azureDisabled': 'Azure 管理器已禁用',
+    'msg.enableAzure': '启用 Azure 集成',
+    'msg.assignManagedIdentityRoles': '为托管身份分配角色',
+    'msg.setAzureIdentifiers': '设置订阅、资源组、DNS Zone 和 NSG 名称',
+    'msg.runApplyAzure': '运行“应用”以协调 DNS 记录和 NSG 规则',
+    'msg.vmOnlyDockerDiscovery': '本地 Docker 自动发现仅在 vm 配置档中可用',
+    'msg.useExplicitRoutesForAci': '在 ACI 中使用显式路由',
+    'msg.deployOnVmForDiscovery': '将网关部署在与 Docker 工作负载相同的 VM 上以启用发现',
+    'msg.dockerDisabled': 'Docker 自动发现已被配置或 GATEWAY_DOCKER_ENABLED 禁用',
+    'msg.enableDockerDiscovery': '设置 GATEWAY_DOCKER_ENABLED=true',
+    'msg.mountDockerSocket': '以只读方式挂载 /var/run/docker.sock，或提供 Docker socket 代理',
+    'msg.dockerNotInitialized': 'Docker 自动发现已配置，但 discoverer 未初始化',
+    'msg.checkStartupLogs': '检查网关启动日志',
+    'msg.verifyDockerSocketPath': '确认容器内可访问 Docker socket 路径',
+    'msg.dockerActive': 'Docker 自动发现处于活动状态',
+    'msg.addDockerLabels': '为工作负载容器添加 caddy.enable=true、caddy.host 和 caddy.port 标签',
+    'msg.noPublicRoutesAzure': '没有公网路由需要 Azure 协调',
+    'msg.managedDnsNoRelativeName': '已跳过缺少相对名称的托管 DNS 记录',
+    'msg.nsgSourcePolicy': 'NSG 优先级和源地址前缀策略'
+  }
+};
+
+const backendMessageKeys = new Map([
+  ['ACI mode does not support local Docker discovery', 'msg.aciNoDockerDiscovery'],
+  ['Azure managers are disabled', 'msg.azureDisabled'],
+  ['Enable Azure integration', 'msg.enableAzure'],
+  ['Assign managed identity roles', 'msg.assignManagedIdentityRoles'],
+  ['Set subscription, resource group, DNS zone, and NSG names', 'msg.setAzureIdentifiers'],
+  ['Run Apply to reconcile DNS records and NSG rules', 'msg.runApplyAzure'],
+  ['Local Docker discovery is only available in the vm profile', 'msg.vmOnlyDockerDiscovery'],
+  ['Use explicit routes for ACI', 'msg.useExplicitRoutesForAci'],
+  ['Deploy the gateway on the same VM as Docker workloads to enable discovery', 'msg.deployOnVmForDiscovery'],
+  ['Docker discovery is disabled by configuration or GATEWAY_DOCKER_ENABLED', 'msg.dockerDisabled'],
+  ['Set GATEWAY_DOCKER_ENABLED=true', 'msg.enableDockerDiscovery'],
+  ['Mount /var/run/docker.sock read-only or provide a Docker socket proxy', 'msg.mountDockerSocket'],
+  ['Docker discovery is configured but the discoverer was not initialized', 'msg.dockerNotInitialized'],
+  ['Check the gateway startup logs', 'msg.checkStartupLogs'],
+  ['Verify the Docker socket path is reachable from the container', 'msg.verifyDockerSocketPath'],
+  ['Docker discovery is active', 'msg.dockerActive'],
+  ['Add caddy.enable=true, caddy.host, and caddy.port labels to workload containers', 'msg.addDockerLabels'],
+  ['no public routes require Azure reconciliation', 'msg.noPublicRoutesAzure'],
+  ['managed DNS record without a relative name was skipped', 'msg.managedDnsNoRelativeName'],
+  ['NSG priority and source-prefix policy', 'msg.nsgSourcePolicy']
+]);
+
+document.addEventListener('alpine:init', () => {
+  Alpine.data('gatewayApp', () => ({
+    token: localStorage.getItem('gatewayToken') || '',
+    loginToken: '',
+    locale: localStorage.getItem('gatewayLocale') || defaultLocale,
+    activeView: 'dashboard',
+    alert: '',
+    notice: '',
+    status: null,
+    containers: [],
+    discoveryWarning: '',
+    bindForms: {},
+    certificateForm: emptyCertificateForm(),
+    routeForm: emptyRouteForm(),
+    navItems: [
+      { view: 'dashboard', label: 'nav.dashboard' },
+      { view: 'routes', label: 'nav.routes' },
+      { view: 'discovery', label: 'nav.discovery' },
+      { view: 'network', label: 'nav.network' }
+    ],
+
+    init() {
+      if (!supportedLocales.includes(this.locale)) this.locale = 'en';
+      this.loginToken = this.token;
+      this.applyLocale();
+      this.$watch('locale', () => this.applyLocale());
+      this.$nextTick(() => {
+        if (!this.token) this.openLogin();
+        else this.refreshAll();
+      });
+    },
+
+    applyLocale() {
+      localStorage.setItem('gatewayLocale', this.locale);
+      document.documentElement.lang = this.locale;
+      document.title = this.t('title');
+    },
+
+    async login() {
+      this.token = this.loginToken.trim();
+      localStorage.setItem('gatewayToken', this.token);
+      this.closeLogin();
+      await this.refreshAll();
+    },
+
+    signOut() {
+      localStorage.removeItem('gatewayToken');
+      this.token = '';
+      this.loginToken = '';
+      this.openLogin();
+    },
+
+    async refreshAll() {
+      try {
+        this.clearMessages();
+        const [status, discovery, certificate] = await Promise.all([
+          this.api('/api/status'),
+          this.api('/api/discovery/containers'),
+          this.api('/api/certificate')
+        ]);
+        this.status = status;
+        this.discoveryWarning = discovery.warning || '';
+        this.containers = discovery.containers || [];
+        this.containers.forEach((container) => this.ensureBindForm(container));
+        this.setCertificateForm(certificate);
+      } catch (error) {
+        this.showAlert(error.message);
+        if (error.status === 401 || error.status === 503) this.openLogin();
+      }
+    },
+
+    async reconcile() {
+      await this.runAction(async () => {
+        await this.api('/api/reconcile', { method: 'POST' });
+        await this.refreshAll();
+      });
+    },
+
+    async saveRoute() {
+      const route = {
+        host: this.routeForm.host,
+        exposure: this.routeForm.exposure,
+        enabled: true,
+        https: this.routeForm.https,
+        websocket: this.routeForm.websocket,
+        source: 'explicit',
+        upstreams: [{ name: 'primary', url: this.routeForm.upstream, healthPath: this.routeForm.healthPath }]
+      };
+      await this.runAction(async () => {
+        await this.api('/api/routes', { method: 'POST', body: JSON.stringify(route) });
+        this.routeForm = emptyRouteForm();
+        await this.refreshAll();
+      });
+    },
+
+    async deleteRoute(id) {
+      await this.runAction(async () => {
+        await this.api('/api/routes/' + encodeURIComponent(id), { method: 'DELETE' });
+        await this.refreshAll();
+      });
+    },
+
+    async bindContainer(container) {
+      const form = this.bindForms[container.id];
+      const payload = {
+        containerId: container.id,
+        host: form.host,
+        port: Number(form.port),
+        exposure: form.exposure,
+        https: form.https,
+        websocket: false
+      };
+      await this.runAction(async () => {
+        await this.api('/api/discovery/bind', { method: 'POST', body: JSON.stringify(payload) });
+        await this.refreshAll();
+      });
+    },
+
+    async saveCertificate() {
+      if (this.certificateForm.issuer === 'custom' && !this.certificateForm.caDirectory) {
+        this.showAlert(this.t('msg.customCARequired'));
+        return;
+      }
+      const payload = {
+        issuer: this.certificateForm.issuer,
+        email: this.certificateForm.email,
+        staging: this.certificateForm.staging,
+        caDirectory: this.certificateForm.caDirectory
+      };
+      await this.runAction(async () => {
+        const result = await this.api('/api/certificate', { method: 'PUT', body: JSON.stringify(payload) });
+        this.setCertificateForm(result.certificate);
+        await this.refreshAll();
+        this.showNotice(this.t('msg.certificateSaved'));
+      });
+    },
+
+    async refreshCertificate() {
+      await this.runAction(async () => {
+        const result = await this.api('/api/certificate/refresh', { method: 'POST' });
+        this.setCertificateForm(result.certificate);
+        await this.refreshAll();
+        this.showNotice(this.t('msg.certificateRefreshed'));
+      });
+    },
+
+    async runAction(action) {
+      try {
+        this.clearMessages();
+        await action();
+      } catch (error) {
+        this.showAlert(error.message);
+        if (error.status === 401 || error.status === 503) this.openLogin();
+      }
+    },
+
+    async api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this.token, ...(options.headers || {}) }
+      });
+      const text = await response.text();
+      const payload = text ? JSON.parse(text) : null;
+      if (!response.ok) {
+        const error = new Error(payload?.error || response.statusText);
+        error.status = response.status;
+        throw error;
+      }
+      return payload;
+    },
+
+    setCertificateForm(certificate) {
+      this.certificateForm = { ...emptyCertificateForm(), ...(certificate || {}) };
+    },
+
+    ensureBindForm(container) {
+      if (this.bindForms[container.id]) return;
+      const ports = this.tcpPorts(container);
+      const host = this.defaultHost(container);
+      this.bindForms[container.id] = {
+        host,
+        port: Number(container.labels?.['caddy.port']) || ports[0]?.privatePort || 0,
+        exposure: container.labels?.['exposure.mode'] || 'public',
+        https: !host.endsWith('.localhost')
+      };
+    },
+
+    subtitle() {
+      if (!this.status) return this.t('app.loading');
+      return this.format('app.subtitle', { profile: this.status.profile, time: new Date().toLocaleString(this.locale) });
+    },
+
+    routes() {
+      return this.status?.routes || [];
+    },
+
+    lastReconcile() {
+      return this.status?.lastReconcile || {};
+    },
+
+    dockerActiveText() {
+      return this.status?.docker?.active ? this.t('status.active') : this.t('status.disabled');
+    },
+
+    caddyLoadedText() {
+      return this.lastReconcile().caddyLoaded ? this.t('status.loaded') : this.t('status.pending');
+    },
+
+    reconcileDetails() {
+      const reconcile = this.lastReconcile();
+      const azure = reconcile.azure || {};
+      return this.detailList({
+        [this.t('details.started')]: reconcile.startedAt || '-',
+        [this.t('details.finished')]: reconcile.finishedAt || '-',
+        [this.t('details.explicit')]: reconcile.explicitRoutes ?? 0,
+        [this.t('details.discovered')]: reconcile.discoveredRoutes ?? 0,
+        [this.t('details.applied')]: reconcile.appliedRoutes ?? 0,
+        [this.t('details.healthChecks')]: reconcile.healthChecks ?? 0,
+        [this.t('details.unhealthyRoutes')]: reconcile.unhealthyRoutes ?? 0,
+        [this.t('details.azureDns')]: azure.dnsRecords ?? 0,
+        [this.t('details.dnsDeleted')]: azure.dnsDeleted ?? 0,
+        [this.t('details.azureNsg')]: azure.nsgRules ?? 0,
+        [this.t('details.nsgDeleted')]: azure.nsgDeleted ?? 0,
+        [this.t('details.error')]: reconcile.error || azure.error || this.t('status.none')
+      });
+    },
+
+    dockerDetails() {
+      const docker = this.status?.docker || {};
+      return this.detailList({
+        [this.t('details.active')]: this.yesNo(docker.active),
+        [this.t('details.enabled')]: this.yesNo(docker.enabled),
+        [this.t('details.profile')]: docker.profile || '-',
+        [this.t('details.socket')]: docker.socketPath || '-',
+        [this.t('details.endpoint')]: docker.endpoint || '-',
+        [this.t('details.reason')]: this.translateBackendText(this.discoveryWarning || docker.reason || '-'),
+        [this.t('details.nextActions')]: this.listText(docker.nextActions)
+      });
+    },
+
+    networkDetails() {
+      const azure = this.status?.azure || {};
+      const reconcileAzure = this.status?.lastReconcile?.azure || {};
+      const certificate = this.status?.certificate || {};
+      const health = this.status?.health || {};
+      const audit = this.status?.audit || {};
+      return this.detailList({
+        [this.t('details.enabled')]: this.yesNo(azure.enabled),
+        [this.t('details.configured')]: this.yesNo(azure.configured),
+        [this.t('details.manageDns')]: this.yesNo(azure.manageDNS),
+        [this.t('details.manageNsg')]: this.yesNo(azure.manageNSG),
+        [this.t('details.mode')]: azure.mode || '-',
+        [this.t('details.capabilities')]: this.listText(azure.capabilities),
+        [this.t('details.missingSettings')]: this.listText(azure.missingSettings),
+        [this.t('details.publicIp')]: reconcileAzure.publicIpAddress || '-',
+        [this.t('details.dnsUpserts')]: reconcileAzure.dnsRecords ?? 0,
+        [this.t('details.nsgUpserts')]: reconcileAzure.nsgRules ?? 0,
+        [this.t('details.certificateIssuer')]: certificate.issuer || '-',
+        [this.t('details.certificateEmail')]: this.yesNo(certificate.emailConfigured),
+        [this.t('details.certificateStaging')]: this.yesNo(certificate.staging),
+        [this.t('details.caDirectory')]: certificate.caDirectory || '-',
+        [this.t('details.healthEnabled')]: this.yesNo(health.enabled),
+        [this.t('details.healthTimeout')]: health.timeoutSeconds ? health.timeoutSeconds + 's' : '-',
+        [this.t('details.auditEnabled')]: this.yesNo(audit.enabled),
+        [this.t('details.auditFile')]: audit.file || '-',
+        [this.t('details.warnings')]: this.listText([...(azure.warnings || []), ...(reconcileAzure.warnings || [])]) || this.t('status.none'),
+        [this.t('details.nextActions')]: this.listText(azure.nextActions)
+      });
+    },
+
+    detailList(items) {
+      return Object.entries(items).map(([label, value]) => ({ label, value: String(value) }));
+    },
+
+    routeHealth(route) {
+      const health = (this.status?.lastReconcile?.routeHealth || []).find((item) => item.routeId === route.id) || null;
+      if (route.lastError) return { text: route.lastError, className: 'warn' };
+      if (!health) return { text: this.t('status.unknown'), className: '' };
+      return health.healthy ? { text: this.t('status.healthy'), className: 'ok' } : { text: health.error || this.t('status.unhealthy'), className: 'warn' };
+    },
+
+    tcpPorts(container) {
+      return (container.ports || []).filter((port) => port.type === 'tcp' && port.privatePort);
+    },
+
+    portsText(container) {
+      return (container.ports || []).map((port) => port.privatePort + '/' + port.type).join(', ') || '-';
+    },
+
+    defaultHost(container) {
+      return container.labels?.['caddy.host'] || this.slug(container.name) + '.localhost';
+    },
+
+    exposureClass(value) {
+      return value === 'protected' ? 'warn' : value === 'internal' ? '' : 'ok';
+    },
+
+    exposureLabel(value) {
+      return this.t('exposure.' + (value || 'public'));
+    },
+
+    sourceLabel(value) {
+      const key = 'source.' + (value || 'explicit');
+      return this.t(key) === key ? value : this.t(key);
+    },
+
+    yesNo(value) {
+      return value ? this.t('status.yes') : this.t('status.no');
+    },
+
+    listText(values) {
+      return (values || []).map((value) => this.translateBackendText(value)).join(', ') || '-';
+    },
+
+    translateBackendText(value) {
+      const key = backendMessageKeys.get(value);
+      return key ? this.t(key) : value;
+    },
+
+    t(key) {
+      return messages[this.locale]?.[key] || messages.en[key] || key;
+    },
+
+    format(key, values) {
+      return Object.entries(values).reduce((text, [name, value]) => text.replaceAll('{' + name + '}', value), this.t(key));
+    },
+
+    slug(value) {
+      return String(value).toLowerCase().replace(/[^a-z0-9.-]+/g, '-').replace(/^[.-]+|[.-]+$/g, '') || 'service';
+    },
+
+    clearMessages() {
+      this.alert = '';
+      this.notice = '';
+    },
+
+    showAlert(message) {
+      this.notice = '';
+      this.alert = message;
+    },
+
+    showNotice(message) {
+      this.alert = '';
+      this.notice = message;
+    },
+
+    openLogin() {
+      const dialog = this.$refs.loginDialog;
+      if (dialog && !dialog.open) dialog.showModal();
+    },
+
+    closeLogin() {
+      const dialog = this.$refs.loginDialog;
+      if (dialog && dialog.open) dialog.close();
+    }
+  }));
+});
+
+function emptyRouteForm() {
+  return { host: '', upstream: '', healthPath: '', exposure: 'public', https: true, websocket: false };
+}
+
+function emptyCertificateForm() {
+  return { issuer: 'default', email: '', staging: false, caDirectory: '', runtimeOnly: true };
+}

@@ -1,0 +1,68 @@
+services:
+  platform:
+    build:
+      context: ../..
+      dockerfile: backend/Dockerfile
+    image: ${IMAGE:-caddy-reverse-proxy:latest}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8080:8080"
+    environment:
+      GATEWAY_PROFILE: ${GATEWAY_PROFILE:-vm}
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-change-me}
+      GATEWAY_ADMIN_TOKENS: ${GATEWAY_ADMIN_TOKENS:-}
+      GATEWAY_AUTH_REQUIRED: ${GATEWAY_AUTH_REQUIRED:-true}
+      GATEWAY_PROTECTED_ALLOW_BEARER: ${GATEWAY_PROTECTED_ALLOW_BEARER:-true}
+      GATEWAY_PROTECTED_ALLOW_ADMIN_HEADER: ${GATEWAY_PROTECTED_ALLOW_ADMIN_HEADER:-true}
+      GATEWAY_PROTECTED_HEADER_NAME: ${GATEWAY_PROTECTED_HEADER_NAME:-}
+      GATEWAY_PROTECTED_HEADER_VALUE: ${GATEWAY_PROTECTED_HEADER_VALUE:-}
+      GATEWAY_CONFIG_FILE: ${GATEWAY_CONFIG_FILE:-/config/platform.example.json}
+      GATEWAY_ROUTES_FILE: ${GATEWAY_ROUTES_FILE:-/data/platform/routes.json}
+      GATEWAY_RECONCILE_SECONDS: ${GATEWAY_RECONCILE_SECONDS:-30}
+      GATEWAY_HEALTH_ENABLED: ${GATEWAY_HEALTH_ENABLED:-true}
+      GATEWAY_HEALTH_TIMEOUT_SECONDS: ${GATEWAY_HEALTH_TIMEOUT_SECONDS:-3}
+      GATEWAY_HEALTH_DEFAULT_PATH: ${GATEWAY_HEALTH_DEFAULT_PATH:-/}
+      GATEWAY_AUDIT_ENABLED: ${GATEWAY_AUDIT_ENABLED:-true}
+      GATEWAY_AUDIT_FILE: ${GATEWAY_AUDIT_FILE:-/data/platform/audit.jsonl}
+      GATEWAY_CERTIFICATE_ISSUER: ${GATEWAY_CERTIFICATE_ISSUER:-default}
+      GATEWAY_CERTIFICATE_EMAIL: ${GATEWAY_CERTIFICATE_EMAIL:-}
+      GATEWAY_CERTIFICATE_STAGING: ${GATEWAY_CERTIFICATE_STAGING:-false}
+      GATEWAY_CERTIFICATE_CA_DIRECTORY: ${GATEWAY_CERTIFICATE_CA_DIRECTORY:-}
+      GATEWAY_DOCKER_ENABLED: ${GATEWAY_DOCKER_ENABLED:-true}
+      GATEWAY_DOCKER_SOCKET: ${GATEWAY_DOCKER_SOCKET:-/var/run/docker.sock}
+      GATEWAY_DOCKER_ENDPOINT: ${GATEWAY_DOCKER_ENDPOINT:-}
+      GATEWAY_AZURE_ENABLED: ${GATEWAY_AZURE_ENABLED:-false}
+      GATEWAY_AZURE_MANAGE_DNS: ${GATEWAY_AZURE_MANAGE_DNS:-true}
+      GATEWAY_AZURE_MANAGE_NSG: ${GATEWAY_AZURE_MANAGE_NSG:-true}
+      GATEWAY_AZURE_SUBSCRIPTION_ID: ${GATEWAY_AZURE_SUBSCRIPTION_ID:-}
+      GATEWAY_AZURE_RESOURCE_GROUP: ${GATEWAY_AZURE_RESOURCE_GROUP:-}
+      GATEWAY_AZURE_DNS_ZONE: ${GATEWAY_AZURE_DNS_ZONE:-}
+      GATEWAY_AZURE_NSG_NAME: ${GATEWAY_AZURE_NSG_NAME:-}
+      GATEWAY_AZURE_NSG_PRIORITY: ${GATEWAY_AZURE_NSG_PRIORITY:-120}
+      GATEWAY_AZURE_NSG_SOURCE_PREFIXES: ${GATEWAY_AZURE_NSG_SOURCE_PREFIXES:-*}
+      GATEWAY_PUBLIC_IP_ADDRESS: ${GATEWAY_PUBLIC_IP_ADDRESS:-}
+    volumes:
+      - ../../config:/config:ro
+      - gateway-data:/data
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - gateway
+
+  httpbin:
+    image: mccutchen/go-httpbin:v2.15.0
+    labels:
+      caddy.enable: "true"
+      caddy.host: "httpbin.localhost"
+      caddy.port: "8080"
+      caddy.websocket: "false"
+      exposure.mode: "public"
+    networks:
+      - gateway
+
+networks:
+  gateway:
+    name: ai-docker-farm-gateway
+
+volumes:
+  gateway-data:

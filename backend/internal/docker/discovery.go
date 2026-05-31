@@ -109,17 +109,23 @@ func toService(container containerPayload) model.ContainerService {
 		ports = append(ports, model.ContainerPort{PrivatePort: port.PrivatePort, PublicPort: port.PublicPort, Type: port.Type})
 	}
 	networks := make([]string, 0, len(container.NetworkSettings.Networks))
+	endpoints := make([]model.NetworkEndpoint, 0, len(container.NetworkSettings.Networks))
 	addresses := make([]string, 0, len(container.NetworkSettings.Networks))
 	for name, raw := range container.NetworkSettings.Networks {
 		networks = append(networks, name)
 		var network networkPayload
-		if err := json.Unmarshal(raw, &network); err == nil && strings.TrimSpace(network.IPAddress) != "" {
-			addresses = append(addresses, network.IPAddress)
+		if err := json.Unmarshal(raw, &network); err == nil {
+			endpoint := model.NetworkEndpoint{Name: name, Address: strings.TrimSpace(network.IPAddress)}
+			endpoints = append(endpoints, endpoint)
+			if endpoint.Address != "" {
+				addresses = append(addresses, endpoint.Address)
+			}
 		}
 	}
 	sort.Strings(networks)
 	sort.Strings(addresses)
-	return model.ContainerService{ID: container.ID, Name: cleanName(container.Names), Image: container.Image, State: container.State, Status: container.Status, Labels: container.Labels, Ports: ports, Networks: networks, NetworkAddresses: addresses}
+	sort.Slice(endpoints, func(left int, right int) bool { return endpoints[left].Name < endpoints[right].Name })
+	return model.ContainerService{ID: container.ID, Name: cleanName(container.Names), Image: container.Image, State: container.State, Status: container.Status, Labels: container.Labels, Ports: ports, Networks: networks, NetworkEndpoints: endpoints, NetworkAddresses: addresses}
 }
 
 func routeFromLabels(service model.ContainerService) (model.RouteConfig, bool) {

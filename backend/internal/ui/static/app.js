@@ -17,6 +17,7 @@ const messages = {
     'actions.continue': 'Continue',
     'actions.delete': 'Delete',
     'actions.bind': 'Bind',
+    'actions.useSuggestedRoute': 'Use Suggested Route',
     'actions.refreshCertificates': 'Refresh certificates',
     'actions.requestRefresh': 'Request refresh',
     'actions.saveAndApply': 'Save and apply',
@@ -145,6 +146,12 @@ const messages = {
     'msg.verifyDockerSocketPath': 'Verify the Docker socket path is reachable from the container',
     'msg.dockerActive': 'Docker discovery is active',
     'msg.addDockerLabels': 'Add caddy.enable=true, caddy.host, and caddy.port labels to workload containers',
+    'msg.bindUnknownGatewayNetwork': 'Gateway network visibility is unavailable, so Bind keeps the current direct-upstream behavior.',
+    'msg.bindHostNetwork': 'This container uses Docker host networking. Add an explicit route to {upstream}; use {loopback} only if the gateway itself runs in host mode.',
+    'msg.bindPublishedPort': 'This container is not on a gateway network. Add an explicit route to {upstream}, or attach it to one of the gateway networks: {networks}.',
+    'msg.bindBridgeUnreachable': 'This container is only on Docker bridge and is not directly reachable from the gateway. Attach it to one of the gateway networks: {networks}.',
+    'msg.bindNetworkUnreachable': 'This container does not share a network with the gateway. Attach it to one of the gateway networks: {networks}.',
+    'msg.routePrefilled': 'Suggested route populated in Add Route',
     'msg.noPublicRoutesAzure': 'no public routes require Azure reconciliation',
     'msg.managedDnsNoRelativeName': 'managed DNS record without a relative name was skipped',
     'msg.nsgSourcePolicy': 'NSG priority and source-prefix policy'
@@ -164,6 +171,7 @@ const messages = {
     'actions.continue': '继续',
     'actions.delete': '删除',
     'actions.bind': '绑定',
+    'actions.useSuggestedRoute': '使用建议路由',
     'actions.refreshCertificates': '刷新证书',
     'actions.requestRefresh': '请求刷新',
     'actions.saveAndApply': '保存并应用',
@@ -292,6 +300,12 @@ const messages = {
     'msg.verifyDockerSocketPath': '确认容器内可访问 Docker socket 路径',
     'msg.dockerActive': 'Docker 自动发现处于活动状态',
     'msg.addDockerLabels': '为工作负载容器添加 caddy.enable=true、caddy.host 和 caddy.port 标签',
+    'msg.bindUnknownGatewayNetwork': '当前无法识别 gateway 自身所在网络，因此“绑定”仍会沿用现有直接上游行为。',
+    'msg.bindHostNetwork': '该容器使用 Docker host 网络。请添加显式路由到 {upstream}；只有当 gateway 自己也运行在 host 模式时，才可使用 {loopback}。',
+    'msg.bindPublishedPort': '该容器不在 gateway 可直达的网络中。请添加显式路由到 {upstream}，或把容器加入以下 gateway 网络之一：{networks}。',
+    'msg.bindBridgeUnreachable': '该容器只在 Docker bridge 上，gateway 不能直接访问。请把它加入以下 gateway 网络之一：{networks}。',
+    'msg.bindNetworkUnreachable': '该容器与 gateway 没有共享网络。请把它加入以下 gateway 网络之一：{networks}。',
+    'msg.routePrefilled': '已在“添加路由”中填入建议上游',
     'msg.noPublicRoutesAzure': '没有公网路由需要 Azure 协调',
     'msg.managedDnsNoRelativeName': '已跳过缺少相对名称的托管 DNS 记录',
     'msg.nsgSourcePolicy': 'NSG 优先级和源地址前缀策略'
@@ -424,6 +438,10 @@ document.addEventListener('alpine:init', () => {
     },
 
     async bindContainer(container) {
+      if (!this.canBindContainer(container)) {
+		this.showAlert(this.bindHint(container));
+		return;
+	  }
       const form = this.bindForms[container.id];
       const payload = {
         containerId: container.id,
@@ -507,6 +525,54 @@ document.addEventListener('alpine:init', () => {
         https: !host.endsWith('.localhost')
       };
     },
+
+    bindPolicy(container) {
+    return container.bindPolicy || { canBind: true, mode: 'unknown', gatewayNetworks: [] };
+  },
+
+  canBindContainer(container) {
+    return this.bindPolicy(container).canBind !== false;
+  },
+
+  canUseSuggestedRoute(container) {
+    return Boolean(this.bindPolicy(container).suggestedUpstream);
+  },
+
+  bindHint(container) {
+    const policy = this.bindPolicy(container);
+    const gatewayNetworks = this.listText(policy.gatewayNetworks || []);
+    const loopback = 'http://127.0.0.1:' + (this.bindForms[container.id]?.port || 0);
+    switch (policy.mode) {
+      case 'host-network':
+        return this.format('msg.bindHostNetwork', { upstream: policy.suggestedUpstream, loopback });
+      case 'published-port':
+        return this.format('msg.bindPublishedPort', { upstream: policy.suggestedUpstream, networks: gatewayNetworks || '-' });
+      case 'bridge-unreachable':
+        return this.format('msg.bindBridgeUnreachable', { networks: gatewayNetworks || '-' });
+      case 'network-unreachable':
+        return this.format('msg.bindNetworkUnreachable', { networks: gatewayNetworks || '-' });
+      case 'unknown':
+        return policy.gatewayNetworks?.length ? '' : this.t('msg.bindUnknownGatewayNetwork');
+      default:
+        return '';
+    }
+  },
+
+  useSuggestedRoute(container) {
+    const policy = this.bindPolicy(container);
+    if (!policy.suggestedUpstream) return;
+    const form = this.bindForms[container.id];
+    this.routeForm = {
+      host: form.host,
+      upstream: policy.suggestedUpstream,
+      healthPath: '',
+      exposure: form.exposure,
+      https: form.https,
+      websocket: false
+    };
+    this.activeView = 'routes';
+    this.showNotice(this.t('msg.routePrefilled'));
+  },
 
     subtitle() {
       if (!this.status) return this.t('app.loading');
@@ -684,5 +750,5 @@ function emptyRouteForm() {
 }
 
 function emptyCertificateForm() {
-  return { issuer: 'default', email: '', staging: false, caDirectory: '', runtimeOnly: true };
+  return { issuer: 'letsencrypt', email: '', staging: false, caDirectory: '', runtimeOnly: true };
 }

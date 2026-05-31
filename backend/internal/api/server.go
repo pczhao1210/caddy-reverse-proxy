@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -192,7 +193,14 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "routeHints": routeHints, "status": s.dockerStatus()})
+	gatewayNetworks := gatewayContainerNetworks(containers)
+	for index := range containers {
+		if port, err := bindPort(containers[index], 0); err == nil {
+			policy := containerBindPolicy(containers[index], gatewayNetworks, port)
+			containers[index].BindPolicy = &policy
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "routeHints": routeHints, "gatewayNetworks": gatewayNetworks, "status": s.dockerStatus()})
 }
 
 func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
@@ -229,12 +237,17 @@ func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	policy := containerBindPolicy(container, gatewayContainerNetworks(containers), port)
+	if !policy.CanBind {
+		writeError(w, http.StatusBadRequest, bindPolicyError(container, policy, port))
+		return
+	}
 	host := strings.ToLower(strings.TrimSpace(request.Host))
 	if host == "" {
 		host = defaultBindHost(container)
 	}
 	exposure := normalizeExposure(request.Exposure)
-	upstreamName := bindUpstreamName(container)
+	upstreamName := bindUpstreamName(container, policy.GatewayNetworks)
 	route := model.RouteConfig{
 		ID:        fmt.Sprintf("bind-%s-%d-%s", shortID(container.ID), port, slug(host)),
 		Host:      host,
@@ -318,7 +331,10 @@ func defaultBindHost(container model.ContainerService) string {
 	return slug(container.Name) + ".localhost"
 }
 
-func bindUpstreamName(container model.ContainerService) string {
+func bindUpstreamName(container model.ContainerService, gatewayNetworks []string) string {
+	if sharedAddress := sharedNetworkAddress(container, gatewayNetworks); sharedAddress != "" {
+		return sharedAddress
+	}
 	if len(container.NetworkAddresses) > 0 {
 		return container.NetworkAddresses[0]
 	}
@@ -326,6 +342,127 @@ func bindUpstreamName(container model.ContainerService) string {
 		return name
 	}
 	return container.Name
+}
+
+func gatewayContainerNetworks(containers []model.ContainerService) []string {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return nil
+	}
+	gateway, ok := findContainer(containers, hostname)
+	if !ok {
+		return nil
+	}
+	output := make([]string, len(gateway.Networks))
+	copy(output, gateway.Networks)
+	return output
+}
+
+func containerBindPolicy(container model.ContainerService, gatewayNetworks []string, port int) model.ContainerBindPolicy {
+	policy := model.ContainerBindPolicy{
+		CanBind:         true,
+		Mode:            "unknown",
+		GatewayNetworks: append([]string(nil), gatewayNetworks...),
+	}
+	if len(gatewayNetworks) == 0 {
+		return policy
+	}
+
+	policy.SharedNetworks = sharedNetworks(container.Networks, gatewayNetworks)
+	if len(policy.SharedNetworks) > 0 {
+		policy.Mode = "shared-network"
+		return policy
+	}
+
+	policy.CanBind = false
+	if hasNetwork(container.Networks, "host") {
+		policy.Mode = "host-network"
+		policy.SuggestedUpstream = fmt.Sprintf("http://host.docker.internal:%d", port)
+		return policy
+	}
+	if publishedPort := publishedTCPPort(container, port); publishedPort > 0 {
+		policy.Mode = "published-port"
+		policy.SuggestedUpstream = fmt.Sprintf("http://host.docker.internal:%d", publishedPort)
+		return policy
+	}
+	if hasNetwork(container.Networks, "bridge") {
+		policy.Mode = "bridge-unreachable"
+		return policy
+	}
+	policy.Mode = "network-unreachable"
+	return policy
+}
+
+func bindPolicyError(container model.ContainerService, policy model.ContainerBindPolicy, port int) string {
+	joinedNetworks := strings.Join(policy.GatewayNetworks, ", ")
+	switch policy.Mode {
+	case "host-network":
+		return fmt.Sprintf("container %s uses Docker host networking; add an explicit route to %s, or use http://127.0.0.1:%d only when the gateway itself runs in host mode", container.Name, policy.SuggestedUpstream, port)
+	case "published-port":
+		return fmt.Sprintf("container %s does not share a network with the gateway; add an explicit route to %s or attach the container to one of the gateway networks: %s", container.Name, policy.SuggestedUpstream, joinedNetworks)
+	case "bridge-unreachable":
+		return fmt.Sprintf("container %s is only on Docker bridge and does not share a network with the gateway; attach it to one of the gateway networks: %s", container.Name, joinedNetworks)
+	case "network-unreachable":
+		return fmt.Sprintf("container %s does not share a network with the gateway; attach it to one of the gateway networks: %s", container.Name, joinedNetworks)
+	default:
+		return fmt.Sprintf("container %s is not directly reachable from the gateway", container.Name)
+	}
+}
+
+func sharedNetworks(containerNetworks []string, gatewayNetworks []string) []string {
+	if len(containerNetworks) == 0 || len(gatewayNetworks) == 0 {
+		return nil
+	}
+	gatewaySet := make(map[string]struct{}, len(gatewayNetworks))
+	for _, network := range gatewayNetworks {
+		gatewaySet[network] = struct{}{}
+	}
+	shared := make([]string, 0, len(containerNetworks))
+	for _, network := range containerNetworks {
+		if _, ok := gatewaySet[network]; ok {
+			shared = append(shared, network)
+		}
+	}
+	return shared
+}
+
+func sharedNetworkAddress(container model.ContainerService, gatewayNetworks []string) string {
+	shared := sharedNetworks(container.Networks, gatewayNetworks)
+	for _, network := range shared {
+		for _, endpoint := range container.NetworkEndpoints {
+			if endpoint.Name == network && strings.TrimSpace(endpoint.Address) != "" {
+				return endpoint.Address
+			}
+		}
+	}
+	if len(shared) > 0 && !hasNetwork(shared, "bridge") {
+		if name := strings.TrimSpace(container.Labels["com.docker.compose.service"]); name != "" {
+			return name
+		}
+		return container.Name
+	}
+	return ""
+}
+
+func hasNetwork(networks []string, target string) bool {
+	for _, network := range networks {
+		if strings.EqualFold(network, target) {
+			return true
+		}
+	}
+	return false
+}
+
+func publishedTCPPort(container model.ContainerService, privatePort int) int {
+	for _, port := range container.Ports {
+		if !strings.EqualFold(port.Type, "tcp") || port.PublicPort == 0 {
+			continue
+		}
+		if privatePort == 0 || port.PrivatePort == privatePort {
+			return port.PublicPort
+		}
+	}
+	return 0
 }
 
 func normalizeExposure(value string) string {
@@ -492,11 +629,7 @@ func certificateConfigResponse(cert model.CertificateConfig) map[string]any {
 }
 
 func certificateIssuerName(cert model.CertificateConfig) string {
-	issuer := strings.TrimSpace(cert.Issuer)
-	if issuer == "" {
-		return "default"
-	}
-	return issuer
+	return appconfig.NormalizeCertificateConfig(cert).Issuer
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {

@@ -157,7 +157,7 @@ Default recommendation: leave `GATEWAY_MANAGEMENT_HOST` empty and access the UI 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GATEWAY_CERTIFICATE_ISSUER` | `default` | Certificate issuer policy: `default`, `letsencrypt`, `zerossl`, or `custom`. |
+| `GATEWAY_CERTIFICATE_ISSUER` | `letsencrypt` | Certificate issuer policy: `letsencrypt`, `zerossl`, or `custom`. The legacy `default` alias still maps to `letsencrypt`. |
 | `GATEWAY_CERTIFICATE_EMAIL` | empty | ACME contact email. Recommended for production. |
 | `GATEWAY_CERTIFICATE_STAGING` | `false` | Uses Let's Encrypt staging when issuer is `letsencrypt`. |
 | `GATEWAY_CERTIFICATE_CA_DIRECTORY` | empty | Custom ACME CA directory URL. Required when issuer is `custom`. |

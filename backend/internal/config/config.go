@@ -61,8 +61,8 @@ func NormalizeCertificateConfig(cert model.CertificateConfig) model.CertificateC
 	cert.Issuer = strings.ToLower(strings.TrimSpace(cert.Issuer))
 	cert.Email = strings.TrimSpace(cert.Email)
 	cert.CADirectory = strings.TrimSpace(cert.CADirectory)
-	if cert.Issuer == "" {
-		cert.Issuer = "default"
+	if cert.Issuer == "" || cert.Issuer == "default" {
+		cert.Issuer = "letsencrypt"
 	}
 	return cert
 }
@@ -92,7 +92,7 @@ func defaults() model.AppConfig {
 			CaddyBin:           "caddy",
 			StateDir:           "/data/platform",
 			CaddyDataDir:       "/data/caddy",
-			Certificate:        model.CertificateConfig{Issuer: "default"},
+			Certificate:        model.CertificateConfig{Issuer: "letsencrypt"},
 		},
 		Docker: model.DockerConfig{Enabled: true, SocketPath: "/var/run/docker.sock"},
 		Azure:  model.AzureConfig{ManageDNS: true, ManageNSG: true, NSGPriority: 120, NSGSourceAddressPrefixes: []string{"*"}},

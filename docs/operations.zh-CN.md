@@ -157,7 +157,7 @@ make docker-push IMAGE=registry.example.com/team/caddy-reverse-proxy:latest
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GATEWAY_CERTIFICATE_ISSUER` | `default` | 证书签发器策略：`default`、`letsencrypt`、`zerossl` 或 `custom`。 |
+| `GATEWAY_CERTIFICATE_ISSUER` | `letsencrypt` | 证书签发器策略：`letsencrypt`、`zerossl` 或 `custom`。历史兼容值 `default` 仍会映射到 `letsencrypt`。 |
 | `GATEWAY_CERTIFICATE_EMAIL` | empty | ACME 联系邮箱。生产环境建议配置。 |
 | `GATEWAY_CERTIFICATE_STAGING` | `false` | issuer 为 `letsencrypt` 时使用 Let's Encrypt staging。 |
 | `GATEWAY_CERTIFICATE_CA_DIRECTORY` | empty | 自定义 ACME CA directory URL。issuer 为 `custom` 时必填。 |

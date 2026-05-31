@@ -113,16 +113,31 @@ type RouteConfig struct {
 }
 
 type ContainerService struct {
-	ID               string            `json:"id"`
-	Name             string            `json:"name"`
-	Image            string            `json:"image"`
-	State            string            `json:"state"`
-	Status           string            `json:"status"`
-	Ports            []ContainerPort   `json:"ports"`
-	Labels           map[string]string `json:"labels"`
-	Networks         []string          `json:"networks"`
-	NetworkAddresses []string          `json:"networkAddresses,omitempty"`
-	RouteHint        *RouteConfig      `json:"routeHint,omitempty"`
+	ID               string               `json:"id"`
+	Name             string               `json:"name"`
+	Image            string               `json:"image"`
+	State            string               `json:"state"`
+	Status           string               `json:"status"`
+	Ports            []ContainerPort      `json:"ports"`
+	Labels           map[string]string    `json:"labels"`
+	Networks         []string             `json:"networks"`
+	NetworkEndpoints []NetworkEndpoint    `json:"networkEndpoints,omitempty"`
+	NetworkAddresses []string             `json:"networkAddresses,omitempty"`
+	BindPolicy       *ContainerBindPolicy `json:"bindPolicy,omitempty"`
+	RouteHint        *RouteConfig         `json:"routeHint,omitempty"`
+}
+
+type NetworkEndpoint struct {
+	Name    string `json:"name"`
+	Address string `json:"address,omitempty"`
+}
+
+type ContainerBindPolicy struct {
+	CanBind           bool     `json:"canBind"`
+	Mode              string   `json:"mode"`
+	SharedNetworks    []string `json:"sharedNetworks,omitempty"`
+	GatewayNetworks   []string `json:"gatewayNetworks,omitempty"`
+	SuggestedUpstream string   `json:"suggestedUpstream,omitempty"`
 }
 
 type ContainerPort struct {

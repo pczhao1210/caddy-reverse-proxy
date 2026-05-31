@@ -155,3 +155,25 @@ func TestRenderProtectedRouteWithCustomHeaderPolicy(t *testing.T) {
 		t.Fatalf("custom header match = %#v", header)
 	}
 }
+
+func TestRenderRejectsUnsupportedUpstreamScheme(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{
+		Gateway: model.GatewayConfig{
+			HTTPListen:         ":80",
+			HTTPSListen:        ":443",
+			CaddyAdminEndpoint: "http://127.0.0.1:2019",
+			CaddyDataDir:       "/data/caddy",
+		},
+	})
+
+	_, err := renderer.Render([]model.RouteConfig{{
+		ID:        "bad-upstream",
+		Host:      "app.localhost",
+		Enabled:   true,
+		Public:    true,
+		Upstreams: []model.UpstreamTarget{{Name: "svc", URL: "tcp://svc:8080"}},
+	}})
+	if err == nil {
+		t.Fatal("Render() error = nil, want unsupported scheme error")
+	}
+}

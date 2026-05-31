@@ -174,9 +174,15 @@ func validate(route model.RouteConfig) error {
 		return fmt.Errorf("at least one upstream is required")
 	}
 	for _, upstream := range route.Upstreams {
-		parsed, err := url.Parse(upstream.URL)
+		rawURL := strings.TrimSpace(upstream.URL)
+		parsed, err := url.Parse(rawURL)
 		if err != nil || parsed.Host == "" || parsed.Scheme == "" {
 			return fmt.Errorf("upstream url %q must include scheme and host", upstream.URL)
+		}
+		switch strings.ToLower(parsed.Scheme) {
+		case "http", "https":
+		default:
+			return fmt.Errorf("upstream url %q must use http or https", upstream.URL)
 		}
 	}
 	return nil
@@ -206,9 +212,6 @@ func normalize(route *model.RouteConfig) {
 		route.Exposure = "public"
 		route.Public = true
 		route.Protected = false
-	}
-	if !route.Enabled && route.LastUpdated.IsZero() {
-		route.Enabled = true
 	}
 }
 

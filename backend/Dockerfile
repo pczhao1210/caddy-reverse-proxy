@@ -13,7 +13,6 @@ COPY --from=caddy /usr/bin/caddy /usr/bin/caddy
 COPY --from=builder /out/platform /usr/local/bin/platform
 RUN mkdir -p /data/platform /data/caddy
 EXPOSE 80 443 8080
-ENV GATEWAY_CONFIG_FILE=/config/platform.json \
-    GATEWAY_ROUTES_FILE=/data/platform/routes.json \
+ENV GATEWAY_ROUTES_FILE=/data/platform/routes.json \
     XDG_DATA_HOME=/data/caddy
 ENTRYPOINT ["/usr/local/bin/platform"]

@@ -100,11 +100,11 @@ func (r *Reconciler) Sync(ctx context.Context) model.ReconcileResult {
 	if r.discoverer != nil {
 		_, discoveredRoutes, err := r.discoverer.Discover(ctx)
 		if err != nil {
-			result.Error = err.Error()
-			return r.finish(result)
+			r.logger.Warn("docker discovery failed; continuing with explicit routes", "error", err)
+		} else {
+			result.DiscoveredRoutes = len(discoveredRoutes)
+			allRoutes = append(allRoutes, discoveredRoutes...)
 		}
-		result.DiscoveredRoutes = len(discoveredRoutes)
-		allRoutes = append(allRoutes, discoveredRoutes...)
 	}
 
 	rendered, err := r.renderer.Render(allRoutes)

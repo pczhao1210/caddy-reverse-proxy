@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/aidockerfarm/gateway/internal/model"
@@ -11,6 +12,15 @@ import (
 type testRenderer struct{}
 
 func (testRenderer) Render([]model.RouteConfig) ([]byte, error) {
+	return []byte(`{}`), nil
+}
+
+type captureRenderer struct {
+	routes []model.RouteConfig
+}
+
+func (r *captureRenderer) Render(routes []model.RouteConfig) ([]byte, error) {
+	r.routes = append([]model.RouteConfig{}, routes...)
 	return []byte(`{}`), nil
 }
 
@@ -37,6 +47,12 @@ func (testHealthChecker) Check(_ context.Context, routes []model.RouteConfig) []
 		statuses = append(statuses, model.RouteHealthStatus{RouteID: route.ID, Host: route.Host, Healthy: false, Error: "not ready"})
 	}
 	return statuses
+}
+
+type failingDiscoverer struct{}
+
+func (failingDiscoverer) Discover(context.Context) ([]model.ContainerService, []model.RouteConfig, error) {
+	return nil, nil, errors.New("docker unavailable")
 }
 
 func TestSyncReturnsFinalizedResult(t *testing.T) {
@@ -103,5 +119,32 @@ func TestSyncIncludesManagementHostForAzureReconcile(t *testing.T) {
 	route := azureManager.routes[0]
 	if route.Host != "admin.example.com" || !route.Public || !route.Protected || route.Exposure != "protected" {
 		t.Fatalf("management azure route = %#v", route)
+	}
+}
+
+func TestSyncAppliesExplicitRoutesWhenDiscoveryFails(t *testing.T) {
+	store := routes.NewStore("")
+	created, err := store.Add(model.RouteConfig{Host: "app.localhost", Enabled: true, Upstreams: []model.UpstreamTarget{{Name: "app", URL: "http://app:8080"}}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	renderer := &captureRenderer{}
+	reconciler := New(Options{
+		Config:     model.AppConfig{},
+		Store:      store,
+		Discoverer: failingDiscoverer{},
+		Renderer:   renderer,
+		Loader:     testLoader{},
+	})
+
+	result := reconciler.Sync(context.Background())
+	if result.Error != "" {
+		t.Fatalf("Sync() error = %q, want explicit routes to continue", result.Error)
+	}
+	if !result.CaddyLoaded || result.AppliedRoutes != 1 {
+		t.Fatalf("Sync() loaded=%v applied=%d, want loaded explicit route", result.CaddyLoaded, result.AppliedRoutes)
+	}
+	if len(renderer.routes) != 1 || renderer.routes[0].ID != created.ID {
+		t.Fatalf("rendered routes = %#v, want explicit route %q", renderer.routes, created.ID)
 	}
 }

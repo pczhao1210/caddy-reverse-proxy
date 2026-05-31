@@ -31,3 +31,23 @@ func TestDefaultsUseLetsEncryptCertificateIssuer(t *testing.T) {
 		t.Fatalf("defaults certificate issuer = %q, want letsencrypt", cfg.Gateway.Certificate.Issuer)
 	}
 }
+
+func TestValidateConfigAllowsLoopbackCaddyAdminEndpoint(t *testing.T) {
+	for _, endpoint := range []string{"http://127.0.0.1:2019", "http://localhost:2019", "http://[::1]:2019"} {
+		t.Run(endpoint, func(t *testing.T) {
+			cfg := defaults()
+			cfg.Gateway.CaddyAdminEndpoint = endpoint
+			if err := validateConfig(cfg); err != nil {
+				t.Fatalf("validateConfig() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateConfigRejectsNonLoopbackCaddyAdminEndpoint(t *testing.T) {
+	cfg := defaults()
+	cfg.Gateway.CaddyAdminEndpoint = "http://0.0.0.0:2019"
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("validateConfig() error = nil, want loopback validation error")
+	}
+}

@@ -1,7 +1,9 @@
 package routes
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aidockerfarm/gateway/internal/model"
@@ -39,6 +41,52 @@ func TestAddRejectsDuplicateHost(t *testing.T) {
 	second := model.RouteConfig{Host: "app.localhost", Upstreams: []model.UpstreamTarget{{Name: "two", URL: "http://two:8080"}}}
 	if _, err := store.Add(second); err == nil {
 		t.Fatal("second Add() error = nil, want duplicate host error")
+	}
+}
+
+func TestAddRejectsUnsupportedUpstreamScheme(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	_, err := store.Add(model.RouteConfig{Host: "app.localhost", Upstreams: []model.UpstreamTarget{{Name: "svc", URL: "tcp://svc:8080"}}})
+	if err == nil || !strings.Contains(err.Error(), "must use http or https") {
+		t.Fatalf("Add() error = %v, want http or https scheme error", err)
+	}
+}
+
+func TestLoadPreservesDisabledRoute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	data := []byte(`{"routes":[{"id":"disabled","host":"disabled.localhost","enabled":false,"upstreams":[{"name":"svc","url":"http://svc:8080"}]}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	store := NewStore(path)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	routes := store.List()
+	if len(routes) != 1 {
+		t.Fatalf("List() length = %d, want 1", len(routes))
+	}
+	if routes[0].Enabled {
+		t.Fatalf("route.Enabled = true, want false")
+	}
+}
+
+func TestLoadDefaultsMissingEnabledToTrue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	data := []byte(`{"routes":[{"id":"legacy","host":"legacy.localhost","upstreams":[{"name":"svc","url":"http://svc:8080"}]}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	store := NewStore(path)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	routes := store.List()
+	if len(routes) != 1 {
+		t.Fatalf("List() length = %d, want 1", len(routes))
+	}
+	if !routes[0].Enabled {
+		t.Fatalf("route.Enabled = false, want true")
 	}
 }
 

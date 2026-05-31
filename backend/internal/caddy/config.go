@@ -263,7 +263,14 @@ func upstreamDial(raw string) (string, bool, error) {
 	if parsed.Host == "" {
 		return "", false, fmt.Errorf("upstream %q must include host", raw)
 	}
-	return parsed.Host, parsed.Scheme == "https", nil
+	switch strings.ToLower(parsed.Scheme) {
+	case "http":
+		return parsed.Host, false, nil
+	case "https":
+		return parsed.Host, true, nil
+	default:
+		return "", false, fmt.Errorf("upstream %q must use http or https", raw)
+	}
 }
 
 func loopbackTarget(listen string) string {

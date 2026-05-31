@@ -3,6 +3,8 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -48,11 +50,38 @@ func validateConfig(cfg model.AppConfig) error {
 	if err := ValidateCertificateConfig(cfg.Gateway.Certificate); err != nil {
 		return err
 	}
+	if err := validateCaddyAdminEndpoint(cfg.Gateway.CaddyAdminEndpoint); err != nil {
+		return err
+	}
 	if (cfg.Auth.ProtectedRoutes.AdditionalHeaderName == "") != (cfg.Auth.ProtectedRoutes.AdditionalHeaderValue == "") {
 		return fmt.Errorf("protected route custom header requires both name and value")
 	}
 	if cfg.Azure.NSGPriority != 0 && (cfg.Azure.NSGPriority < 100 || cfg.Azure.NSGPriority > 4096) {
 		return fmt.Errorf("azure nsgPriority must be between 100 and 4096")
+	}
+	return nil
+}
+
+func validateCaddyAdminEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return fmt.Errorf("gateway.caddyAdminEndpoint must be an http(s) URL with a loopback host")
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "http", "https":
+	default:
+		return fmt.Errorf("gateway.caddyAdminEndpoint must use http or https")
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		return fmt.Errorf("gateway.caddyAdminEndpoint must include a host")
+	}
+	if strings.EqualFold(hostname, "localhost") {
+		return nil
+	}
+	ip := net.ParseIP(hostname)
+	if ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("gateway.caddyAdminEndpoint must use a loopback host")
 	}
 	return nil
 }

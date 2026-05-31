@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 type DeploymentProfile string
 
@@ -110,6 +113,24 @@ type RouteConfig struct {
 	Discovered  bool              `json:"discovered"`
 	LastError   string            `json:"lastError,omitempty"`
 	LastUpdated time.Time         `json:"lastUpdated,omitempty"`
+}
+
+func (route *RouteConfig) UnmarshalJSON(data []byte) error {
+	type routeConfig RouteConfig
+	type routePayload struct {
+		routeConfig
+		Enabled *bool `json:"enabled"`
+	}
+	payload := routePayload{routeConfig: routeConfig{Enabled: true}}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	output := RouteConfig(payload.routeConfig)
+	if payload.Enabled != nil {
+		output.Enabled = *payload.Enabled
+	}
+	*route = output
+	return nil
 }
 
 type ContainerService struct {

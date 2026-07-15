@@ -62,7 +62,7 @@ docker run -d --name gateway \
 	-v "$HOME/docker_files/caddy-reverse-proxy:/data" \
 	-v /var/run/docker.sock:/var/run/docker.sock:ro \
 	--env-file .env \
-	caddy-reverse-proxy:latest
+	pczhao1210/caddy-reverse-proxy:latest
 
 docker network connect proxy-net app-on-bridge
 ```
@@ -111,7 +111,7 @@ Use explicit routes for host-local upstreams, for example `http://127.0.0.1:3000
 | Target | Purpose |
 |---|---|
 | `make test` | Run Go tests in a Go toolchain container. |
-| `make docker-build` | Build `IMAGE`, default `caddy-reverse-proxy:latest`. |
+| `make docker-build` | Build `IMAGE`, default `pczhao1210/caddy-reverse-proxy:latest`. |
 | `make docker-push` | Check Docker daemon/login state and push `IMAGE`. |
 | `make docker-run` | Run the image locally with `ENV_FILE`, default `.env`, on Docker bridge. |
 | `make compose-up` | Start the VM sample stack. |
@@ -125,12 +125,14 @@ Use explicit routes for host-local upstreams, for example `http://127.0.0.1:3000
 | `make test-e2e` | Exercise Caddy routing with the sample VM stack. |
 | `make compose-down` | Stop the VM sample stack. |
 
-Override the image when pushing to a registry:
+The default build and push target is the published Docker Hub repository:
 
 ```sh
-make docker-build IMAGE=registry.example.com/team/caddy-reverse-proxy:latest
-make docker-push IMAGE=registry.example.com/team/caddy-reverse-proxy:latest
+make docker-build
+make docker-push
 ```
+
+Override `IMAGE` when publishing another repository or immutable tag.
 
 ## Core Runtime Variables
 

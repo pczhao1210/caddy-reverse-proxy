@@ -13,13 +13,13 @@ Application Gateway is not part of the final data path. Standard Load Balancer o
 
 ## Common preparation
 
-Build and push an immutable image tag:
+The public image is ready to use:
 
 ```sh
-make test
-make docker-build IMAGE=<registry>/caddy-reverse-proxy:<version>
-make docker-push IMAGE=<registry>/caddy-reverse-proxy:<version>
+docker pull pczhao1210/caddy-reverse-proxy:latest
 ```
+
+The published digest is `sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e03030aa94c52`. For an immutable deployment, use `pczhao1210/caddy-reverse-proxy@sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e03030aa94c52`.
 
 Production requirements:
 
@@ -48,7 +48,6 @@ docker network create gateway-workloads
 3. Start the single gateway container. The script generates the initial admin token and persists all of `/data` under `~/docker_files/caddy-reverse-proxy`:
 
 ```sh
-IMAGE=<registry>/caddy-reverse-proxy:<version> \
 DOCKER_NETWORKS=gateway-workloads \
 ./start.sh start
 ```
@@ -118,7 +117,7 @@ The template creates:
 
 [![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpczhao1210%2Fcaddy-reverse-proxy%2Fmain%2Fdeploy%2Faci%2Fazuredeploy.json)
 
-`image` and `adminToken` are the only required portal parameters. Publish the image first; `dnsZones` is optional, and supplying it creates the DNS role assignments required by both A-record reconciliation and wildcard certificate DNS-01. Certificate subjects and authentication settings are configured later in the Console.
+The template defaults to `pczhao1210/caddy-reverse-proxy:latest`, so `adminToken` is the only required portal parameter. `dnsZones` is optional, and supplying it creates the DNS role assignments required by both A-record reconciliation and wildcard certificate DNS-01. Certificate subjects and authentication settings are configured later in the Console.
 
 For CLI deployment:
 
@@ -127,7 +126,7 @@ cp deploy/aci/main.example.bicepparam deploy/aci/main.bicepparam
 export GATEWAY_ADMIN_TOKEN="$(openssl rand -base64 48)"
 ```
 
-Replace the sample image name. Add optional ACR, VNet prefix, management host, or `dnsZones` overrides only when needed.
+The sample already references the public image. Add optional ACR, VNet prefix, management host, image override, or `dnsZones` settings only when needed.
 
 ```sh
 make aci-build

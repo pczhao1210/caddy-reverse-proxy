@@ -6,6 +6,9 @@
 
 AI Docker Farm Edge Gateway is a self-hosted ingress platform for Docker and Azure workloads. It is designed as a single container image that can receive Internet traffic directly on ports 80 and 443, route requests through an embedded Caddy runtime, expose a management UI, and coordinate Docker discovery plus Azure DNS and network state.
 
+Published image: `docker.io/pczhao1210/caddy-reverse-proxy:latest`  
+Current digest: `sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e03030aa94c52`
+
 ## MVP scope
 
 - Single gateway container image.
@@ -34,7 +37,7 @@ Start the VM profile directly from the repository:
 ./start.sh start
 ```
 
-The script builds the image when it is missing and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state.
+The script pulls `pczhao1210/caddy-reverse-proxy:latest` when it is missing and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state.
 
 Open `http://127.0.0.1:8080`, sign in with that token, then configure routes and certificates in the Console. To request `*.example.com`, open **Network → Certificates**, add `*.example.com` and `example.com` as subjects, select Azure DNS, and provide the Azure authentication settings. The apex subject is separate because a wildcard does not cover `example.com` itself.
 
@@ -53,9 +56,9 @@ Other lifecycle commands accept either form, such as `build` or `--build`:
 ./start.sh restore
 ```
 
-`push` uses the username reported by the current Docker Hub login; set `PUSH_IMAGE=<organization>/caddy-reverse-proxy:tag` to override it. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image, network, and path overrides.
+`build` and `push` default to `pczhao1210/caddy-reverse-proxy:latest`; set `IMAGE` or `PUSH_IMAGE` to publish another repository or tag. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image, network, and path overrides.
 
-For ACI, use the Deploy to Azure button above. The template creates the VNet, ACI, Standard Load Balancer, NAT Gateway, Azure Files persistence, and managed identities. Only a published image and the admin token are required. Supplying `dnsZones` during deployment also grants both the control-plane UAMI and Caddy's system identity `DNS Zone Contributor`; other certificate settings can be entered later in the Console.
+For ACI, use the Deploy to Azure button above. The template creates the VNet, ACI, Standard Load Balancer, NAT Gateway, Azure Files persistence, and managed identities. The published image is preconfigured, so only the admin token is required. Supplying `dnsZones` during deployment also grants both the control-plane UAMI and Caddy's system identity `DNS Zone Contributor`; other certificate settings can be entered later in the Console.
 
 ## Repository layout
 

@@ -62,7 +62,7 @@ docker run -d --name gateway \
 	-v "$HOME/docker_files/caddy-reverse-proxy:/data" \
 	-v /var/run/docker.sock:/var/run/docker.sock:ro \
 	--env-file .env \
-	caddy-reverse-proxy:latest
+	pczhao1210/caddy-reverse-proxy:latest
 
 docker network connect proxy-net app-on-bridge
 ```
@@ -111,7 +111,7 @@ Host 网络模式可以代理上游，但权衡不同：
 | Target | Purpose |
 |---|---|
 | `make test` | 在 Go 工具链容器中运行测试。 |
-| `make docker-build` | 构建 `IMAGE`，默认 `caddy-reverse-proxy:latest`。 |
+| `make docker-build` | 构建 `IMAGE`，默认 `pczhao1210/caddy-reverse-proxy:latest`。 |
 | `make docker-push` | 检查 Docker daemon/登录状态后推送 `IMAGE`。 |
 | `make docker-run` | 使用 `ENV_FILE` 在 Docker bridge 网络上本地运行镜像，默认 `.env`。 |
 | `make compose-up` | 启动 VM 示例栈。 |
@@ -125,12 +125,14 @@ Host 网络模式可以代理上游，但权衡不同：
 | `make test-e2e` | 使用 VM 示例栈测试 Caddy 路由。 |
 | `make compose-down` | 停止 VM 示例栈。 |
 
-推送到镜像仓库时可覆盖镜像名：
+默认构建与推送目标为已发布的 Docker Hub 仓库：
 
 ```sh
-make docker-build IMAGE=registry.example.com/team/caddy-reverse-proxy:latest
-make docker-push IMAGE=registry.example.com/team/caddy-reverse-proxy:latest
+make docker-build
+make docker-push
 ```
+
+发布到其他仓库或不可变 tag 时覆盖 `IMAGE`。
 
 ## 核心运行时变量
 

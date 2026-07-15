@@ -114,6 +114,54 @@ func TestRenderCertificatePolicyLetsEncryptStaging(t *testing.T) {
 	}
 }
 
+func TestRenderAzureDNSWildcardCertificate(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+		Certificate: model.CertificateConfig{
+			Issuer: "letsencrypt", Subjects: []string{"*.example.com", "example.com"},
+			DNSChallenge: model.DNSChallengeConfig{Provider: "azure", Azure: model.AzureDNSChallengeConfig{
+				SubscriptionID: "subscription", ResourceGroup: "dns-rg", Authentication: "managedidentity",
+			}},
+		},
+	}})
+	data, err := renderer.Render(nil)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	tls := config["apps"].(map[string]any)["tls"].(map[string]any)
+	automate := tls["certificates"].(map[string]any)["automate"].([]any)
+	if len(automate) != 2 || automate[0] != "*.example.com" || automate[1] != "example.com" {
+		t.Fatalf("certificates.automate = %#v", automate)
+	}
+	policies := tls["automation"].(map[string]any)["policies"].([]any)
+	if len(policies) != 2 {
+		t.Fatalf("automation policies = %#v, want DNS policy and fallback", policies)
+	}
+	dnsPolicy := policies[0].(map[string]any)
+	issuer := dnsPolicy["issuers"].([]any)[0].(map[string]any)
+	provider := issuer["challenges"].(map[string]any)["dns"].(map[string]any)["provider"].(map[string]any)
+	if provider["name"] != "azure" || provider["subscription_id"] != "subscription" || provider["resource_group_name"] != "dns-rg" {
+		t.Fatalf("Azure DNS provider = %#v", provider)
+	}
+	if _, ok := provider["client_secret"]; ok {
+		t.Fatalf("managed identity provider contains client secret: %#v", provider)
+	}
+}
+
+func TestRenderAzureDNSAppRegistrationCredentials(t *testing.T) {
+	provider := azureDNSProvider(model.AzureDNSChallengeConfig{
+		SubscriptionID: "subscription", ResourceGroup: "dns-rg", Authentication: "appregistration",
+		TenantID: "tenant", ClientID: "client", ClientSecret: "secret",
+	})
+	if provider["tenant_id"] != "tenant" || provider["client_id"] != "client" || provider["client_secret"] != "secret" {
+		t.Fatalf("Azure DNS provider = %#v", provider)
+	}
+}
+
 func TestRenderProtectedRouteWithCustomHeaderPolicy(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{
 		Auth: model.AuthConfig{ProtectedRoutes: model.ProtectedRouteConfig{AdditionalHeaderName: "X-Gateway-Token", AdditionalHeaderValue: "edge-secret"}},
@@ -175,5 +223,126 @@ func TestRenderRejectsUnsupportedUpstreamScheme(t *testing.T) {
 	}})
 	if err == nil {
 		t.Fatal("Render() error = nil, want unsupported scheme error")
+	}
+}
+
+func TestRenderInternalRouteRestrictsRemoteIP(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{
+		Gateway: model.GatewayConfig{
+			HTTPListen:           ":80",
+			HTTPSListen:          ":443",
+			CaddyAdminEndpoint:   "http://127.0.0.1:2019",
+			CaddyDataDir:         "/data/caddy",
+			InternalSourceRanges: []string{"10.0.0.0/8"},
+		},
+	})
+
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "internal", Host: "internal.example.com", Exposure: "internal", Enabled: true,
+		Upstreams: []model.UpstreamTarget{{Name: "svc", URL: "http://svc:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	match := routes[0].(map[string]any)["match"].([]any)[0].(map[string]any)
+	remoteIP := match["remote_ip"].(map[string]any)
+	ranges := remoteIP["ranges"].([]any)
+	if len(ranges) != 1 || ranges[0] != "10.0.0.0/8" {
+		t.Fatalf("remote_ip ranges = %#v", ranges)
+	}
+}
+
+func TestRenderOrdersLongerPathPrefixesFirst(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+	routes := []model.RouteConfig{
+		{ID: "root", Host: "app.example.com", Enabled: true, Public: true, Upstreams: []model.UpstreamTarget{{Name: "root", URL: "http://root:8080"}}},
+		{ID: "api", Host: "app.example.com", PathPrefix: "/api", Enabled: true, Public: true, Upstreams: []model.UpstreamTarget{{Name: "api", URL: "http://api:8080"}}},
+		{ID: "admin", Host: "app.example.com", PathPrefix: "/api/admin/", Enabled: true, Public: true, Upstreams: []model.UpstreamTarget{{Name: "admin", URL: "http://admin:8080"}}},
+	}
+
+	data, err := renderer.Render(routes)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	rendered := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	firstMatch := rendered[0].(map[string]any)["match"].([]any)[0].(map[string]any)
+	paths := firstMatch["path"].([]any)
+	if len(paths) != 2 || paths[0] != "/api/admin" || paths[1] != "/api/admin/*" {
+		t.Fatalf("first route paths = %#v", paths)
+	}
+	secondMatch := rendered[1].(map[string]any)["match"].([]any)[0].(map[string]any)
+	if secondMatch["path"].([]any)[0] != "/api" {
+		t.Fatalf("second route match = %#v", secondMatch)
+	}
+}
+
+func TestRenderOrdersExactHostBeforeWildcard(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+	data, err := renderer.Render([]model.RouteConfig{
+		{ID: "wildcard", Host: "*.example.com", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://default:8080"}}},
+		{ID: "exact", Host: "api.example.com", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://api:8080"}}},
+	})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	match := routes[0].(map[string]any)["match"].([]any)[0].(map[string]any)
+	if match["host"].([]any)[0] != "api.example.com" {
+		t.Fatalf("first route match = %#v, want exact host", match)
+	}
+}
+
+func TestRenderRejectsMixedUpstreamSchemes(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+	_, err := renderer.Render([]model.RouteConfig{{
+		ID: "mixed", Host: "app.example.com", Enabled: true, Public: true,
+		Upstreams: []model.UpstreamTarget{{Name: "http", URL: "http://one:8080"}, {Name: "https", URL: "https://two:8443"}},
+	}})
+	if err == nil {
+		t.Fatal("Render() error = nil, want mixed upstream scheme error")
+	}
+}
+
+func TestRenderProtectedRouteStripsGatewayCredentials(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{
+		Auth:    model.AuthConfig{AdminToken: "secret", ProtectedRoutes: model.ProtectedRouteConfig{AllowBearerToken: true, AllowAdminTokenHeader: true}},
+		Gateway: model.GatewayConfig{HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy"},
+	})
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "protected", Host: "app.example.com", Exposure: "protected", Enabled: true, Public: true, Protected: true,
+		Upstreams: []model.UpstreamTarget{{Name: "app", URL: "http://app:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	handler := routes[0].(map[string]any)["handle"].([]any)[0].(map[string]any)
+	requestHeaders := handler["headers"].(map[string]any)["request"].(map[string]any)
+	deleted := requestHeaders["delete"].([]any)
+	if len(deleted) != 2 || deleted[0] != "Authorization" || deleted[1] != "X-Admin-Token" {
+		t.Fatalf("deleted request headers = %#v", deleted)
 	}
 }

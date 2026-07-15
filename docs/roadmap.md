@@ -18,24 +18,28 @@ This document tracks what is currently implemented and what still needs to be co
 - Cleanup for stale gateway-managed Azure DNS A records.
 - VM NSG inbound 80/443 rule reconciliation through `DefaultAzureCredential`.
 - Cleanup for the gateway-managed VM NSG inbound rule when no public routes remain.
-- ACI profile shape for explicit routes.
+- Private VNet ACI profile behind Standard Public Load Balancer with NAT Gateway egress and Azure Files persistence.
 - Authenticated management API through an admin token.
 - Multi-token management API allowlist for small-team operation.
 - Configurable protected-route policy with bearer token, `X-Admin-Token`, and optional custom header matching.
-- Runtime certificate issuer UI/API controls for default Caddy automation, Let's Encrypt, ZeroSSL, ACME email, staging mode, custom CA directory, and refresh-triggered Caddy reloads.
+- Atomically persisted certificate UI/API controls with explicit subjects, Azure DNS-01 wildcard issuance, Managed Identity/App Registration authentication, secret masking, and refresh-triggered Caddy reloads.
 - Route and upstream health checks with route-level error reporting in API/UI status.
 - Audit log for route changes, manual Docker binds, reconcile runs, DNS changes, and NSG changes.
 - NSG rule priority and source-prefix policy controls for the managed VM inbound rule.
 - Docker socket proxy deployment option for VM profile discovery.
 - E2E routing test script for Caddy plus a sample Docker service.
-- ACI persistent storage guidance for Caddy data and route/audit state.
-- Starter VM Docker Compose and ACI Bicep assets.
+- Supervised Caddy lifecycle with `/livez` and `/readyz` orchestration probes.
+- Serialized reconciliation, last-known-good Docker discovery routes, and atomic route file replacement.
+- Internal-route CIDR enforcement, deterministic path priority, homogeneous upstream transports, and gateway credential stripping.
+- Multi-zone Azure DNS reconciliation with an explicit ingress public IP.
+- Single-container VM lifecycle script and complete ACI + Standard Load Balancer Bicep/Deploy to Azure assets.
 
 ## Further Hardening
 
 - Entra ID/OIDC should replace token-based management auth for production multi-user governance.
 - Health checks currently use simple HTTP status probes; future work can add per-route intervals, thresholds, and active/passive policy controls.
 - The E2E test is a local Docker script and should be promoted into CI once the target runner can expose ports 80 and 8080.
+- Active-active instances require an external route store with concurrency control; multiple writers cannot share `routes.json` safely.
 
 ## Current UI Status Meanings
 

@@ -1,0 +1,56 @@
+services:
+  platform:
+    image: ${IMAGE:-pczhao1210/caddy-reverse-proxy:latest}
+    restart: unless-stopped
+    depends_on:
+      - docker-socket-proxy
+    env_file:
+      - ${GATEWAY_ENV_FILE:-../../.env}
+    environment:
+      GATEWAY_PROFILE: vm
+      GATEWAY_DOCKER_ENABLED: "true"
+      GATEWAY_DOCKER_ENDPOINT: http://docker-socket-proxy:2375
+    ports:
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:${GATEWAY_MANAGEMENT_PORT:-8080}:8080"
+    volumes:
+      - ../../config:/config:ro
+      - gateway-data:/data
+    networks:
+      - gateway-control
+      - gateway-workloads
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      INFO: 1
+      NETWORKS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - gateway-control
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  gateway-control:
+    internal: true
+  gateway-workloads:
+    name: ${GATEWAY_DOCKER_NETWORK:-gateway-workloads}
+    external: true
+
+volumes:
+  gateway-data:
+    name: ${GATEWAY_DATA_VOLUME:-caddy-reverse-proxy-data}

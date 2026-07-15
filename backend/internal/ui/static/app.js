@@ -55,6 +55,14 @@ const messages = {
     'forms.certificateEmail': 'ACME account email',
     'forms.certificateStaging': 'Use staging CA',
     'forms.caDirectory': 'CA directory URL',
+    'forms.certificateSubjects': 'Certificate subjects',
+    'forms.dnsProvider': 'DNS challenge provider',
+    'forms.azureSubscriptionId': 'Azure subscription ID',
+    'forms.azureResourceGroup': 'DNS zone resource group',
+    'forms.azureAuthentication': 'Azure authentication',
+    'forms.azureTenantId': 'Tenant ID',
+    'forms.azureClientId': 'Client ID',
+    'forms.azureClientSecret': 'Client secret',
     'auth.signIn': 'Sign in',
     'auth.adminToken': 'Admin token',
     'status.active': 'Active',
@@ -82,7 +90,12 @@ const messages = {
     'certificate.letsencrypt': "Let's Encrypt",
     'certificate.zerossl': 'ZeroSSL',
     'certificate.custom': 'Custom ACME',
-    'certificate.runtimeNote': 'Certificate changes apply immediately to the running gateway and are not written back to .env.',
+    'certificate.dnsNone': 'None (HTTP-01 / TLS-ALPN-01)',
+    'certificate.dnsAzure': 'Azure DNS',
+    'certificate.managedIdentity': 'Managed Identity',
+    'certificate.appRegistration': 'App Registration',
+    'certificate.secretConfigured': 'Configured',
+    'certificate.persistedNote': 'Saved certificate settings apply immediately and survive container restarts.',
     'details.started': 'Started',
     'details.finished': 'Finished',
     'details.explicit': 'Explicit',
@@ -116,6 +129,8 @@ const messages = {
     'details.certificateEmail': 'Certificate Email',
     'details.certificateStaging': 'Certificate Staging',
     'details.caDirectory': 'CA Directory',
+    'details.certificateSubjects': 'Certificate Subjects',
+    'details.dnsProvider': 'DNS Challenge',
     'details.healthEnabled': 'Health Checks',
     'details.healthTimeout': 'Health Timeout',
     'details.auditEnabled': 'Audit Log',
@@ -209,6 +224,14 @@ const messages = {
     'forms.certificateEmail': 'ACME 账户邮箱',
     'forms.certificateStaging': '使用测试 CA',
     'forms.caDirectory': 'CA Directory URL',
+    'forms.certificateSubjects': '证书域名',
+    'forms.dnsProvider': 'DNS Challenge 提供商',
+    'forms.azureSubscriptionId': 'Azure 订阅 ID',
+    'forms.azureResourceGroup': 'DNS Zone 资源组',
+    'forms.azureAuthentication': 'Azure 认证方式',
+    'forms.azureTenantId': '租户 ID',
+    'forms.azureClientId': '客户端 ID',
+    'forms.azureClientSecret': '客户端密钥',
     'auth.signIn': '登录',
     'auth.adminToken': '管理员令牌',
     'status.active': '活动',
@@ -236,7 +259,12 @@ const messages = {
     'certificate.letsencrypt': "Let's Encrypt",
     'certificate.zerossl': 'ZeroSSL',
     'certificate.custom': '自定义 ACME',
-    'certificate.runtimeNote': '证书配置会立即应用到当前运行的网关，但不会回写 .env。',
+    'certificate.dnsNone': '无（HTTP-01 / TLS-ALPN-01）',
+    'certificate.dnsAzure': 'Azure DNS',
+    'certificate.managedIdentity': '托管身份',
+    'certificate.appRegistration': 'App Registration',
+    'certificate.secretConfigured': '已配置',
+    'certificate.persistedNote': '证书设置保存后立即生效，并在容器重启后保留。',
     'details.started': '开始时间',
     'details.finished': '完成时间',
     'details.explicit': '显式路由',
@@ -270,6 +298,8 @@ const messages = {
     'details.certificateEmail': '证书邮箱',
     'details.certificateStaging': '证书测试模式',
     'details.caDirectory': 'CA Directory',
+    'details.certificateSubjects': '证书域名',
+    'details.dnsProvider': 'DNS Challenge',
     'details.healthEnabled': '健康检查',
     'details.healthTimeout': '健康超时',
     'details.auditEnabled': '审计日志',
@@ -466,7 +496,19 @@ document.addEventListener('alpine:init', () => {
         issuer: this.certificateForm.issuer,
         email: this.certificateForm.email,
         staging: this.certificateForm.staging,
-        caDirectory: this.certificateForm.caDirectory
+        caDirectory: this.certificateForm.caDirectory,
+        subjects: this.certificateForm.subjectsText.split(/[\s,]+/).filter(Boolean),
+        dnsChallenge: {
+          provider: this.certificateForm.dnsProvider,
+          azure: {
+            subscriptionId: this.certificateForm.azureSubscriptionId,
+            resourceGroup: this.certificateForm.azureResourceGroup,
+            authentication: this.certificateForm.azureAuthentication,
+            tenantId: this.certificateForm.azureTenantId,
+            clientId: this.certificateForm.azureClientId,
+            clientSecret: this.certificateForm.azureClientSecret
+          }
+        }
       };
       await this.runAction(async () => {
         const result = await this.api('/api/certificate', { method: 'PUT', body: JSON.stringify(payload) });
@@ -511,7 +553,27 @@ document.addEventListener('alpine:init', () => {
     },
 
     setCertificateForm(certificate) {
-      this.certificateForm = { ...emptyCertificateForm(), ...(certificate || {}) };
+      const source = certificate || {};
+      const dns = source.dnsChallenge || {};
+      const azure = dns.azure || {};
+      this.certificateForm = {
+        ...emptyCertificateForm(),
+        issuer: source.issuer || 'letsencrypt',
+        email: source.email || '',
+        staging: Boolean(source.staging),
+        caDirectory: source.caDirectory || '',
+        subjectsText: (source.subjects || []).join('\n'),
+        dnsProvider: dns.provider || '',
+        azureSubscriptionId: azure.subscriptionId || '',
+        azureResourceGroup: azure.resourceGroup || '',
+        azureAuthentication: azure.authentication || 'managedidentity',
+        azureTenantId: azure.tenantId || '',
+        azureClientId: azure.clientId || '',
+        azureClientSecret: '',
+        clientSecretConfigured: Boolean(azure.clientSecretConfigured),
+        runtimeOnly: Boolean(source.runtimeOnly),
+        persisted: Boolean(source.persisted)
+      };
     },
 
     ensureBindForm(container) {
@@ -648,6 +710,8 @@ document.addEventListener('alpine:init', () => {
         [this.t('details.certificateEmail')]: this.yesNo(certificate.emailConfigured),
         [this.t('details.certificateStaging')]: this.yesNo(certificate.staging),
         [this.t('details.caDirectory')]: certificate.caDirectory || '-',
+        [this.t('details.certificateSubjects')]: this.listText(certificate.subjects),
+        [this.t('details.dnsProvider')]: certificate.dnsProvider || this.t('status.none'),
         [this.t('details.healthEnabled')]: this.yesNo(health.enabled),
         [this.t('details.healthTimeout')]: health.timeoutSeconds ? health.timeoutSeconds + 's' : '-',
         [this.t('details.auditEnabled')]: this.yesNo(audit.enabled),
@@ -750,5 +814,10 @@ function emptyRouteForm() {
 }
 
 function emptyCertificateForm() {
-  return { issuer: 'letsencrypt', email: '', staging: false, caDirectory: '', runtimeOnly: true };
+  return {
+    issuer: 'letsencrypt', email: '', staging: false, caDirectory: '', subjectsText: '', dnsProvider: '',
+    azureSubscriptionId: '', azureResourceGroup: '', azureAuthentication: 'managedidentity',
+    azureTenantId: '', azureClientId: '', azureClientSecret: '', clientSecretConfigured: false,
+    runtimeOnly: true, persisted: false
+  };
 }

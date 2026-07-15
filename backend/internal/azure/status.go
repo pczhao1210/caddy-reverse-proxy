@@ -35,23 +35,26 @@ func StatusForConfig(cfg model.AppConfig) Status {
 	if cfg.Azure.Enabled && cfg.Azure.SubscriptionID == "" {
 		status.MissingSettings = append(status.MissingSettings, "subscriptionId")
 	}
-	if cfg.Azure.Enabled && cfg.Azure.ResourceGroup == "" {
-		status.MissingSettings = append(status.MissingSettings, "resourceGroup")
+	if cfg.Azure.Enabled && cfg.Azure.ManageDNS && len(configuredDNSZones(cfg.Azure)) == 0 {
+		status.MissingSettings = append(status.MissingSettings, "dnsZones")
 	}
-	if cfg.Azure.Enabled && cfg.Azure.ManageDNS && cfg.Azure.DNSZoneName == "" {
-		status.MissingSettings = append(status.MissingSettings, "dnsZoneName")
+	if cfg.Azure.Enabled && cfg.Azure.ManageDNS && cfg.Azure.PublicIPAddress == "" {
+		status.MissingSettings = append(status.MissingSettings, "publicIpAddress")
 	}
 	if cfg.Azure.Enabled && cfg.Profile == model.ProfileVM && cfg.Azure.ManageNSG && cfg.Azure.NetworkSecurityGroupName == "" {
 		status.MissingSettings = append(status.MissingSettings, "networkSecurityGroupName")
 	}
+	if cfg.Azure.Enabled && cfg.Profile == model.ProfileVM && cfg.Azure.ManageNSG && cfg.Azure.ResourceGroup == "" {
+		status.MissingSettings = append(status.MissingSettings, "resourceGroup")
+	}
 	status.Configured = cfg.Azure.Enabled && len(status.MissingSettings) == 0
 	if !cfg.Azure.Enabled {
 		status.Warnings = append(status.Warnings, "Azure managers are disabled")
-	}
-	if !status.Configured {
-		status.NextActions = []string{"Enable Azure integration", "Assign managed identity roles", "Set subscription, resource group, DNS zone, and NSG names"}
+		status.NextActions = []string{"Enable Azure integration", "Assign the required managed identity roles"}
+	} else if !status.Configured {
+		status.NextActions = []string{"Set the missing Azure settings, including DNS zones and the ingress public IP", "Assign the required managed identity roles"}
 	} else {
-		status.NextActions = []string{"Run Apply to reconcile DNS records and NSG rules"}
+		status.NextActions = []string{"Run Apply to reconcile the enabled Azure resources"}
 	}
 	return status
 }

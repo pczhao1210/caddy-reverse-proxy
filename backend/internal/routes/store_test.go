@@ -52,6 +52,39 @@ func TestAddRejectsUnsupportedUpstreamScheme(t *testing.T) {
 	}
 }
 
+func TestAddAllowsLeftMostWildcardHost(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	route, err := store.Add(model.RouteConfig{Host: "*.Example.COM.", Upstreams: []model.UpstreamTarget{{URL: "http://default:8080"}}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if route.Host != "*.example.com" {
+		t.Fatalf("Host = %q, want normalized wildcard", route.Host)
+	}
+}
+
+func TestAddRejectsInvalidHosts(t *testing.T) {
+	for _, host := range []string{"api.*.example.com", "https://example.com", "example.com:443", "localhost", "-bad.example.com"} {
+		t.Run(host, func(t *testing.T) {
+			store := NewStore("")
+			if _, err := store.Add(model.RouteConfig{Host: host, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}}); err == nil {
+				t.Fatalf("Add(%q) error = nil, want host validation error", host)
+			}
+		})
+	}
+}
+
+func TestAddNormalizesUpstreamURL(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	route, err := store.Add(model.RouteConfig{Host: "app.localhost", Upstreams: []model.UpstreamTarget{{Name: "svc", URL: " http://svc:8080 "}}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if got := route.Upstreams[0].URL; got != "http://svc:8080" {
+		t.Fatalf("upstream URL = %q, want trimmed URL", got)
+	}
+}
+
 func TestLoadPreservesDisabledRoute(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.json")
 	data := []byte(`{"routes":[{"id":"disabled","host":"disabled.localhost","enabled":false,"upstreams":[{"name":"svc","url":"http://svc:8080"}]}]}`)
@@ -114,5 +147,67 @@ func TestSetRuntimeStatusUpdatesLastErrorWithoutPersisting(t *testing.T) {
 	store.SetRuntimeStatus([]model.RouteHealthStatus{{RouteID: route.ID, Host: route.Host, Healthy: true}})
 	if got := store.List()[0].LastError; got != "" {
 		t.Fatalf("LastError after healthy status = %q", got)
+	}
+}
+
+func TestSaveUsesPrivatePermissionsAndRemovesTemporaryFile(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "routes.json")
+	store := NewStore(path)
+	if _, err := store.Add(model.RouteConfig{Host: "app.localhost", Upstreams: []model.UpstreamTarget{{Name: "svc", URL: "http://svc:8080"}}}); err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+	if permission := info.Mode().Perm(); permission != 0o600 {
+		t.Fatalf("routes file permission = %o, want 600", permission)
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		t.Fatalf("ReadDir() error = %v", err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".routes.json.tmp-") {
+			t.Fatalf("temporary route file was not removed: %s", entry.Name())
+		}
+	}
+}
+
+func TestAddNormalizesAndValidatesPathPrefix(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	route, err := store.Add(model.RouteConfig{
+		Host: "app.localhost", PathPrefix: " /api/ ",
+		Upstreams: []model.UpstreamTarget{{Name: "svc", URL: "http://svc:8080"}},
+	})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if route.PathPrefix != "/api" {
+		t.Fatalf("PathPrefix = %q, want /api", route.PathPrefix)
+	}
+	if _, err := store.Add(model.RouteConfig{
+		Host: "other.localhost", PathPrefix: "api/*",
+		Upstreams: []model.UpstreamTarget{{Name: "svc", URL: "http://svc:8080"}},
+	}); err == nil {
+		t.Fatal("Add() error = nil, want invalid pathPrefix error")
+	}
+}
+
+func TestReplaceRejectsDuplicateHostAndPath(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	first, err := store.Add(model.RouteConfig{Host: "app.localhost", PathPrefix: "/api", Upstreams: []model.UpstreamTarget{{Name: "one", URL: "http://one:8080"}}})
+	if err != nil {
+		t.Fatalf("first Add() error = %v", err)
+	}
+	second, err := store.Add(model.RouteConfig{Host: "app.localhost", PathPrefix: "/admin", Upstreams: []model.UpstreamTarget{{Name: "two", URL: "http://two:8080"}}})
+	if err != nil {
+		t.Fatalf("second Add() error = %v", err)
+	}
+	second.PathPrefix = first.PathPrefix
+	if _, err := store.Replace(second); err == nil {
+		t.Fatal("Replace() error = nil, want duplicate host and path error")
 	}
 }

@@ -29,27 +29,40 @@ type Reconciler interface {
 	Last() model.ReconcileResult
 }
 
+type RuntimeStatus interface {
+	Ready() bool
+	LastError() error
+}
+
 type certificateUpdater interface {
 	UpdateCertificate(model.CertificateConfig)
 }
 
+type CertificateStore interface {
+	Save(model.CertificateConfig) error
+}
+
 type Options struct {
-	Config     model.AppConfig
-	Store      *routes.Store
-	Discoverer Discoverer
-	Reconciler Reconciler
-	AuditLog   AuditLog
-	Logger     *slog.Logger
+	Config           model.AppConfig
+	Store            *routes.Store
+	Discoverer       Discoverer
+	Reconciler       Reconciler
+	Runtime          RuntimeStatus
+	AuditLog         AuditLog
+	CertificateStore CertificateStore
+	Logger           *slog.Logger
 }
 
 type Server struct {
-	mu         sync.RWMutex
-	cfg        model.AppConfig
-	store      *routes.Store
-	discoverer Discoverer
-	reconciler Reconciler
-	auditLog   AuditLog
-	logger     *slog.Logger
+	mu               sync.RWMutex
+	cfg              model.AppConfig
+	store            *routes.Store
+	discoverer       Discoverer
+	reconciler       Reconciler
+	runtime          RuntimeStatus
+	auditLog         AuditLog
+	certificateStore CertificateStore
+	logger           *slog.Logger
 }
 
 type AuditLog interface {
@@ -77,12 +90,14 @@ type bindContainerRequest struct {
 }
 
 func NewServer(options Options) *Server {
-	return &Server{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, reconciler: options.Reconciler, auditLog: options.AuditLog, logger: options.Logger}
+	return &Server{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, reconciler: options.Reconciler, runtime: options.Runtime, auditLog: options.AuditLog, certificateStore: options.CertificateStore, logger: options.Logger}
 }
 
 func (s *Server) Handler() http.Handler {
 	root := http.NewServeMux()
-	root.HandleFunc("/healthz", s.handleHealth)
+	root.HandleFunc("/healthz", s.handleReady)
+	root.HandleFunc("/livez", s.handleLive)
+	root.HandleFunc("/readyz", s.handleReady)
 
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/api/status", s.handleStatus)
@@ -101,8 +116,35 @@ func (s *Server) Handler() http.Handler {
 	return root
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "profile": s.configSnapshot().Profile})
+func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "alive", "profile": s.configSnapshot().Profile})
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	response := map[string]any{"status": "not_ready", "profile": s.configSnapshot().Profile, "caddyReady": false}
+	if s.runtime == nil {
+		response["error"] = "caddy runtime status is unavailable"
+		writeJSON(w, http.StatusServiceUnavailable, response)
+		return
+	}
+	if !s.runtime.Ready() {
+		if err := s.runtime.LastError(); err != nil {
+			response["error"] = err.Error()
+		}
+		writeJSON(w, http.StatusServiceUnavailable, response)
+		return
+	}
+	response["status"] = "ready"
+	response["caddyReady"] = true
+	writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
@@ -526,13 +568,25 @@ func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		current := s.configSnapshot().Gateway.Certificate
+		if cert.DNSChallenge.Provider == "azure" && strings.EqualFold(cert.DNSChallenge.Azure.Authentication, "appRegistration") && cert.DNSChallenge.Azure.ClientSecret == "" {
+			cert.DNSChallenge.Azure.ClientSecret = current.DNSChallenge.Azure.ClientSecret
+		}
 		cert = appconfig.NormalizeCertificateConfig(cert)
 		if err := appconfig.ValidateCertificateConfig(cert); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		if s.certificateStore == nil {
+			writeError(w, http.StatusInternalServerError, "certificate persistence is unavailable")
+			return
+		}
+		if err := s.certificateStore.Save(cert); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 		s.updateCertificate(cert)
-		s.audit("certificate.update", map[string]any{"issuer": cert.Issuer, "emailConfigured": cert.Email != "", "staging": cert.Staging, "customCA": cert.CADirectory != ""})
+		s.audit("certificate.update", map[string]any{"issuer": cert.Issuer, "emailConfigured": cert.Email != "", "staging": cert.Staging, "customCA": cert.CADirectory != "", "subjects": len(cert.Subjects), "dnsProvider": cert.DNSChallenge.Provider})
 		writeJSON(w, http.StatusOK, map[string]any{"certificate": certificateConfigResponse(cert), "reconcile": s.reconciler.Sync(r.Context())})
 	default:
 		methodNotAllowed(w)
@@ -556,6 +610,9 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	safe := s.configSnapshot()
 	safe.Auth.AdminToken = ""
+	safe.Auth.AdminTokens = nil
+	safe.Auth.ProtectedRoutes.AdditionalHeaderValue = ""
+	safe.Gateway.Certificate.DNSChallenge.Azure.ClientSecret = ""
 	writeJSON(w, http.StatusOK, safe)
 }
 
@@ -613,18 +670,35 @@ func certificateStatus(cfg model.AppConfig) map[string]any {
 		"emailConfigured": cert.Email != "",
 		"staging":         cert.Staging,
 		"caDirectory":     cert.CADirectory,
+		"subjects":        cert.Subjects,
+		"dnsProvider":     cert.DNSChallenge.Provider,
+		"persisted":       cfg.Gateway.CertificateFile != "",
 	}
 }
 
 func certificateConfigResponse(cert model.CertificateConfig) map[string]any {
 	cert = appconfig.NormalizeCertificateConfig(cert)
+	azure := cert.DNSChallenge.Azure
 	return map[string]any{
 		"issuer":          cert.Issuer,
 		"email":           cert.Email,
 		"emailConfigured": cert.Email != "",
 		"staging":         cert.Staging,
 		"caDirectory":     cert.CADirectory,
-		"runtimeOnly":     true,
+		"subjects":        cert.Subjects,
+		"dnsChallenge": map[string]any{
+			"provider": cert.DNSChallenge.Provider,
+			"azure": map[string]any{
+				"subscriptionId":         azure.SubscriptionID,
+				"resourceGroup":          azure.ResourceGroup,
+				"authentication":         azure.Authentication,
+				"tenantId":               azure.TenantID,
+				"clientId":               azure.ClientID,
+				"clientSecretConfigured": azure.ClientSecret != "",
+			},
+		},
+		"runtimeOnly": false,
+		"persisted":   true,
 	}
 }
 

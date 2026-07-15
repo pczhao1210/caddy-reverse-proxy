@@ -3,7 +3,9 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/aidockerfarm/gateway/internal/model"
 	"github.com/aidockerfarm/gateway/internal/routes"
@@ -53,6 +55,41 @@ type failingDiscoverer struct{}
 
 func (failingDiscoverer) Discover(context.Context) ([]model.ContainerService, []model.RouteConfig, error) {
 	return nil, nil, errors.New("docker unavailable")
+}
+
+type intermittentDiscoverer struct {
+	calls int
+}
+
+func (d *intermittentDiscoverer) Discover(context.Context) ([]model.ContainerService, []model.RouteConfig, error) {
+	d.calls++
+	if d.calls > 1 {
+		return nil, nil, errors.New("docker unavailable")
+	}
+	return nil, []model.RouteConfig{{ID: "discovered", Host: "discovered.localhost", Enabled: true, Public: true, Upstreams: []model.UpstreamTarget{{Name: "app", URL: "http://app:8080"}}}}, nil
+}
+
+type serialLoader struct {
+	entered chan struct{}
+	release chan struct{}
+	mu      sync.Mutex
+	active  int
+	max     int
+}
+
+func (l *serialLoader) Load(context.Context, []byte) error {
+	l.mu.Lock()
+	l.active++
+	if l.active > l.max {
+		l.max = l.active
+	}
+	l.mu.Unlock()
+	l.entered <- struct{}{}
+	<-l.release
+	l.mu.Lock()
+	l.active--
+	l.mu.Unlock()
+	return nil
 }
 
 func TestSyncReturnsFinalizedResult(t *testing.T) {
@@ -146,5 +183,62 @@ func TestSyncAppliesExplicitRoutesWhenDiscoveryFails(t *testing.T) {
 	}
 	if len(renderer.routes) != 1 || renderer.routes[0].ID != created.ID {
 		t.Fatalf("rendered routes = %#v, want explicit route %q", renderer.routes, created.ID)
+	}
+}
+
+func TestSyncKeepsLastSuccessfulDiscoveredRoutes(t *testing.T) {
+	discoverer := &intermittentDiscoverer{}
+	renderer := &captureRenderer{}
+	reconciler := New(Options{
+		Config:     model.AppConfig{},
+		Store:      routes.NewStore(""),
+		Discoverer: discoverer,
+		Renderer:   renderer,
+		Loader:     testLoader{},
+	})
+
+	first := reconciler.Sync(context.Background())
+	second := reconciler.Sync(context.Background())
+	if first.DiscoveredRoutes != 1 || second.DiscoveredRoutes != 1 {
+		t.Fatalf("discovered routes = first %d second %d, want 1 and 1", first.DiscoveredRoutes, second.DiscoveredRoutes)
+	}
+	if len(renderer.routes) != 1 || renderer.routes[0].ID != "discovered" {
+		t.Fatalf("rendered routes after discovery failure = %#v", renderer.routes)
+	}
+}
+
+func TestSyncSerializesConcurrentLoads(t *testing.T) {
+	loader := &serialLoader{entered: make(chan struct{}, 2), release: make(chan struct{})}
+	reconciler := New(Options{
+		Config:   model.AppConfig{},
+		Store:    routes.NewStore(""),
+		Renderer: testRenderer{},
+		Loader:   loader,
+	})
+
+	done := make(chan struct{}, 2)
+	go func() {
+		reconciler.Sync(context.Background())
+		done <- struct{}{}
+	}()
+	<-loader.entered
+	go func() {
+		reconciler.Sync(context.Background())
+		done <- struct{}{}
+	}()
+
+	select {
+	case <-loader.entered:
+		t.Fatal("second Caddy load started before the first completed")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(loader.release)
+	<-done
+	<-done
+
+	loader.mu.Lock()
+	defer loader.mu.Unlock()
+	if loader.max != 1 {
+		t.Fatalf("maximum concurrent loads = %d, want 1", loader.max)
 	}
 }

@@ -96,3 +96,44 @@ func TestNSGRulePropertiesDefaultsToSharedPublicRule(t *testing.T) {
 		t.Fatalf("SourceAddressPrefix = %#v", properties.SourceAddressPrefix)
 	}
 }
+
+func TestSelectDNSZonePrefersLongestSuffix(t *testing.T) {
+	zones := []model.AzureDNSZoneConfig{
+		{Name: "example.com", ResourceGroup: "root-rg"},
+		{Name: "dev.example.com", ResourceGroup: "dev-rg"},
+		{Name: "other.net", ResourceGroup: "other-rg"},
+	}
+	zone, ok := selectDNSZone("api.dev.example.com", zones)
+	if !ok || zone.Name != "dev.example.com" || zone.ResourceGroup != "dev-rg" {
+		t.Fatalf("selectDNSZone() = %#v, %v", zone, ok)
+	}
+	if _, ok := selectDNSZone("unknown.org", zones); ok {
+		t.Fatal("selectDNSZone() matched host outside configured zones")
+	}
+}
+
+func TestConfiguredDNSZonesSupportsLegacyAndStructuredConfig(t *testing.T) {
+	zones := configuredDNSZones(model.AzureConfig{
+		ResourceGroup: "legacy-rg",
+		DNSZoneName:   "example.com",
+		DNSZones:      []model.AzureDNSZoneConfig{{Name: "other.net", ResourceGroup: "other-rg"}},
+	})
+	if len(zones) != 2 || zones[0].Name != "other.net" || zones[1].Name != "example.com" {
+		t.Fatalf("configuredDNSZones() = %#v", zones)
+	}
+}
+
+func TestPublicIPAddressMustBeExplicit(t *testing.T) {
+	manager := &Manager{cfg: model.AppConfig{Azure: model.AzureConfig{}}}
+	if _, err := manager.publicIPAddress(); err == nil {
+		t.Fatal("publicIPAddress() error = nil, want explicit public IP requirement")
+	}
+	manager.cfg.Azure.PublicIPAddress = "203.0.113.10"
+	if got, err := manager.publicIPAddress(); err != nil || got != "203.0.113.10" {
+		t.Fatalf("publicIPAddress() = %q, %v", got, err)
+	}
+	manager.cfg.Azure.PublicIPAddress = "2001:db8::10"
+	if _, err := manager.publicIPAddress(); err == nil {
+		t.Fatal("publicIPAddress() error = nil for IPv6 address")
+	}
+}

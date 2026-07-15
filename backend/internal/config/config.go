@@ -20,7 +20,14 @@ func Load() (model.AppConfig, error) {
 		}
 	}
 
-	applyEnv(&cfg)
+	if err := applyEnv(&cfg); err != nil {
+		return cfg, err
+	}
+	if certificate, found, err := NewCertificateStore(cfg.Gateway.CertificateFile).Load(); err != nil {
+		return cfg, err
+	} else if found {
+		cfg.Gateway.Certificate = certificate
+	}
 	normalizeConfig(&cfg)
 	if cfg.Profile != model.ProfileVM && cfg.Profile != model.ProfileACI {
 		return cfg, fmt.Errorf("unsupported profile %q", cfg.Profile)
@@ -42,8 +49,19 @@ func Load() (model.AppConfig, error) {
 
 func normalizeConfig(cfg *model.AppConfig) {
 	cfg.Gateway.Certificate = NormalizeCertificateConfig(cfg.Gateway.Certificate)
+	if cfg.Gateway.Certificate.DNSChallenge.Provider == "azure" {
+		azure := &cfg.Gateway.Certificate.DNSChallenge.Azure
+		if azure.SubscriptionID == "" {
+			azure.SubscriptionID = strings.TrimSpace(cfg.Azure.SubscriptionID)
+		}
+		if azure.ResourceGroup == "" {
+			azure.ResourceGroup = strings.TrimSpace(cfg.Azure.ResourceGroup)
+		}
+	}
+	cfg.Gateway.InternalSourceRanges = compactStrings(cfg.Gateway.InternalSourceRanges)
 	cfg.Auth.AdminTokens = compactStrings(cfg.Auth.AdminTokens)
 	cfg.Azure.NSGSourceAddressPrefixes = compactStrings(cfg.Azure.NSGSourceAddressPrefixes)
+	cfg.Azure.DNSZones = normalizeDNSZones(cfg.Azure)
 }
 
 func validateConfig(cfg model.AppConfig) error {
@@ -53,13 +71,60 @@ func validateConfig(cfg model.AppConfig) error {
 	if err := validateCaddyAdminEndpoint(cfg.Gateway.CaddyAdminEndpoint); err != nil {
 		return err
 	}
+	if len(cfg.Gateway.InternalSourceRanges) == 0 {
+		return fmt.Errorf("gateway.internalSourceRanges must contain at least one IP or CIDR range")
+	}
+	for _, source := range cfg.Gateway.InternalSourceRanges {
+		if net.ParseIP(source) == nil {
+			if _, _, err := net.ParseCIDR(source); err != nil {
+				return fmt.Errorf("gateway.internalSourceRanges contains invalid IP or CIDR %q", source)
+			}
+		}
+	}
 	if (cfg.Auth.ProtectedRoutes.AdditionalHeaderName == "") != (cfg.Auth.ProtectedRoutes.AdditionalHeaderValue == "") {
 		return fmt.Errorf("protected route custom header requires both name and value")
 	}
 	if cfg.Azure.NSGPriority != 0 && (cfg.Azure.NSGPriority < 100 || cfg.Azure.NSGPriority > 4096) {
 		return fmt.Errorf("azure nsgPriority must be between 100 and 4096")
 	}
+	if cfg.Azure.Enabled && cfg.Azure.ManageDNS {
+		if len(cfg.Azure.DNSZones) == 0 {
+			return fmt.Errorf("azure dnsZones must contain at least one DNS zone when DNS management is enabled")
+		}
+		for _, zone := range cfg.Azure.DNSZones {
+			if zone.Name == "" || zone.ResourceGroup == "" {
+				return fmt.Errorf("each azure dnsZones entry requires name and resourceGroup")
+			}
+		}
+	}
 	return nil
+}
+
+func normalizeDNSZones(cfg model.AzureConfig) []model.AzureDNSZoneConfig {
+	zones := make([]model.AzureDNSZoneConfig, 0, len(cfg.DNSZones)+1)
+	seen := make(map[string]struct{}, len(cfg.DNSZones)+1)
+	appendZone := func(zone model.AzureDNSZoneConfig) {
+		zone.Name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone.Name)), ".")
+		zone.ResourceGroup = strings.TrimSpace(zone.ResourceGroup)
+		if zone.ResourceGroup == "" {
+			zone.ResourceGroup = strings.TrimSpace(cfg.ResourceGroup)
+		}
+		if zone.Name == "" {
+			return
+		}
+		if _, ok := seen[zone.Name]; ok {
+			return
+		}
+		seen[zone.Name] = struct{}{}
+		zones = append(zones, zone)
+	}
+	for _, zone := range cfg.DNSZones {
+		appendZone(zone)
+	}
+	if cfg.DNSZoneName != "" {
+		appendZone(model.AzureDNSZoneConfig{Name: cfg.DNSZoneName, ResourceGroup: cfg.ResourceGroup})
+	}
+	return zones
 }
 
 func validateCaddyAdminEndpoint(endpoint string) error {
@@ -90,8 +155,24 @@ func NormalizeCertificateConfig(cert model.CertificateConfig) model.CertificateC
 	cert.Issuer = strings.ToLower(strings.TrimSpace(cert.Issuer))
 	cert.Email = strings.TrimSpace(cert.Email)
 	cert.CADirectory = strings.TrimSpace(cert.CADirectory)
+	cert.Subjects = normalizeCertificateSubjects(cert.Subjects)
+	cert.DNSChallenge.Provider = strings.ToLower(strings.TrimSpace(cert.DNSChallenge.Provider))
+	cert.DNSChallenge.Azure.SubscriptionID = strings.TrimSpace(cert.DNSChallenge.Azure.SubscriptionID)
+	cert.DNSChallenge.Azure.ResourceGroup = strings.TrimSpace(cert.DNSChallenge.Azure.ResourceGroup)
+	cert.DNSChallenge.Azure.Authentication = strings.ToLower(strings.TrimSpace(cert.DNSChallenge.Azure.Authentication))
+	cert.DNSChallenge.Azure.TenantID = strings.TrimSpace(cert.DNSChallenge.Azure.TenantID)
+	cert.DNSChallenge.Azure.ClientID = strings.TrimSpace(cert.DNSChallenge.Azure.ClientID)
+	cert.DNSChallenge.Azure.ClientSecret = strings.TrimSpace(cert.DNSChallenge.Azure.ClientSecret)
 	if cert.Issuer == "" || cert.Issuer == "default" {
 		cert.Issuer = "letsencrypt"
+	}
+	if cert.DNSChallenge.Provider == "azure" && cert.DNSChallenge.Azure.Authentication == "" {
+		cert.DNSChallenge.Azure.Authentication = "managedidentity"
+	}
+	if cert.DNSChallenge.Azure.Authentication == "managedidentity" {
+		cert.DNSChallenge.Azure.TenantID = ""
+		cert.DNSChallenge.Azure.ClientID = ""
+		cert.DNSChallenge.Azure.ClientSecret = ""
 	}
 	return cert
 }
@@ -107,6 +188,87 @@ func ValidateCertificateConfig(cert model.CertificateConfig) error {
 	default:
 		return fmt.Errorf("unsupported certificate issuer %q", cert.Issuer)
 	}
+	for _, subject := range cert.Subjects {
+		if err := validateCertificateSubject(subject); err != nil {
+			return err
+		}
+		if strings.HasPrefix(subject, "*.") && cert.DNSChallenge.Provider == "" {
+			return fmt.Errorf("wildcard certificate subject %q requires a DNS challenge", subject)
+		}
+	}
+	switch cert.DNSChallenge.Provider {
+	case "":
+		return nil
+	case "azure":
+	default:
+		return fmt.Errorf("unsupported DNS challenge provider %q", cert.DNSChallenge.Provider)
+	}
+	if cert.Issuer == "zerossl" {
+		return fmt.Errorf("ZeroSSL does not support configurable DNS challenges; use letsencrypt or custom ACME")
+	}
+	if len(cert.Subjects) == 0 {
+		return fmt.Errorf("DNS challenge requires at least one certificate subject")
+	}
+	azure := cert.DNSChallenge.Azure
+	if azure.SubscriptionID == "" || azure.ResourceGroup == "" {
+		return fmt.Errorf("Azure DNS challenge requires subscriptionId and resourceGroup")
+	}
+	switch azure.Authentication {
+	case "managedidentity":
+	case "appregistration":
+		if azure.TenantID == "" || azure.ClientID == "" || azure.ClientSecret == "" {
+			return fmt.Errorf("Azure DNS App Registration requires tenantId, clientId, and clientSecret")
+		}
+	default:
+		return fmt.Errorf("unsupported Azure DNS authentication %q", azure.Authentication)
+	}
+	return nil
+}
+
+func normalizeCertificateSubjects(subjects []string) []string {
+	seen := make(map[string]struct{}, len(subjects))
+	output := make([]string, 0, len(subjects))
+	for _, subject := range subjects {
+		subject = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(subject)), ".")
+		if subject == "" {
+			continue
+		}
+		if _, ok := seen[subject]; ok {
+			continue
+		}
+		seen[subject] = struct{}{}
+		output = append(output, subject)
+	}
+	return output
+}
+
+func validateCertificateSubject(subject string) error {
+	wildcard := strings.HasPrefix(subject, "*.")
+	name := subject
+	if wildcard {
+		name = strings.TrimPrefix(subject, "*.")
+	}
+	if strings.Contains(name, "*") || name == "" || len(name) > 253 {
+		return fmt.Errorf("certificate subject %q must be a DNS name with at most one left-most wildcard", subject)
+	}
+	labels := strings.Split(name, ".")
+	if len(labels) < 2 {
+		return fmt.Errorf("certificate subject %q must be a fully qualified DNS name", subject)
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("certificate subject %q is not a valid DNS name", subject)
+		}
+		for _, character := range label {
+			if character < 'a' || character > 'z' {
+				if character < '0' || character > '9' {
+					if character != '-' {
+						return fmt.Errorf("certificate subject %q is not a valid DNS name", subject)
+					}
+				}
+			}
+		}
+	}
 	return nil
 }
 
@@ -115,13 +277,15 @@ func defaults() model.AppConfig {
 		Profile: model.ProfileVM,
 		Control: model.ControlConfig{Listen: ":8080"},
 		Gateway: model.GatewayConfig{
-			HTTPListen:         ":80",
-			HTTPSListen:        ":443",
-			CaddyAdminEndpoint: "http://127.0.0.1:2019",
-			CaddyBin:           "caddy",
-			StateDir:           "/data/platform",
-			CaddyDataDir:       "/data/caddy",
-			Certificate:        model.CertificateConfig{Issuer: "letsencrypt"},
+			HTTPListen:           ":80",
+			HTTPSListen:          ":443",
+			CaddyAdminEndpoint:   "http://127.0.0.1:2019",
+			CaddyBin:             "caddy",
+			StateDir:             "/data/platform",
+			CaddyDataDir:         "/data/caddy",
+			CertificateFile:      "/data/platform/certificate.json",
+			InternalSourceRanges: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7", "fe80::/10"},
+			Certificate:          model.CertificateConfig{Issuer: "letsencrypt"},
 		},
 		Docker: model.DockerConfig{Enabled: true, SocketPath: "/var/run/docker.sock"},
 		Azure:  model.AzureConfig{ManageDNS: true, ManageNSG: true, NSGPriority: 120, NSGSourceAddressPrefixes: []string{"*"}},
@@ -147,7 +311,7 @@ func mergeFile(path string, cfg *model.AppConfig) error {
 	return nil
 }
 
-func applyEnv(cfg *model.AppConfig) {
+func applyEnv(cfg *model.AppConfig) error {
 	if value := os.Getenv("GATEWAY_PROFILE"); value != "" {
 		cfg.Profile = model.DeploymentProfile(strings.ToLower(value))
 	}
@@ -175,6 +339,12 @@ func applyEnv(cfg *model.AppConfig) {
 	if value := os.Getenv("GATEWAY_CADDY_DATA_DIR"); value != "" {
 		cfg.Gateway.CaddyDataDir = value
 	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_FILE"); value != "" {
+		cfg.Gateway.CertificateFile = value
+	}
+	if value := os.Getenv("GATEWAY_INTERNAL_SOURCE_RANGES"); value != "" {
+		cfg.Gateway.InternalSourceRanges = splitCSV(value)
+	}
 	if value := os.Getenv("GATEWAY_CERTIFICATE_ISSUER"); value != "" {
 		cfg.Gateway.Certificate.Issuer = strings.ToLower(strings.TrimSpace(value))
 	}
@@ -186,6 +356,30 @@ func applyEnv(cfg *model.AppConfig) {
 	}
 	if value := os.Getenv("GATEWAY_CERTIFICATE_CA_DIRECTORY"); value != "" {
 		cfg.Gateway.Certificate.CADirectory = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_SUBJECTS"); value != "" {
+		cfg.Gateway.Certificate.Subjects = splitCSV(value)
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_DNS_PROVIDER"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Provider = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_AZURE_SUBSCRIPTION_ID"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Azure.SubscriptionID = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_AZURE_RESOURCE_GROUP"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Azure.ResourceGroup = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_AZURE_AUTHENTICATION"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Azure.Authentication = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_AZURE_TENANT_ID"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Azure.TenantID = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_AZURE_CLIENT_ID"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Azure.ClientID = value
+	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_AZURE_CLIENT_SECRET"); value != "" {
+		cfg.Gateway.Certificate.DNSChallenge.Azure.ClientSecret = value
 	}
 	if value := os.Getenv("GATEWAY_ROUTES_FILE"); value != "" {
 		cfg.RoutesFile = value
@@ -235,6 +429,13 @@ func applyEnv(cfg *model.AppConfig) {
 	if value := os.Getenv("GATEWAY_AZURE_DNS_ZONE"); value != "" {
 		cfg.Azure.DNSZoneName = value
 	}
+	if value := os.Getenv("GATEWAY_AZURE_DNS_ZONES"); value != "" {
+		var zones []model.AzureDNSZoneConfig
+		if err := json.Unmarshal([]byte(value), &zones); err != nil {
+			return fmt.Errorf("parse GATEWAY_AZURE_DNS_ZONES: %w", err)
+		}
+		cfg.Azure.DNSZones = zones
+	}
 	if value := os.Getenv("GATEWAY_AZURE_NSG_NAME"); value != "" {
 		cfg.Azure.NetworkSecurityGroupName = value
 	}
@@ -274,6 +475,7 @@ func applyEnv(cfg *model.AppConfig) {
 			cfg.ReconcileIntervalSeconds = seconds
 		}
 	}
+	return nil
 }
 
 func envOr(key string, fallback string) string {

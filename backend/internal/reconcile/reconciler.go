@@ -51,17 +51,19 @@ type Options struct {
 }
 
 type Reconciler struct {
-	cfg           model.AppConfig
-	store         *routes.Store
-	discoverer    Discoverer
-	azureManager  AzureManager
-	healthChecker HealthChecker
-	auditLogger   AuditLogger
-	renderer      Renderer
-	loader        Loader
-	logger        *slog.Logger
-	mu            sync.RWMutex
-	last          model.ReconcileResult
+	cfg            model.AppConfig
+	store          *routes.Store
+	discoverer     Discoverer
+	azureManager   AzureManager
+	healthChecker  HealthChecker
+	auditLogger    AuditLogger
+	renderer       Renderer
+	loader         Loader
+	logger         *slog.Logger
+	syncMu         sync.Mutex
+	lastDiscovered []model.RouteConfig
+	mu             sync.RWMutex
+	last           model.ReconcileResult
 }
 
 func New(options Options) *Reconciler {
@@ -91,6 +93,9 @@ func (r *Reconciler) Run(ctx context.Context) {
 }
 
 func (r *Reconciler) Sync(ctx context.Context) model.ReconcileResult {
+	r.syncMu.Lock()
+	defer r.syncMu.Unlock()
+
 	started := time.Now().UTC()
 	cfg := r.configSnapshot()
 	explicitRoutes := r.store.List()
@@ -100,11 +105,13 @@ func (r *Reconciler) Sync(ctx context.Context) model.ReconcileResult {
 	if r.discoverer != nil {
 		_, discoveredRoutes, err := r.discoverer.Discover(ctx)
 		if err != nil {
-			r.logger.Warn("docker discovery failed; continuing with explicit routes", "error", err)
+			discoveredRoutes = append([]model.RouteConfig{}, r.lastDiscovered...)
+			r.logger.Warn("docker discovery failed; keeping last successful routes", "error", err, "routes", len(discoveredRoutes))
 		} else {
-			result.DiscoveredRoutes = len(discoveredRoutes)
-			allRoutes = append(allRoutes, discoveredRoutes...)
+			r.lastDiscovered = append([]model.RouteConfig{}, discoveredRoutes...)
 		}
+		result.DiscoveredRoutes = len(discoveredRoutes)
+		allRoutes = append(allRoutes, discoveredRoutes...)
 	}
 
 	rendered, err := r.renderer.Render(allRoutes)

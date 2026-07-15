@@ -21,7 +21,7 @@
 * { box-sizing: border-box; }
 [x-cloak] { display: none !important; }
 body { margin: 0; min-height: 100vh; background: var(--bg); color: var(--text); }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; }
 button { white-space: nowrap; }
 .shell { display: grid; grid-template-columns: 272px minmax(0, 1fr); min-height: 100vh; }
 .sidebar { background: var(--sidebar); color: var(--sidebar-text); padding: 18px; display: flex; flex-direction: column; gap: 24px; }
@@ -85,8 +85,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .form-panel { display: grid; gap: 12px; }
 .form-note { color: var(--muted); font-size: 13px; line-height: 1.45; }
 label { display: grid; gap: 6px; color: var(--muted); font-size: 13px; }
-input, select { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; color: var(--text); background: #fff; }
-input:focus, select:focus { outline: 2px solid rgba(0, 122, 120, .18); border-color: var(--accent); }
+input, select, textarea { width: 100%; min-height: 40px; border: 1px solid var(--line); border-radius: 8px; padding: 0 10px; color: var(--text); background: #fff; }
+textarea { min-height: 84px; padding: 10px; resize: vertical; line-height: 1.45; }
+input:focus, select:focus, textarea:focus { outline: 2px solid rgba(0, 122, 120, .18); border-color: var(--accent); }
+.nested-fields { display: grid; gap: 12px; padding-left: 12px; border-left: 2px solid var(--line); }
+.field-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.field-heading .pill { min-height: 20px; }
 .check { grid-template-columns: 18px 1fr; align-items: center; color: var(--text); }
 .check input { width: 16px; height: 16px; min-height: auto; }
 .mini-check { grid-template-columns: 16px auto; align-items: center; color: var(--text); white-space: nowrap; }

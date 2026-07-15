@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 
@@ -47,6 +48,19 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 			},
 		})
 	}
+	sort.SliceStable(routeList, func(left int, right int) bool {
+		leftHost := strings.ToLower(routeList[left].Host)
+		rightHost := strings.ToLower(routeList[right].Host)
+		leftWildcard := strings.HasPrefix(leftHost, "*.")
+		rightWildcard := strings.HasPrefix(rightHost, "*.")
+		if leftWildcard != rightWildcard {
+			return !leftWildcard
+		}
+		if leftHost != rightHost {
+			return leftHost < rightHost
+		}
+		return len(strings.TrimRight(routeList[left].PathPrefix, "/")) > len(strings.TrimRight(routeList[right].PathPrefix, "/"))
+	})
 
 	listen := make([]string, 0, 2)
 	if cfg.Gateway.HTTPListen != "" {
@@ -62,13 +76,13 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 	caddyRoutes := make([]any, 0, len(routeList))
 	skipAutoHTTPS := make([]string, 0)
 	for _, route := range routeList {
-		if !route.Enabled || !route.Public {
+		if !route.Enabled {
 			continue
 		}
 		if !route.HTTPS {
 			skipAutoHTTPS = append(skipAutoHTTPS, route.Host)
 		}
-		entries, err := renderRoute(route, cfg.Auth)
+		entries, err := renderRoute(route, cfg.Auth, cfg.Gateway.InternalSourceRanges)
 		if err != nil {
 			return nil, err
 		}
@@ -108,35 +122,43 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 	return json.MarshalIndent(config, "", "  ")
 }
 
-func renderRoute(route model.RouteConfig, auth model.AuthConfig) ([]map[string]any, error) {
+func renderRoute(route model.RouteConfig, auth model.AuthConfig, internalSourceRanges []string) ([]map[string]any, error) {
 	match := map[string]any{"host": []string{route.Host}}
 	if route.PathPrefix != "" {
-		match["path"] = []string{strings.TrimRight(route.PathPrefix, "/") + "*"}
+		match["path"] = routePathMatchers(route.PathPrefix)
+	}
+	if route.Exposure == "internal" {
+		if len(internalSourceRanges) == 0 {
+			return nil, fmt.Errorf("route %s: internal route requires at least one source range", route.ID)
+		}
+		match["remote_ip"] = map[string]any{"ranges": internalSourceRanges}
 	}
 
 	upstreams := make([]any, 0, len(route.Upstreams))
 	useTLS := false
+	transportSet := false
 	for _, upstream := range route.Upstreams {
 		dial, tls, err := upstreamDial(upstream.URL)
 		if err != nil {
 			return nil, fmt.Errorf("route %s: %w", route.ID, err)
 		}
-		useTLS = useTLS || tls
+		if transportSet && useTLS != tls {
+			return nil, fmt.Errorf("route %s: all upstreams must use the same http or https scheme", route.ID)
+		}
+		useTLS = tls
+		transportSet = true
 		upstreams = append(upstreams, map[string]any{"dial": dial})
 	}
 
-	handler := map[string]any{"handler": "reverse_proxy", "upstreams": upstreams}
-	if useTLS {
-		handler["transport"] = map[string]any{"protocol": "http", "tls": map[string]any{}}
-	}
-
 	if !route.Protected {
+		handler := reverseProxyHandler(upstreams, useTLS, nil)
 		return []map[string]any{{"match": []any{match}, "handle": []any{handler}, "terminal": true}}, nil
 	}
 
 	fallbackStatus := 401
 	fallbackBody := "protected route requires gateway token\n"
-	if !protectedPolicyConfigured(auth) {
+	policies := protectedHeaderPolicies(auth)
+	if len(policies) == 0 {
 		fallbackStatus = 503
 		fallbackBody = "protected route policy is not configured\n"
 	}
@@ -145,18 +167,53 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig) ([]map[string]a
 		"handle":   []any{map[string]any{"handler": "static_response", "status_code": fallbackStatus, "body": fallbackBody}},
 		"terminal": true,
 	}
-	if !protectedPolicyConfigured(auth) {
+	if len(policies) == 0 {
 		return []map[string]any{fallback}, nil
 	}
 
-	entries := make([]map[string]any, 0, 3)
-	for _, header := range protectedHeaderPolicies(auth) {
+	stripHeaders := uniqueHeaderNames(policies)
+	entries := make([]map[string]any, 0, len(policies)+1)
+	for _, header := range policies {
 		headerMatch := cloneMatch(match)
 		headerMatch["header"] = map[string]any{header.name: []string{header.value}}
+		handler := reverseProxyHandler(upstreams, useTLS, stripHeaders)
 		entries = append(entries, map[string]any{"match": []any{headerMatch}, "handle": []any{handler}, "terminal": true})
 	}
 	entries = append(entries, fallback)
 	return entries, nil
+}
+
+func routePathMatchers(pathPrefix string) []string {
+	prefix := strings.TrimRight(strings.TrimSpace(pathPrefix), "/")
+	if prefix == "" {
+		return []string{"/*"}
+	}
+	return []string{prefix, prefix + "/*"}
+}
+
+func reverseProxyHandler(upstreams []any, useTLS bool, stripHeaders []string) map[string]any {
+	handler := map[string]any{"handler": "reverse_proxy", "upstreams": upstreams}
+	if useTLS {
+		handler["transport"] = map[string]any{"protocol": "http", "tls": map[string]any{}}
+	}
+	if len(stripHeaders) > 0 {
+		handler["headers"] = map[string]any{"request": map[string]any{"delete": stripHeaders}}
+	}
+	return handler
+}
+
+func uniqueHeaderNames(policies []headerPolicy) []string {
+	seen := make(map[string]struct{}, len(policies))
+	output := make([]string, 0, len(policies))
+	for _, policy := range policies {
+		key := strings.ToLower(policy.name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		output = append(output, policy.name)
+	}
+	return output
 }
 
 type headerPolicy struct {
@@ -209,30 +266,42 @@ func tlsAutomation(cfg model.CertificateConfig) map[string]any {
 	if issuer == "" || issuer == "default" {
 		return nil
 	}
-	policy := map[string]any{"issuers": []any{certificateIssuer(cfg)}}
-	return map[string]any{"automation": map[string]any{"policies": []any{policy}}}
+	policies := make([]any, 0, 2)
+	if cfg.DNSChallenge.Provider != "" && len(cfg.Subjects) > 0 {
+		policies = append(policies, map[string]any{
+			"subjects": cfg.Subjects,
+			"issuers":  []any{certificateIssuer(cfg, true)},
+		})
+		policies = append(policies, map[string]any{"issuers": []any{certificateIssuer(cfg, false)}})
+	} else {
+		policies = append(policies, map[string]any{"issuers": []any{certificateIssuer(cfg, false)}})
+	}
+	output := map[string]any{"automation": map[string]any{"policies": policies}}
+	if len(cfg.Subjects) > 0 {
+		output["certificates"] = map[string]any{"automate": cfg.Subjects}
+	}
+	return output
 }
 
-func certificateIssuer(cfg model.CertificateConfig) map[string]any {
+func certificateIssuer(cfg model.CertificateConfig, dnsChallenge bool) map[string]any {
 	issuer := strings.ToLower(strings.TrimSpace(cfg.Issuer))
+	var output map[string]any
 	switch issuer {
 	case "zerossl":
-		output := map[string]any{"module": "zerossl"}
+		output = map[string]any{"module": "zerossl"}
 		if cfg.Email != "" {
 			output["email"] = cfg.Email
 		}
-		return output
 	case "custom":
-		output := map[string]any{"module": "acme"}
+		output = map[string]any{"module": "acme"}
 		if cfg.CADirectory != "" {
 			output["ca"] = cfg.CADirectory
 		}
 		if cfg.Email != "" {
 			output["email"] = cfg.Email
 		}
-		return output
 	default:
-		output := map[string]any{"module": "acme"}
+		output = map[string]any{"module": "acme"}
 		if cfg.Staging {
 			output["ca"] = "https://acme-staging-v02.api.letsencrypt.org/directory"
 		} else if cfg.CADirectory != "" {
@@ -243,8 +312,27 @@ func certificateIssuer(cfg model.CertificateConfig) map[string]any {
 		if cfg.Email != "" {
 			output["email"] = cfg.Email
 		}
-		return output
 	}
+	if dnsChallenge {
+		output["challenges"] = map[string]any{
+			"dns": map[string]any{"provider": azureDNSProvider(cfg.DNSChallenge.Azure)},
+		}
+	}
+	return output
+}
+
+func azureDNSProvider(cfg model.AzureDNSChallengeConfig) map[string]any {
+	provider := map[string]any{
+		"name":                "azure",
+		"subscription_id":     cfg.SubscriptionID,
+		"resource_group_name": cfg.ResourceGroup,
+	}
+	if cfg.Authentication == "appregistration" {
+		provider["tenant_id"] = cfg.TenantID
+		provider["client_id"] = cfg.ClientID
+		provider["client_secret"] = cfg.ClientSecret
+	}
+	return provider
 }
 
 func cloneMatch(input map[string]any) map[string]any {

@@ -6,25 +6,23 @@ This guide consolidates local startup, VM/ACI deployment notes, Docker discovery
 
 ## Environment File
 
-`.env.example` is the sample file. Create a local `.env` before running the gateway:
+`.env.example` is the sample file. A local `.env` is optional for `start.sh`; create one only when deployment-specific environment overrides are needed:
 
 ```sh
 cp .env.example .env
 ```
 
-`.env` is ignored by Git. Keep local tokens and deployment-specific values there. The values are passed to the gateway container as environment variables; paths such as `/config/platform.example.json` and `/data/platform/routes.json` are paths inside the container.
+`.env` is ignored by Git. Keep deployment-specific values there. When the token is empty or still `change-me`, `start.sh` generates a strong token under the persistent data directory and overrides the sample value. Paths such as `/config/platform.example.json` and `/data/platform/routes.json` are paths inside the container.
 
 Boolean values accept `1`, `true`, `yes`, `y`, or `on` as true. Any other non-empty value is treated as false.
 
 ## Quick Local Run
 
 ```sh
-cp .env.example .env
-make docker-build
-make docker-run
+./start.sh start
 ```
 
-`make docker-run` uses Docker's default bridge network and does not create a custom network. The management UI is available at `http://localhost:8080`; the default sample token is `change-me`.
+The command starts one container, publishes 80/443, binds the management UI to `127.0.0.1:8080`, and bind-mounts `~/docker_files/caddy-reverse-proxy` at `/data`. Use the token printed by the script. `stop` preserves that directory; `restore` removes it after enforcing the guarded `~/docker_files` path.
 
 With the default bridge network, Docker discovery uses inspected container IP addresses for upstreams when available. That allows the gateway to proxy containers on the same bridge network without relying on Docker DNS names.
 
@@ -60,8 +58,9 @@ docker network create proxy-net
 docker run -d --name gateway \
 	--network proxy-net \
 	--add-host=host.docker.internal:host-gateway \
-	-p 80:80 -p 443:443 -p 8080:8080 \
-	-v /var/run/docker.sock:/var/run/docker.sock \
+	-p 80:80 -p 443:443 -p 127.0.0.1:8080:8080 \
+	-v "$HOME/docker_files/caddy-reverse-proxy:/data" \
+	-v /var/run/docker.sock:/var/run/docker.sock:ro \
 	--env-file .env \
 	caddy-reverse-proxy:latest
 
@@ -117,6 +116,12 @@ Use explicit routes for host-local upstreams, for example `http://127.0.0.1:3000
 | `make docker-run` | Run the image locally with `ENV_FILE`, default `.env`, on Docker bridge. |
 | `make compose-up` | Start the VM sample stack. |
 | `make compose-up-proxy` | Start the VM stack with Docker discovery through a socket proxy. |
+| `make compose-prod-up` | Start the production VM stack and wait for readiness. |
+| `make compose-prod-down` | Stop the production VM stack while preserving its data volume. |
+| `make aci-build` | Compile the ACI + Standard Load Balancer Bicep template. |
+| `make aci-validate` | Validate the parameterized template against Azure. |
+| `make aci-what-if` | Preview Azure deployment changes. |
+| `make aci-deploy` | Deploy the ACI + Standard Load Balancer profile. |
 | `make test-e2e` | Exercise Caddy routing with the sample VM stack. |
 | `make compose-down` | Stop the VM sample stack. |
 
@@ -140,6 +145,8 @@ make docker-push IMAGE=registry.example.com/team/caddy-reverse-proxy:latest
 | `GATEWAY_ROUTES_FILE` | `/data/platform/routes.json` | Writable route store for UI-created routes and Docker binds. |
 | `GATEWAY_STATE_DIR` | `/data/platform` | Platform state directory. |
 | `GATEWAY_CADDY_DATA_DIR` | `/data/caddy` | Caddy certificate/runtime data. Persist this in production. |
+| `GATEWAY_CERTIFICATE_FILE` | `/data/platform/certificate.json` | Console-managed certificate settings. Stored atomically and created with mode `0600` on POSIX filesystems. |
+| `GATEWAY_INTERNAL_SOURCE_RANGES` | RFC1918, loopback, IPv6 private/link-local | Comma-separated IP/CIDR ranges permitted to use `internal` routes. |
 
 ## Listeners And Management Access
 
@@ -161,8 +168,18 @@ Default recommendation: leave `GATEWAY_MANAGEMENT_HOST` empty and access the UI 
 | `GATEWAY_CERTIFICATE_EMAIL` | empty | ACME contact email. Recommended for production. |
 | `GATEWAY_CERTIFICATE_STAGING` | `false` | Uses Let's Encrypt staging when issuer is `letsencrypt`. |
 | `GATEWAY_CERTIFICATE_CA_DIRECTORY` | empty | Custom ACME CA directory URL. Required when issuer is `custom`. |
+| `GATEWAY_CERTIFICATE_SUBJECTS` | empty | Comma-separated names to request explicitly, including `*.example.com`. |
+| `GATEWAY_CERTIFICATE_DNS_PROVIDER` | empty | DNS challenge provider. Currently `azure` is supported. |
+| `GATEWAY_CERTIFICATE_AZURE_SUBSCRIPTION_ID` | empty | Subscription containing the authoritative Azure DNS zone. |
+| `GATEWAY_CERTIFICATE_AZURE_RESOURCE_GROUP` | empty | Resource group containing the authoritative Azure DNS zone. |
+| `GATEWAY_CERTIFICATE_AZURE_AUTHENTICATION` | `managedidentity` | `managedidentity` or `appregistration`. |
+| `GATEWAY_CERTIFICATE_AZURE_TENANT_ID` | empty | Tenant ID required for App Registration authentication. |
+| `GATEWAY_CERTIFICATE_AZURE_CLIENT_ID` | empty | Client ID required for App Registration authentication. |
+| `GATEWAY_CERTIFICATE_AZURE_CLIENT_SECRET` | empty | Client secret required for App Registration authentication. Prefer Console entry to shell history. |
 
-The Network page includes certificate controls backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. UI/API changes apply to the running gateway and trigger a Caddy reload; they do not write back to `.env`.
+The Network page includes certificate controls backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE`, applied immediately, and restored after restart. Client secrets are persisted but never returned by the API.
+
+Wildcard names require DNS-01. Add both `*.example.com` and `example.com` when the apex is needed, select Azure DNS, and use Let's Encrypt or a custom ACME issuer. Caddy's ZeroSSL issuer does not accept configurable DNS challenges. The Azure identity needs `DNS Zone Contributor` on the authoritative zone. Wildcard certificate subjects and wildcard route hosts are independent; exact route hosts are evaluated before `*.example.com` routes.
 
 ## Docker Discovery Labels
 
@@ -198,11 +215,12 @@ Use `make compose-up-proxy` when you want Docker discovery through a restricted 
 | `GATEWAY_AZURE_MANAGE_NSG` | `true` | Creates or deletes the gateway-managed VM NSG inbound rule for 80/443 in `vm` profile. Ignored for VM-style NSG management in `aci`. |
 | `GATEWAY_AZURE_SUBSCRIPTION_ID` | empty | Azure subscription ID. `AZURE_SUBSCRIPTION_ID` is also accepted. |
 | `GATEWAY_AZURE_RESOURCE_GROUP` | empty | Resource group containing the DNS zone and NSG. |
-| `GATEWAY_AZURE_DNS_ZONE` | empty | Azure DNS zone name, for example `example.com`. |
+| `GATEWAY_AZURE_DNS_ZONE` | empty | Legacy single Azure DNS zone name. |
+| `GATEWAY_AZURE_DNS_ZONES` | empty | JSON array of `{name,resourceGroup}` entries. Hostnames use the longest matching zone suffix. |
 | `GATEWAY_AZURE_NSG_NAME` | empty | Network Security Group name for VM profile 80/443 inbound rule reconciliation. |
 | `GATEWAY_AZURE_NSG_PRIORITY` | `120` | Priority for the managed VM NSG allow rule. |
 | `GATEWAY_AZURE_NSG_SOURCE_PREFIXES` | `*` | Comma-separated source CIDR prefixes for the managed VM NSG allow rule. |
-| `GATEWAY_PUBLIC_IP_ADDRESS` | empty | Optional static public IP for DNS A records. If empty, the gateway discovers its public egress IP. |
+| `GATEWAY_PUBLIC_IP_ADDRESS` | empty | Required ingress IPv4 address when DNS management has public routes: VM public IP or Load Balancer ingress IP. Egress IP discovery is intentionally not used. |
 
 Required Managed Identity roles:
 
@@ -213,6 +231,7 @@ Cleanup behavior:
 
 - DNS cleanup deletes only A records marked with `managed-by=ai-docker-farm-gateway` metadata.
 - Deleting, disabling, or internalizing a route removes its managed DNS record on the next reconcile.
+- Upstream health failures are reported in route status but do not remove DNS records; disable or delete a route to withdraw DNS without creating probe-driven DNS cache churn.
 - The NSG rule is shared by all public/protected routes and is deleted only when no public/protected route remains, unless `GATEWAY_MANAGEMENT_HOST` is set.
 
 ## VM Deployment Notes
@@ -220,9 +239,9 @@ Cleanup behavior:
 1. Assign a managed identity to the VM.
 2. Grant the identity the Azure roles above.
 3. Keep SSH/private management access through Tailscale, WireGuard, Bastion, VPN, or an equivalent private path.
-4. Start with `make compose-up` or `make compose-up-proxy`.
+4. Start with `IMAGE=<published-image> DOCKER_NETWORKS=<network1,network2> ./start.sh start`.
 
-The gateway only manages inbound NSG access for 80 and 443. It does not open 8080. The sample compose file binds the management UI to `127.0.0.1:8080` on the host.
+The gateway only manages inbound NSG access for 80 and 443. It does not open 8080. `start.sh` binds the management UI to `127.0.0.1:8080` on the host.
 
 ## ACI Deployment Notes
 
@@ -231,14 +250,15 @@ ACI mode is an explicit-route gateway profile. It does not discover Docker conta
 Requirements:
 
 - A published gateway image in a registry reachable by ACI.
-- Managed identity assigned to the container group.
+- System-assigned and user-assigned identities on the container group.
 - DNS permissions if the gateway updates Azure DNS.
 - Persistent storage for `/data/caddy` and `/data/platform` before production use.
 - Network reachability from the container group to every upstream.
 
-Important limits:
+The supported production path is a private, VNet-injected ACI behind Standard Public Load Balancer. The Bicep template creates a dedicated VNet, TCP 80/443 rules, a `/readyz` probe, NAT Gateway egress, Azure Files persistence, and a backend entry using the deployed ACI private IP. The UAMI is used for ACR and control-plane Azure operations; Caddy DNS-01 uses the system identity. Supplying `dnsZones` grants both identities `DNS Zone Contributor`. Peer the dedicated VNet when upstreams live in another private VNet. VM-style runtime NSG management remains disabled in ACI mode. See [deployment.md](deployment.md).
 
-- ACI public IPs can change when the container group is recreated.
-- Prefer CNAME records to the ACI DNS label, or let the gateway reconcile A records on startup.
-- Private upstreams require VNet injection, Private Link, private DNS, or another explicit connectivity path.
-- VM-style NSG rule management is disabled in ACI mode.
+## Runtime Probes
+
+- `/livez` returns success while the Go control plane is running.
+- `/readyz` returns success only while the required Caddy child process is ready.
+- `/healthz` is a compatibility alias for `/readyz`.

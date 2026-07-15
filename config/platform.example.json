@@ -11,11 +11,25 @@
     "caddyBin": "caddy",
     "stateDir": "/data/platform",
     "caddyDataDir": "/data/caddy",
+    "certificateFile": "/data/platform/certificate.json",
+    "internalSourceRanges": ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7", "fe80::/10"],
     "certificate": {
       "issuer": "default",
       "email": "",
       "staging": false,
-      "caDirectory": ""
+      "caDirectory": "",
+      "subjects": [],
+      "dnsChallenge": {
+        "provider": "",
+        "azure": {
+          "subscriptionId": "",
+          "resourceGroup": "",
+          "authentication": "managedidentity",
+          "tenantId": "",
+          "clientId": "",
+          "clientSecret": ""
+        }
+      }
     }
   },
   "docker": {
@@ -49,6 +63,7 @@
     "subscriptionId": "",
     "resourceGroup": "",
     "dnsZoneName": "",
+    "dnsZones": [],
     "networkSecurityGroupName": "",
     "publicIpAddress": "",
     "nsgPriority": 120,

@@ -31,20 +31,38 @@ type ControlConfig struct {
 }
 
 type GatewayConfig struct {
-	HTTPListen         string            `json:"httpListen"`
-	HTTPSListen        string            `json:"httpsListen"`
-	CaddyAdminEndpoint string            `json:"caddyAdminEndpoint"`
-	CaddyBin           string            `json:"caddyBin"`
-	StateDir           string            `json:"stateDir"`
-	CaddyDataDir       string            `json:"caddyDataDir"`
-	Certificate        CertificateConfig `json:"certificate"`
+	HTTPListen           string            `json:"httpListen"`
+	HTTPSListen          string            `json:"httpsListen"`
+	CaddyAdminEndpoint   string            `json:"caddyAdminEndpoint"`
+	CaddyBin             string            `json:"caddyBin"`
+	StateDir             string            `json:"stateDir"`
+	CaddyDataDir         string            `json:"caddyDataDir"`
+	CertificateFile      string            `json:"certificateFile"`
+	InternalSourceRanges []string          `json:"internalSourceRanges,omitempty"`
+	Certificate          CertificateConfig `json:"certificate"`
 }
 
 type CertificateConfig struct {
-	Issuer      string `json:"issuer"`
-	Email       string `json:"email,omitempty"`
-	Staging     bool   `json:"staging"`
-	CADirectory string `json:"caDirectory,omitempty"`
+	Issuer       string             `json:"issuer"`
+	Email        string             `json:"email,omitempty"`
+	Staging      bool               `json:"staging"`
+	CADirectory  string             `json:"caDirectory,omitempty"`
+	Subjects     []string           `json:"subjects,omitempty"`
+	DNSChallenge DNSChallengeConfig `json:"dnsChallenge,omitempty"`
+}
+
+type DNSChallengeConfig struct {
+	Provider string                  `json:"provider,omitempty"`
+	Azure    AzureDNSChallengeConfig `json:"azure,omitempty"`
+}
+
+type AzureDNSChallengeConfig struct {
+	SubscriptionID string `json:"subscriptionId,omitempty"`
+	ResourceGroup  string `json:"resourceGroup,omitempty"`
+	Authentication string `json:"authentication,omitempty"`
+	TenantID       string `json:"tenantId,omitempty"`
+	ClientID       string `json:"clientId,omitempty"`
+	ClientSecret   string `json:"clientSecret,omitempty"`
 }
 
 type DockerConfig struct {
@@ -54,16 +72,22 @@ type DockerConfig struct {
 }
 
 type AzureConfig struct {
-	Enabled                  bool     `json:"enabled"`
-	ManageDNS                bool     `json:"manageDNS"`
-	ManageNSG                bool     `json:"manageNSG"`
-	SubscriptionID           string   `json:"subscriptionId"`
-	ResourceGroup            string   `json:"resourceGroup"`
-	DNSZoneName              string   `json:"dnsZoneName"`
-	NetworkSecurityGroupName string   `json:"networkSecurityGroupName"`
-	PublicIPAddress          string   `json:"publicIpAddress"`
-	NSGPriority              int32    `json:"nsgPriority"`
-	NSGSourceAddressPrefixes []string `json:"nsgSourceAddressPrefixes,omitempty"`
+	Enabled                  bool                 `json:"enabled"`
+	ManageDNS                bool                 `json:"manageDNS"`
+	ManageNSG                bool                 `json:"manageNSG"`
+	SubscriptionID           string               `json:"subscriptionId"`
+	ResourceGroup            string               `json:"resourceGroup"`
+	DNSZoneName              string               `json:"dnsZoneName"`
+	DNSZones                 []AzureDNSZoneConfig `json:"dnsZones,omitempty"`
+	NetworkSecurityGroupName string               `json:"networkSecurityGroupName"`
+	PublicIPAddress          string               `json:"publicIpAddress"`
+	NSGPriority              int32                `json:"nsgPriority"`
+	NSGSourceAddressPrefixes []string             `json:"nsgSourceAddressPrefixes,omitempty"`
+}
+
+type AzureDNSZoneConfig struct {
+	Name          string `json:"name"`
+	ResourceGroup string `json:"resourceGroup"`
 }
 
 type AuthConfig struct {

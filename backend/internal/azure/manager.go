@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
@@ -30,7 +28,6 @@ type Manager struct {
 	cfg       model.AppConfig
 	dnsClient *armdns.RecordSetsClient
 	nsgClient *armnetwork.SecurityRulesClient
-	http      *http.Client
 	logger    *slog.Logger
 }
 
@@ -45,7 +42,7 @@ func NewManager(cfg model.AppConfig, logger *slog.Logger) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	manager := &Manager{cfg: cfg, http: &http.Client{Timeout: 5 * time.Second}, logger: logger}
+	manager := &Manager{cfg: cfg, logger: logger}
 	if cfg.Azure.ManageDNS {
 		client, err := armdns.NewRecordSetsClient(cfg.Azure.SubscriptionID, credential, nil)
 		if err != nil {
@@ -71,9 +68,9 @@ func (m *Manager) Reconcile(ctx context.Context, routes []model.RouteConfig) mod
 	}
 
 	publicIP := ""
-	if len(publicRoutes) > 0 {
+	if len(publicRoutes) > 0 && m.cfg.Azure.ManageDNS {
 		var err error
-		publicIP, err = m.publicIPAddress(ctx)
+		publicIP, err = m.publicIPAddress()
 		if err != nil {
 			result.Error = err.Error()
 			return result
@@ -113,54 +110,44 @@ func publicAzureRoutes(routes []model.RouteConfig) []model.RouteConfig {
 	return output
 }
 
-func (m *Manager) publicIPAddress(ctx context.Context) (string, error) {
+func (m *Manager) publicIPAddress() (string, error) {
 	if ip := strings.TrimSpace(m.cfg.Azure.PublicIPAddress); ip != "" {
-		if parsed := net.ParseIP(ip); parsed == nil {
-			return "", fmt.Errorf("publicIpAddress %q is not a valid IP address", ip)
+		if parsed := net.ParseIP(ip); parsed == nil || parsed.To4() == nil {
+			return "", fmt.Errorf("publicIpAddress %q must be a valid IPv4 address", ip)
 		}
 		return ip, nil
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://api.ipify.org", nil)
-	if err != nil {
-		return "", err
-	}
-	response, err := m.http.Do(request)
-	if err != nil {
-		return "", fmt.Errorf("discover public IP: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		return "", fmt.Errorf("discover public IP returned %s", response.Status)
-	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 128))
-	if err != nil {
-		return "", err
-	}
-	ip := strings.TrimSpace(string(body))
-	if parsed := net.ParseIP(ip); parsed == nil {
-		return "", fmt.Errorf("public IP discovery returned %q", ip)
-	}
-	return ip, nil
+	return "", fmt.Errorf("publicIpAddress is required when Azure DNS management has public routes")
 }
 
 func (m *Manager) reconcileDNS(ctx context.Context, routes []model.RouteConfig, publicIP string) (int, int, []string, error) {
 	if m.dnsClient == nil {
 		return 0, 0, nil, nil
 	}
-	if m.cfg.Azure.ResourceGroup == "" || m.cfg.Azure.DNSZoneName == "" {
-		return 0, 0, nil, fmt.Errorf("resourceGroup and dnsZoneName are required for Azure DNS reconciliation")
+	zones := configuredDNSZones(m.cfg.Azure)
+	if len(zones) == 0 {
+		return 0, 0, nil, fmt.Errorf("at least one DNS zone is required for Azure DNS reconciliation")
 	}
 	count := 0
+	deleted := 0
 	warnings := make([]string, 0)
-	desired := make(map[string]struct{}, len(routes))
+	desiredByZone := make(map[string]map[string]struct{}, len(zones))
+	for _, zone := range zones {
+		desiredByZone[dnsZoneKey(zone)] = make(map[string]struct{})
+	}
 	for _, route := range routes {
-		relativeName, ok := relativeRecordName(route.Host, m.cfg.Azure.DNSZoneName)
+		zone, ok := selectDNSZone(route.Host, zones)
 		if !ok {
-			warnings = append(warnings, fmt.Sprintf("host %s is outside DNS zone %s", route.Host, m.cfg.Azure.DNSZoneName))
+			warnings = append(warnings, fmt.Sprintf("host %s is outside all configured DNS zones", route.Host))
+			continue
+		}
+		relativeName, _ := relativeRecordName(route.Host, zone.Name)
+		desired := desiredByZone[dnsZoneKey(zone)]
+		if _, exists := desired[relativeName]; exists {
 			continue
 		}
 		desired[relativeName] = struct{}{}
-		_, err := m.dnsClient.CreateOrUpdate(ctx, m.cfg.Azure.ResourceGroup, m.cfg.Azure.DNSZoneName, relativeName, armdns.RecordTypeA, armdns.RecordSet{
+		_, err := m.dnsClient.CreateOrUpdate(ctx, zone.ResourceGroup, zone.Name, relativeName, armdns.RecordTypeA, armdns.RecordSet{
 			Properties: &armdns.RecordSetProperties{
 				TTL:      to.Ptr[int64](300),
 				Metadata: managedDNSMetadata(route.Host),
@@ -168,14 +155,17 @@ func (m *Manager) reconcileDNS(ctx context.Context, routes []model.RouteConfig, 
 			},
 		}, nil)
 		if err != nil {
-			return count, 0, warnings, fmt.Errorf("reconcile DNS record %s: %w", route.Host, err)
+			return count, deleted, warnings, fmt.Errorf("reconcile DNS record %s in zone %s: %w", route.Host, zone.Name, err)
 		}
 		count++
 	}
-	deleted, cleanupWarnings, err := m.cleanupDNS(ctx, desired)
-	warnings = append(warnings, cleanupWarnings...)
-	if err != nil {
-		return count, deleted, warnings, err
+	for _, zone := range zones {
+		zoneDeleted, cleanupWarnings, err := m.cleanupDNS(ctx, zone, desiredByZone[dnsZoneKey(zone)])
+		deleted += zoneDeleted
+		warnings = append(warnings, cleanupWarnings...)
+		if err != nil {
+			return count, deleted, warnings, err
+		}
 	}
 	return count, deleted, warnings, nil
 }
@@ -187,14 +177,14 @@ func managedDNSMetadata(host string) map[string]*string {
 	}
 }
 
-func (m *Manager) cleanupDNS(ctx context.Context, desired map[string]struct{}) (int, []string, error) {
+func (m *Manager) cleanupDNS(ctx context.Context, zone model.AzureDNSZoneConfig, desired map[string]struct{}) (int, []string, error) {
 	deleted := 0
 	warnings := make([]string, 0)
-	pager := m.dnsClient.NewListByTypePager(m.cfg.Azure.ResourceGroup, m.cfg.Azure.DNSZoneName, armdns.RecordTypeA, nil)
+	pager := m.dnsClient.NewListByTypePager(zone.ResourceGroup, zone.Name, armdns.RecordTypeA, nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
-			return deleted, warnings, fmt.Errorf("list Azure DNS A records: %w", err)
+			return deleted, warnings, fmt.Errorf("list Azure DNS A records in zone %s: %w", zone.Name, err)
 		}
 		for _, record := range page.Value {
 			if !isManagedDNSRecord(record) {
@@ -208,13 +198,57 @@ func (m *Manager) cleanupDNS(ctx context.Context, desired map[string]struct{}) (
 			if _, ok := desired[relativeName]; ok {
 				continue
 			}
-			if _, err := m.dnsClient.Delete(ctx, m.cfg.Azure.ResourceGroup, m.cfg.Azure.DNSZoneName, relativeName, armdns.RecordTypeA, nil); err != nil && !isNotFound(err) {
-				return deleted, warnings, fmt.Errorf("delete Azure DNS record %s: %w", relativeName, err)
+			if _, err := m.dnsClient.Delete(ctx, zone.ResourceGroup, zone.Name, relativeName, armdns.RecordTypeA, nil); err != nil && !isNotFound(err) {
+				return deleted, warnings, fmt.Errorf("delete Azure DNS record %s in zone %s: %w", relativeName, zone.Name, err)
 			}
 			deleted++
 		}
 	}
 	return deleted, warnings, nil
+}
+
+func configuredDNSZones(cfg model.AzureConfig) []model.AzureDNSZoneConfig {
+	zones := make([]model.AzureDNSZoneConfig, 0, len(cfg.DNSZones)+1)
+	seen := make(map[string]struct{}, len(cfg.DNSZones)+1)
+	appendZone := func(zone model.AzureDNSZoneConfig) {
+		zone.Name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone.Name)), ".")
+		zone.ResourceGroup = strings.TrimSpace(zone.ResourceGroup)
+		if zone.ResourceGroup == "" {
+			zone.ResourceGroup = strings.TrimSpace(cfg.ResourceGroup)
+		}
+		if zone.Name == "" || zone.ResourceGroup == "" {
+			return
+		}
+		if _, ok := seen[zone.Name]; ok {
+			return
+		}
+		seen[zone.Name] = struct{}{}
+		zones = append(zones, zone)
+	}
+	for _, zone := range cfg.DNSZones {
+		appendZone(zone)
+	}
+	if cfg.DNSZoneName != "" {
+		appendZone(model.AzureDNSZoneConfig{Name: cfg.DNSZoneName, ResourceGroup: cfg.ResourceGroup})
+	}
+	return zones
+}
+
+func selectDNSZone(host string, zones []model.AzureDNSZoneConfig) (model.AzureDNSZoneConfig, bool) {
+	var selected model.AzureDNSZoneConfig
+	for _, zone := range zones {
+		if _, ok := relativeRecordName(host, zone.Name); !ok {
+			continue
+		}
+		if selected.Name == "" || len(zone.Name) > len(selected.Name) {
+			selected = zone
+		}
+	}
+	return selected, selected.Name != ""
+}
+
+func dnsZoneKey(zone model.AzureDNSZoneConfig) string {
+	return zone.ResourceGroup + "\x00" + zone.Name
 }
 
 func isManagedDNSRecord(record *armdns.RecordSet) bool {

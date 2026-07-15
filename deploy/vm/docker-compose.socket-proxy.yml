@@ -3,7 +3,7 @@ services:
     build:
       context: ../..
       dockerfile: backend/Dockerfile
-    image: ${IMAGE:-caddy-reverse-proxy:latest}
+    image: ${IMAGE:-pczhao1210/caddy-reverse-proxy:latest}
     depends_on:
       - docker-socket-proxy
     ports:
@@ -31,6 +31,7 @@ services:
       GATEWAY_CERTIFICATE_EMAIL: ${GATEWAY_CERTIFICATE_EMAIL:-}
       GATEWAY_CERTIFICATE_STAGING: ${GATEWAY_CERTIFICATE_STAGING:-false}
       GATEWAY_CERTIFICATE_CA_DIRECTORY: ${GATEWAY_CERTIFICATE_CA_DIRECTORY:-}
+      GATEWAY_INTERNAL_SOURCE_RANGES: ${GATEWAY_INTERNAL_SOURCE_RANGES:-10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}
       GATEWAY_DOCKER_ENABLED: ${GATEWAY_DOCKER_ENABLED:-true}
       GATEWAY_DOCKER_ENDPOINT: http://docker-socket-proxy:2375
       GATEWAY_AZURE_ENABLED: ${GATEWAY_AZURE_ENABLED:-false}
@@ -39,6 +40,7 @@ services:
       GATEWAY_AZURE_SUBSCRIPTION_ID: ${GATEWAY_AZURE_SUBSCRIPTION_ID:-}
       GATEWAY_AZURE_RESOURCE_GROUP: ${GATEWAY_AZURE_RESOURCE_GROUP:-}
       GATEWAY_AZURE_DNS_ZONE: ${GATEWAY_AZURE_DNS_ZONE:-}
+      GATEWAY_AZURE_DNS_ZONES: ${GATEWAY_AZURE_DNS_ZONES:-}
       GATEWAY_AZURE_NSG_NAME: ${GATEWAY_AZURE_NSG_NAME:-}
       GATEWAY_AZURE_NSG_PRIORITY: ${GATEWAY_AZURE_NSG_PRIORITY:-120}
       GATEWAY_AZURE_NSG_SOURCE_PREFIXES: ${GATEWAY_AZURE_NSG_SOURCE_PREFIXES:-*}
@@ -46,6 +48,12 @@ services:
     volumes:
       - ../../config:/config:ro
       - gateway-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-T", "2", "-O", "/dev/null", "http://127.0.0.1:8080/readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
     networks:
       - gateway
 

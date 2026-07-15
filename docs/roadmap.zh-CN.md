@@ -18,24 +18,28 @@
 - 清理陈旧的、由网关管理的 Azure DNS A 记录。
 - 通过 `DefaultAzureCredential` 协调 VM NSG 的 80/443 入站规则。
 - 当不再存在公网路由时，清理由网关管理的 VM NSG 入站规则。
-- 面向显式路由的 ACI 配置档形态。
+- Standard Public Load Balancer 后的 VNet 私网 ACI 配置档，包含 NAT Gateway 出站和 Azure Files 持久化。
 - 通过管理员令牌保护管理 API。
 - 面向小团队运维的多管理员令牌 allowlist。
 - 可配置的 protected 路由策略，支持 bearer token、`X-Admin-Token` 和可选自定义 Header 匹配。
-- 运行时证书签发器 UI/API 控制，支持默认 Caddy 自动化、Let's Encrypt、ZeroSSL、ACME 邮箱、staging 模式、自定义 CA directory，以及触发 Caddy 重新加载的刷新动作。
+- 原子持久化的证书 UI/API，支持显式证书域名、Azure DNS-01 通配符签发、托管身份/App Registration 认证、密钥脱敏和触发 Caddy 重新加载的刷新动作。
 - 路由与上游健康检查，并在 API/UI 状态中报告路由级错误。
 - 审计日志，覆盖路由变更、手动 Docker bind、协调运行、DNS 变更和 NSG 变更摘要。
 - 托管 VM 入站 NSG 规则的优先级和源地址前缀策略控制。
 - `vm` 配置档下的 Docker socket proxy 部署选项。
 - 覆盖 Caddy 与示例 Docker 服务路由路径的 E2E 脚本。
-- ACI 中 Caddy 数据、路由状态和审计状态的持久化指导。
-- 提供基础的 VM Docker Compose 与 ACI Bicep 部署资产。
+- Caddy 生命周期监督，以及 `/livez` 和 `/readyz` 编排探针。
+- 串行协调、最近成功 Docker 发现路由回退和原子路由文件替换。
+- internal CIDR 限制、确定性 Path 优先级、统一 upstream transport 和网关凭据移除。
+- 使用显式入口公网 IP 的多 Azure DNS Zone 协调。
+- 单容器 VM 生命周期脚本，以及完整 ACI + Standard Load Balancer Bicep/Deploy to Azure 资产。
 
 ## 后续强化
 
 - 生产级多用户治理建议用 Entra ID/OIDC 替换基于令牌的管理认证。
 - 当前健康检查是简单 HTTP 状态探针；后续可增加按路由配置的间隔、阈值和主动/被动策略。
 - 当前 E2E 测试是本地 Docker 脚本；当 CI runner 能暴露 80 和 8080 端口后，应提升为 CI 检查。
+- 双活实例需要具备并发控制的外部路由存储；多个写入实例不能安全共享 `routes.json`。
 
 ## 当前 UI 状态含义
 

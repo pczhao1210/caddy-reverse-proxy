@@ -16,34 +16,45 @@ import (
 )
 
 type Manager struct {
-	cfg    model.GatewayConfig
-	logger *slog.Logger
-	mu     sync.Mutex
-	cmd    *exec.Cmd
+	cfg      model.GatewayConfig
+	logger   *slog.Logger
+	mu       sync.Mutex
+	cmd      *exec.Cmd
+	done     chan error
+	ready    bool
+	stopping bool
+	lastErr  error
 }
 
 func NewManager(cfg model.GatewayConfig, logger *slog.Logger) *Manager {
-	return &Manager{cfg: cfg, logger: logger}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Manager{cfg: cfg, logger: logger, done: make(chan error, 1)}
 }
 
 func (m *Manager) Start(ctx context.Context, initialConfig []byte) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.cmd != nil {
+		m.mu.Unlock()
 		return nil
 	}
 	if _, err := exec.LookPath(m.cfg.CaddyBin); err != nil {
+		m.mu.Unlock()
 		return fmt.Errorf("caddy binary %q not found: %w", m.cfg.CaddyBin, err)
 	}
 	if err := os.MkdirAll(m.cfg.StateDir, 0o755); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	if err := os.MkdirAll(m.cfg.CaddyDataDir, 0o755); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 
 	configPath := filepath.Join(m.cfg.StateDir, "caddy.bootstrap.json")
 	if err := os.WriteFile(configPath, initialConfig, 0o600); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 
@@ -52,19 +63,62 @@ func (m *Manager) Start(ctx context.Context, initialConfig []byte) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+m.cfg.CaddyDataDir)
 	if err := cmd.Start(); err != nil {
+		m.mu.Unlock()
 		return err
 	}
 	m.cmd = cmd
+	m.ready = false
+	m.stopping = false
+	m.lastErr = nil
 	m.logger.Info("caddy runtime started", "pid", cmd.Process.Pid)
+	m.mu.Unlock()
 
-	go func() {
-		if err := cmd.Wait(); err != nil {
-			m.logger.Warn("caddy runtime exited", "error", err)
-		} else {
-			m.logger.Info("caddy runtime exited")
+	go m.wait(ctx, cmd)
+	if err := m.waitForAdmin(ctx); err != nil {
+		m.stopCommand(cmd, true)
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.cmd != cmd {
+		if m.lastErr != nil {
+			return m.lastErr
 		}
-	}()
-	return m.waitForAdmin(ctx)
+		return fmt.Errorf("caddy runtime exited before becoming ready")
+	}
+	m.ready = true
+	return nil
+}
+
+func (m *Manager) wait(ctx context.Context, cmd *exec.Cmd) {
+	err := cmd.Wait()
+
+	m.mu.Lock()
+	expected := m.stopping || ctx.Err() != nil
+	if m.cmd == cmd {
+		m.cmd = nil
+	}
+	m.ready = false
+	if !expected {
+		if err == nil {
+			err = fmt.Errorf("caddy runtime exited unexpectedly")
+		} else {
+			err = fmt.Errorf("caddy runtime exited unexpectedly: %w", err)
+		}
+		m.lastErr = err
+	}
+	m.mu.Unlock()
+
+	if expected {
+		m.logger.Info("caddy runtime stopped")
+		return
+	}
+	m.logger.Error("caddy runtime exited", "error", err)
+	select {
+	case m.done <- err:
+	default:
+	}
 }
 
 func (m *Manager) waitForAdmin(ctx context.Context) error {
@@ -93,11 +147,39 @@ func (m *Manager) waitForAdmin(ctx context.Context) error {
 }
 
 func (m *Manager) Stop() {
+	m.stopCommand(nil, false)
+}
+
+func (m *Manager) stopCommand(expected *exec.Cmd, force bool) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cmd == nil || m.cmd.Process == nil {
+	cmd := m.cmd
+	if cmd == nil || cmd.Process == nil || expected != nil && cmd != expected {
+		m.mu.Unlock()
 		return
 	}
-	_ = m.cmd.Process.Signal(os.Interrupt)
-	m.cmd = nil
+	m.stopping = true
+	m.ready = false
+	m.mu.Unlock()
+
+	if force {
+		_ = cmd.Process.Kill()
+		return
+	}
+	_ = cmd.Process.Signal(os.Interrupt)
+}
+
+func (m *Manager) Done() <-chan error {
+	return m.done
+}
+
+func (m *Manager) Ready() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.ready
+}
+
+func (m *Manager) LastError() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastErr
 }

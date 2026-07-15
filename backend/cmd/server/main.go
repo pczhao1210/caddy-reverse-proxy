@@ -51,7 +51,8 @@ func main() {
 
 	manager := caddy.NewManager(cfg.Gateway, logger.With("component", "caddy"))
 	if err := manager.Start(ctx, initialConfig); err != nil {
-		logger.Warn("caddy runtime did not start; control plane will continue", "error", err)
+		logger.Error("caddy runtime did not start", "error", err)
+		os.Exit(1)
 	}
 	defer manager.Stop()
 
@@ -95,12 +96,14 @@ func main() {
 	go reconciler.Run(ctx)
 
 	apiServer := api.NewServer(api.Options{
-		Config:     cfg,
-		Store:      store,
-		Discoverer: apiDiscoverer,
-		Reconciler: reconciler,
-		AuditLog:   auditLogger,
-		Logger:     logger.With("component", "api"),
+		Config:           cfg,
+		Store:            store,
+		Discoverer:       apiDiscoverer,
+		Reconciler:       reconciler,
+		Runtime:          manager,
+		AuditLog:         auditLogger,
+		CertificateStore: config.NewCertificateStore(cfg.Gateway.CertificateFile),
+		Logger:           logger.With("component", "api"),
 	})
 
 	server := &http.Server{
@@ -117,10 +120,20 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	var runtimeErr error
+	select {
+	case <-ctx.Done():
+	case runtimeErr = <-manager.Done():
+		logger.Error("required caddy runtime exited; shutting down", "error", runtimeErr)
+		stop()
+	}
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
 		logger.Warn("management server shutdown failed", "error", err)
+	}
+	if runtimeErr != nil {
+		manager.Stop()
+		os.Exit(1)
 	}
 }

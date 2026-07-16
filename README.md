@@ -2,8 +2,6 @@
 
 [简体中文](README.zh-CN.md)
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpczhao1210%2Fcaddy-reverse-proxy%2Fmain%2Fdeploy%2Faci%2Fazuredeploy.json)
-
 AI Docker Farm Edge Gateway is a self-hosted ingress platform for Docker and Azure workloads. It is designed as a single container image that can receive Internet traffic directly on ports 80 and 443, route requests through an embedded Caddy runtime, expose a management UI, and coordinate Docker discovery plus Azure DNS and network state.
 
 Published image: `docker.io/pczhao1210/caddy-reverse-proxy:latest`  
@@ -14,20 +12,21 @@ Current digest: `sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e0303
 - Single gateway container image.
 - Embedded Caddy runtime managed through a localhost-only admin endpoint.
 - Go control plane API with an embedded static management UI.
-- VM profile for co-located Docker workloads and label-based discovery.
-- ACI profile for explicit route configuration.
+- VM deployment with explicit routes and optional label-based discovery for co-located Docker workloads.
+- Interactive standalone Azure VM provisioning from Cloud Shell or a local Azure CLI environment.
 - Automatic HTTPS through HTTP-01 or Azure DNS-01, including wildcard certificates.
 - Managed Identity or App Registration authentication for Azure DNS-01.
+- Built-in request security baseline for body-size limits, denied methods and paths, and IP/CIDR access policy.
 
-## Deployment profiles
+## Deployment modes
 
-### VM profile
+### Co-located VM
 
 The gateway runs on the same Ubuntu VM as the workloads. It joins the Docker network used by services, discovers containers through a restricted Docker socket or socket proxy, and forwards public traffic to internal container names and ports.
 
-### ACI profile
+### Standalone Azure VM
 
-The gateway runs as a private VNet-injected Azure Container Instance behind Standard Public Load Balancer. The Load Balancer forwards TCP 80/443 without terminating TLS, so Caddy retains certificate and multi-domain routing ownership. ACI has no local Docker discovery; routes are explicit and upstreams use private VNet addresses or private DNS.
+The gateway runs on a dedicated Ubuntu VM with one Standard static public IP. It reaches backends through private VNet addresses or private DNS and uses explicit routes. No Load Balancer or NAT Gateway is required.
 
 ## Quick Start
 
@@ -58,20 +57,41 @@ Other lifecycle commands accept either form, such as `build` or `--build`:
 
 `build` and `push` default to `pczhao1210/caddy-reverse-proxy:latest`; set `IMAGE` or `PUSH_IMAGE` to publish another repository or tag. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image, network, and path overrides.
 
-For ACI, use the Deploy to Azure button above. The template creates the VNet, ACI, Standard Load Balancer, NAT Gateway, Azure Files persistence, and managed identities. The published image is preconfigured, so only the admin token is required. Supplying `dnsZones` during deployment also grants both the control-plane UAMI and Caddy's system identity `DNS Zone Contributor`; other certificate settings can be entered later in the Console.
+The interactive deployment script supports two modes: create a standalone Azure VM, or deploy only the gateway container on the current machine. Azure mode requires Azure Cloud Shell or local Bash 4+ with Azure CLI; local mode requires Bash 4+ and a reachable Docker Engine. Choose one block below; each downloads the script to a temporary file and runs it only after a successful download:
+
+```bash
+deploy_script=$(mktemp) &&
+	curl -fsSL https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh -o "$deploy_script" &&
+	bash "$deploy_script"
+status=$?
+rm -f "${deploy_script:-}"
+test "$status" -eq 0
+```
+
+```bash
+deploy_script=$(mktemp) &&
+	wget -qO "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
+	bash "$deploy_script"
+status=$?
+rm -f "${deploy_script:-}"
+test "$status" -eq 0
+```
+
+Select the first mode to create Azure infrastructure. It selects the subscription, region, VNet, subnet, VM size, and OS disk; creates a static public IP, NSG, NIC, managed identity, and Ubuntu VM; installs Docker; and starts the gateway. Select the second mode when Docker already runs on the current host. It reuses `start.sh` from a checkout or installs the minimal launcher files under `~/caddy-reverse-proxy`, then starts only the container without changing Azure infrastructure or DNS.
+
+From a local clone, use `make azure-vm-deploy` or `make container-deploy`. Set `IMAGE` to override the digest-pinned image. Azure mode supports `ROLLBACK_ON_ERROR=false`; local mode supports the same `CONTAINER_NAME`, `DATA_DIR`, port, and `DOCKER_NETWORKS` overrides as `start.sh`. See [docs/deployment.md](docs/deployment.md) for permissions, persistence, and network constraints.
 
 ## Repository layout
 
 ```text
 backend/             Go control plane, Caddy integration, embedded UI
 config/              Example platform and route configuration
-deploy/vm/           Docker Compose deployment for the co-located VM profile
-deploy/aci/          Private ACI + Standard Load Balancer Bicep deployment
+deploy/vm/           Standalone Azure VM script and Docker Compose deployments
 docs/                Operations and security documentation
 ```
 
 ## Current implementation status
 
-The implementation includes the management API, embedded Alpine.js UI, Docker label discovery, explicit and wildcard routes, Caddy config rendering, protected/internal/public exposure modes, supervised Caddy lifecycle, liveness/readiness endpoints, atomic route and certificate persistence, Azure DNS-01 wildcard certificates, route health checks, audit logging, multi-zone Azure DNS reconciliation, and private ACI + Standard Load Balancer infrastructure.
+The implementation includes the management API, embedded Alpine.js UI, optional Docker label discovery, explicit and wildcard routes, Caddy config rendering, protected/internal/public exposure modes, a lightweight request security baseline, supervised Caddy lifecycle, liveness/readiness endpoints, atomic route and certificate persistence, Azure DNS-01 wildcard certificates, route health checks, audit logging, multi-zone Azure DNS reconciliation, and interactive standalone Azure VM provisioning.
 
 See [docs/deployment.md](docs/deployment.md) for production deployment, [docs/operations.md](docs/operations.md) for runtime options, and [docs/roadmap.md](docs/roadmap.md) for remaining capability gaps.

@@ -52,7 +52,7 @@ func (s *testRuntimeStatus) LastError() error {
 
 func TestHealthEndpointsReflectRuntimeReadiness(t *testing.T) {
 	runtime := &testRuntimeStatus{err: errors.New("caddy exited")}
-	handler := NewServer(Options{Config: model.AppConfig{Profile: model.ProfileACI}, Runtime: runtime}).Handler()
+	handler := NewServer(Options{Config: model.AppConfig{Profile: model.ProfileVM}, Runtime: runtime}).Handler()
 
 	assertStatus := func(path string, want int) {
 		t.Helper()

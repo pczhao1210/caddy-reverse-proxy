@@ -1,10 +1,38 @@
 package config
 
 import (
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aidockerfarm/gateway/internal/model"
 )
+
+func TestLoadRejectsRemovedACIProfile(t *testing.T) {
+	t.Setenv("GATEWAY_PROFILE", "aci")
+	t.Setenv("GATEWAY_CONFIG_FILE", "")
+	t.Setenv("GATEWAY_CERTIFICATE_FILE", filepath.Join(t.TempDir(), "certificate.json"))
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), `unsupported profile "aci"`) {
+		t.Fatalf("Load() error = %v, want unsupported aci profile", err)
+	}
+}
+
+func TestLoadVMProfileAllowsDisabledDockerDiscovery(t *testing.T) {
+	t.Setenv("GATEWAY_PROFILE", "vm")
+	t.Setenv("GATEWAY_DOCKER_ENABLED", "false")
+	t.Setenv("GATEWAY_CONFIG_FILE", "")
+	t.Setenv("GATEWAY_CERTIFICATE_FILE", filepath.Join(t.TempDir(), "certificate.json"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Docker.Enabled {
+		t.Fatal("Docker discovery is enabled, want disabled for standalone VM")
+	}
+}
 
 func TestNormalizeCertificateConfigDefaultsToLetsEncrypt(t *testing.T) {
 	tests := []struct {
@@ -29,6 +57,57 @@ func TestDefaultsUseLetsEncryptCertificateIssuer(t *testing.T) {
 	cfg := defaults()
 	if cfg.Gateway.Certificate.Issuer != "letsencrypt" {
 		t.Fatalf("defaults certificate issuer = %q, want letsencrypt", cfg.Gateway.Certificate.Issuer)
+	}
+}
+
+func TestDefaultsEnableSecurityBaseline(t *testing.T) {
+	cfg := defaults()
+	if !cfg.Security.Enabled || cfg.Security.MaxRequestBodyBytes != 10*1024*1024 {
+		t.Fatalf("default security = %#v", cfg.Security)
+	}
+	if len(cfg.Security.DeniedMethods) != 2 || cfg.Security.DeniedMethods[0] != "TRACE" || cfg.Security.DeniedMethods[1] != "CONNECT" {
+		t.Fatalf("default denied methods = %#v", cfg.Security.DeniedMethods)
+	}
+}
+
+func TestApplyEnvParsesSecurityBaseline(t *testing.T) {
+	t.Setenv("GATEWAY_SECURITY_MAX_REQUEST_BODY_BYTES", "2048")
+	t.Setenv("GATEWAY_SECURITY_DENIED_METHODS", "trace, m-search")
+	t.Setenv("GATEWAY_SECURITY_DENIED_PATH_PREFIXES", "/.git/, /private")
+	t.Setenv("GATEWAY_SECURITY_BLOCKED_CIDRS", "192.0.2.10, 198.51.100.0/24")
+	cfg := defaults()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	normalizeConfig(&cfg)
+	if err := validateConfig(cfg); err != nil {
+		t.Fatalf("validateConfig() error = %v", err)
+	}
+	if cfg.Security.MaxRequestBodyBytes != 2048 || cfg.Security.DeniedMethods[1] != "M-SEARCH" {
+		t.Fatalf("security = %#v", cfg.Security)
+	}
+	if cfg.Security.DeniedPathPrefixes[0] != "/.git" || len(cfg.Security.BlockedCIDRs) != 2 {
+		t.Fatalf("security normalization = %#v", cfg.Security)
+	}
+}
+
+func TestApplyEnvCanClearSecurityLists(t *testing.T) {
+	t.Setenv("GATEWAY_SECURITY_DENIED_METHODS", "")
+	t.Setenv("GATEWAY_SECURITY_DENIED_PATH_PREFIXES", "")
+	cfg := defaults()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	if len(cfg.Security.DeniedMethods) != 0 || len(cfg.Security.DeniedPathPrefixes) != 0 {
+		t.Fatalf("security lists were not cleared: %#v", cfg.Security)
+	}
+}
+
+func TestValidateConfigRejectsInvalidSecurityCIDR(t *testing.T) {
+	cfg := defaults()
+	cfg.Security.BlockedCIDRs = []string{"not-a-network"}
+	if err := validateConfig(cfg); err == nil {
+		t.Fatal("validateConfig() error = nil, want security CIDR validation error")
 	}
 }
 

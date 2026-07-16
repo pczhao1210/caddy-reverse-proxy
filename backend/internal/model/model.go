@@ -8,8 +8,7 @@ import (
 type DeploymentProfile string
 
 const (
-	ProfileVM  DeploymentProfile = "vm"
-	ProfileACI DeploymentProfile = "aci"
+	ProfileVM DeploymentProfile = "vm"
 )
 
 type AppConfig struct {
@@ -19,6 +18,7 @@ type AppConfig struct {
 	Docker                   DockerConfig      `json:"docker"`
 	Azure                    AzureConfig       `json:"azure"`
 	Auth                     AuthConfig        `json:"auth"`
+	Security                 SecurityConfig    `json:"security"`
 	Health                   HealthConfig      `json:"health"`
 	Audit                    AuditConfig       `json:"audit"`
 	RoutesFile               string            `json:"routesFile"`
@@ -104,6 +104,24 @@ type ProtectedRouteConfig struct {
 	AdditionalHeaderValue string `json:"-"`
 }
 
+type SecurityConfig struct {
+	Enabled             bool     `json:"enabled"`
+	MaxRequestBodyBytes int64    `json:"maxRequestBodyBytes"`
+	DeniedMethods       []string `json:"deniedMethods,omitempty"`
+	DeniedPathPrefixes  []string `json:"deniedPathPrefixes,omitempty"`
+	AllowedCIDRs        []string `json:"allowedCidrs,omitempty"`
+	BlockedCIDRs        []string `json:"blockedCidrs,omitempty"`
+}
+
+type RouteSecurityConfig struct {
+	Disabled                     bool     `json:"disabled,omitempty"`
+	MaxRequestBodyBytes          int64    `json:"maxRequestBodyBytes,omitempty"`
+	AdditionalDeniedMethods      []string `json:"additionalDeniedMethods,omitempty"`
+	AdditionalDeniedPathPrefixes []string `json:"additionalDeniedPathPrefixes,omitempty"`
+	AllowedCIDRs                 []string `json:"allowedCidrs,omitempty"`
+	BlockedCIDRs                 []string `json:"blockedCidrs,omitempty"`
+}
+
 type HealthConfig struct {
 	Enabled        bool   `json:"enabled"`
 	TimeoutSeconds int    `json:"timeoutSeconds"`
@@ -122,21 +140,22 @@ type UpstreamTarget struct {
 }
 
 type RouteConfig struct {
-	ID          string            `json:"id"`
-	Host        string            `json:"host"`
-	PathPrefix  string            `json:"pathPrefix,omitempty"`
-	Exposure    string            `json:"exposure"`
-	Enabled     bool              `json:"enabled"`
-	Public      bool              `json:"public"`
-	HTTPS       bool              `json:"https"`
-	WebSocket   bool              `json:"websocket"`
-	Protected   bool              `json:"protected"`
-	Source      string            `json:"source"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Upstreams   []UpstreamTarget  `json:"upstreams"`
-	Discovered  bool              `json:"discovered"`
-	LastError   string            `json:"lastError,omitempty"`
-	LastUpdated time.Time         `json:"lastUpdated,omitempty"`
+	ID          string              `json:"id"`
+	Host        string              `json:"host"`
+	PathPrefix  string              `json:"pathPrefix,omitempty"`
+	Exposure    string              `json:"exposure"`
+	Enabled     bool                `json:"enabled"`
+	Public      bool                `json:"public"`
+	HTTPS       bool                `json:"https"`
+	WebSocket   bool                `json:"websocket"`
+	Protected   bool                `json:"protected"`
+	Source      string              `json:"source"`
+	Headers     map[string]string   `json:"headers,omitempty"`
+	Security    RouteSecurityConfig `json:"security,omitempty"`
+	Upstreams   []UpstreamTarget    `json:"upstreams"`
+	Discovered  bool                `json:"discovered"`
+	LastError   string              `json:"lastError,omitempty"`
+	LastUpdated time.Time           `json:"lastUpdated,omitempty"`
 }
 
 func (route *RouteConfig) UnmarshalJSON(data []byte) error {

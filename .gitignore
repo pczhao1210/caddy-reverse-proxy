@@ -2,7 +2,6 @@
 .env
 .env.*
 !.env.example
-deploy/aci/main.bicepparam
 
 # Go
 bin/

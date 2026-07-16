@@ -45,6 +45,14 @@
       "additionalHeaderName": ""
     }
   },
+  "security": {
+    "enabled": true,
+    "maxRequestBodyBytes": 10485760,
+    "deniedMethods": ["TRACE", "CONNECT"],
+    "deniedPathPrefixes": ["/.git", "/.env"],
+    "allowedCidrs": [],
+    "blockedCidrs": []
+  },
   "health": {
     "enabled": true,
     "timeoutSeconds": 3,

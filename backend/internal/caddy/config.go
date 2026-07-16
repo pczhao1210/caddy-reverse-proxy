@@ -82,7 +82,7 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 		if !route.HTTPS {
 			skipAutoHTTPS = append(skipAutoHTTPS, route.Host)
 		}
-		entries, err := renderRoute(route, cfg.Auth, cfg.Gateway.InternalSourceRanges)
+		entries, err := renderRoute(route, cfg.Auth, cfg.Security, cfg.Gateway.InternalSourceRanges)
 		if err != nil {
 			return nil, err
 		}
@@ -122,7 +122,7 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 	return json.MarshalIndent(config, "", "  ")
 }
 
-func renderRoute(route model.RouteConfig, auth model.AuthConfig, internalSourceRanges []string) ([]map[string]any, error) {
+func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.SecurityConfig, internalSourceRanges []string) ([]map[string]any, error) {
 	match := map[string]any{"host": []string{route.Host}}
 	if route.PathPrefix != "" {
 		match["path"] = routePathMatchers(route.PathPrefix)
@@ -149,10 +149,15 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, internalSourceR
 		transportSet = true
 		upstreams = append(upstreams, map[string]any{"dial": dial})
 	}
+	securityEntries, maxRequestBodyBytes, err := renderSecurityEntries(route, security)
+	if err != nil {
+		return nil, err
+	}
 
 	if !route.Protected {
 		handler := reverseProxyHandler(upstreams, useTLS, nil)
-		return []map[string]any{{"match": []any{match}, "handle": []any{handler}, "terminal": true}}, nil
+		entry := map[string]any{"match": []any{match}, "handle": proxyHandlers(maxRequestBodyBytes, handler), "terminal": true}
+		return append(securityEntries, entry), nil
 	}
 
 	fallbackStatus := 401
@@ -168,19 +173,123 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, internalSourceR
 		"terminal": true,
 	}
 	if len(policies) == 0 {
-		return []map[string]any{fallback}, nil
+		return append(securityEntries, fallback), nil
 	}
 
 	stripHeaders := uniqueHeaderNames(policies)
-	entries := make([]map[string]any, 0, len(policies)+1)
+	entries := make([]map[string]any, 0, len(securityEntries)+len(policies)+1)
+	entries = append(entries, securityEntries...)
 	for _, header := range policies {
 		headerMatch := cloneMatch(match)
 		headerMatch["header"] = map[string]any{header.name: []string{header.value}}
 		handler := reverseProxyHandler(upstreams, useTLS, stripHeaders)
-		entries = append(entries, map[string]any{"match": []any{headerMatch}, "handle": []any{handler}, "terminal": true})
+		entries = append(entries, map[string]any{"match": []any{headerMatch}, "handle": proxyHandlers(maxRequestBodyBytes, handler), "terminal": true})
 	}
 	entries = append(entries, fallback)
 	return entries, nil
+}
+
+func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfig) ([]map[string]any, int64, error) {
+	if !security.Enabled || route.Security.Disabled {
+		return nil, 0, nil
+	}
+	maxRequestBodyBytes := security.MaxRequestBodyBytes
+	if route.Security.MaxRequestBodyBytes != 0 {
+		maxRequestBodyBytes = route.Security.MaxRequestBodyBytes
+	}
+	if maxRequestBodyBytes < 0 {
+		return nil, 0, fmt.Errorf("route %s: security maxRequestBodyBytes must not be negative", route.ID)
+	}
+
+	baseMatch := map[string]any{"host": []string{route.Host}}
+	if route.PathPrefix != "" {
+		baseMatch["path"] = routePathMatchers(route.PathPrefix)
+	}
+	entries := make([]map[string]any, 0, 5)
+	blockedCIDRs := appendUnique(security.BlockedCIDRs, route.Security.BlockedCIDRs...)
+	if len(blockedCIDRs) > 0 {
+		match := cloneMatch(baseMatch)
+		match["remote_ip"] = map[string]any{"ranges": blockedCIDRs}
+		entries = append(entries, securityRejection(match, 403))
+	}
+	for _, allowedCIDRs := range [][]string{security.AllowedCIDRs, route.Security.AllowedCIDRs} {
+		if len(allowedCIDRs) == 0 {
+			continue
+		}
+		match := cloneMatch(baseMatch)
+		match["not"] = []any{map[string]any{"remote_ip": map[string]any{"ranges": allowedCIDRs}}}
+		entries = append(entries, securityRejection(match, 403))
+	}
+	deniedMethods := appendUnique(security.DeniedMethods, route.Security.AdditionalDeniedMethods...)
+	if len(deniedMethods) > 0 {
+		match := cloneMatch(baseMatch)
+		match["method"] = deniedMethods
+		entries = append(entries, securityRejection(match, 405))
+	}
+	deniedPaths := appendUnique(security.DeniedPathPrefixes, route.Security.AdditionalDeniedPathPrefixes...)
+	if paths := restrictedPathMatchers(route.PathPrefix, deniedPaths); len(paths) > 0 {
+		match := map[string]any{"host": []string{route.Host}, "path": paths}
+		entries = append(entries, securityRejection(match, 403))
+	}
+	return entries, maxRequestBodyBytes, nil
+}
+
+func securityRejection(match map[string]any, status int) map[string]any {
+	return map[string]any{
+		"match": []any{match},
+		"handle": []any{map[string]any{
+			"handler":     "static_response",
+			"status_code": status,
+			"body":        "request blocked by gateway security policy\n",
+		}},
+		"terminal": true,
+	}
+}
+
+func restrictedPathMatchers(routePrefix string, deniedPrefixes []string) []string {
+	output := make([]string, 0, len(deniedPrefixes)*2)
+	for _, deniedPrefix := range deniedPrefixes {
+		restrictedPrefix, ok := intersectPathPrefixes(routePrefix, deniedPrefix)
+		if !ok {
+			continue
+		}
+		output = appendUnique(output, routePathMatchers(restrictedPrefix)...)
+	}
+	return output
+}
+
+func intersectPathPrefixes(left string, right string) (string, bool) {
+	left = strings.TrimRight(strings.TrimSpace(left), "/")
+	right = strings.TrimRight(strings.TrimSpace(right), "/")
+	if left == "" {
+		return right, true
+	}
+	if right == "" {
+		return left, true
+	}
+	if left == right || strings.HasPrefix(left, right+"/") {
+		return left, true
+	}
+	if strings.HasPrefix(right, left+"/") {
+		return right, true
+	}
+	return "", false
+}
+
+func appendUnique(base []string, values ...string) []string {
+	output := append([]string{}, base...)
+	seen := make(map[string]struct{}, len(output)+len(values))
+	for _, value := range output {
+		seen[value] = struct{}{}
+	}
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		output = append(output, value)
+	}
+	return output
 }
 
 func routePathMatchers(pathPrefix string) []string {
@@ -200,6 +309,14 @@ func reverseProxyHandler(upstreams []any, useTLS bool, stripHeaders []string) ma
 		handler["headers"] = map[string]any{"request": map[string]any{"delete": stripHeaders}}
 	}
 	return handler
+}
+
+func proxyHandlers(maxRequestBodyBytes int64, proxy map[string]any) []any {
+	handlers := make([]any, 0, 2)
+	if maxRequestBodyBytes > 0 {
+		handlers = append(handlers, map[string]any{"handler": "request_body", "max_size": maxRequestBodyBytes})
+	}
+	return append(handlers, proxy)
 }
 
 func uniqueHeaderNames(policies []headerPolicy) []string {

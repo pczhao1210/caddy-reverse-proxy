@@ -3,12 +3,8 @@ SHELL := /bin/sh
 IMAGE ?= pczhao1210/caddy-reverse-proxy:latest
 BACKEND_DIR := backend
 ENV_FILE ?= .env
-ACI_TEMPLATE ?= deploy/aci/main.bicep
-ACI_JSON ?= deploy/aci/azuredeploy.json
-ACI_PARAMS ?= deploy/aci/main.bicepparam
-AZURE_RESOURCE_GROUP ?=
 
-.PHONY: help test test-e2e docker-build docker-push docker-run compose-up compose-up-proxy compose-prod-up compose-prod-down compose-down aci-build aci-validate aci-what-if aci-deploy
+.PHONY: help test test-e2e docker-build docker-push docker-run compose-up compose-up-proxy compose-prod-up compose-prod-down compose-down azure-vm-deploy container-deploy
 
 help:
 	@printf '%s\n' 'Targets:'
@@ -20,10 +16,8 @@ help:
 	@printf '%s\n' '  compose-up-proxy Start the VM stack through a Docker socket proxy'
 	@printf '%s\n' '  compose-prod-up Start the production VM gateway stack'
 	@printf '%s\n' '  compose-prod-down Stop the production VM gateway stack'
-	@printf '%s\n' '  aci-build     Compile the ACI + Standard Load Balancer Bicep template'
-	@printf '%s\n' '  aci-validate  Validate the ACI deployment against Azure'
-	@printf '%s\n' '  aci-what-if   Preview ACI deployment changes'
-	@printf '%s\n' '  aci-deploy    Deploy ACI + Standard Load Balancer'
+	@printf '%s\n' '  azure-vm-deploy Interactively deploy a standalone Azure VM gateway'
+	@printf '%s\n' '  container-deploy Deploy only the gateway container on this machine'
 	@printf '%s\n' '  test-e2e      Exercise Caddy routing with the sample VM stack'
 	@printf '%s\n' '  compose-down  Stop the VM profile sample stack'
 
@@ -78,20 +72,8 @@ compose-down:
 	@test -f $(ENV_FILE) || { printf '%s\n' 'Missing $(ENV_FILE). Create one first, for example: cp .env.example .env' >&2; exit 1; }
 	IMAGE=$(IMAGE) docker compose --env-file $(ENV_FILE) -f deploy/vm/docker-compose.yml down
 
-aci-build:
-	az bicep build --file $(ACI_TEMPLATE) --outfile $(ACI_JSON)
+azure-vm-deploy:
+	DEPLOY_MODE=azure-vm bash deploy/vm/deploy.sh
 
-aci-validate:
-	@test -n "$(AZURE_RESOURCE_GROUP)" || { printf '%s\n' 'Set AZURE_RESOURCE_GROUP.' >&2; exit 1; }
-	@test -f $(ACI_PARAMS) || { printf '%s\n' 'Missing $(ACI_PARAMS). Start from deploy/aci/main.example.bicepparam.' >&2; exit 1; }
-	az deployment group validate --resource-group $(AZURE_RESOURCE_GROUP) --template-file $(ACI_TEMPLATE) --parameters $(ACI_PARAMS)
-
-aci-what-if:
-	@test -n "$(AZURE_RESOURCE_GROUP)" || { printf '%s\n' 'Set AZURE_RESOURCE_GROUP.' >&2; exit 1; }
-	@test -f $(ACI_PARAMS) || { printf '%s\n' 'Missing $(ACI_PARAMS). Start from deploy/aci/main.example.bicepparam.' >&2; exit 1; }
-	az deployment group what-if --resource-group $(AZURE_RESOURCE_GROUP) --template-file $(ACI_TEMPLATE) --parameters $(ACI_PARAMS)
-
-aci-deploy:
-	@test -n "$(AZURE_RESOURCE_GROUP)" || { printf '%s\n' 'Set AZURE_RESOURCE_GROUP.' >&2; exit 1; }
-	@test -f $(ACI_PARAMS) || { printf '%s\n' 'Missing $(ACI_PARAMS). Start from deploy/aci/main.example.bicepparam.' >&2; exit 1; }
-	az deployment group create --resource-group $(AZURE_RESOURCE_GROUP) --template-file $(ACI_TEMPLATE) --parameters $(ACI_PARAMS)
+container-deploy:
+	DEPLOY_MODE=local bash deploy/vm/deploy.sh

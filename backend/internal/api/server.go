@@ -160,6 +160,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"azure":         azure.StatusForConfig(cfg),
 		"docker":        s.dockerStatus(),
 		"certificate":   certificateStatus(cfg),
+		"security":      cfg.Security,
 		"health":        cfg.Health,
 		"audit":         map[string]any{"enabled": cfg.Audit.Enabled, "file": cfg.Audit.File},
 	})
@@ -323,12 +324,9 @@ func (s *Server) dockerStatus() dockerStatus {
 		Endpoint:   cfg.Docker.Endpoint,
 	}
 	switch {
-	case cfg.Profile != model.ProfileVM:
-		status.Reason = "Local Docker discovery is only available in the vm profile"
-		status.NextActions = []string{"Use explicit routes for ACI", "Deploy the gateway on the same VM as Docker workloads to enable discovery"}
 	case !cfg.Docker.Enabled:
 		status.Reason = "Docker discovery is disabled by configuration or GATEWAY_DOCKER_ENABLED"
-		status.NextActions = []string{"Set GATEWAY_DOCKER_ENABLED=true", "Mount /var/run/docker.sock read-only or provide a Docker socket proxy"}
+		status.NextActions = []string{"Use explicit routes, or set GATEWAY_DOCKER_ENABLED=true for local workloads", "Mount /var/run/docker.sock read-only or provide a Docker socket proxy when discovery is enabled"}
 	case s.discoverer == nil:
 		status.Reason = "Docker discovery is configured but the discoverer was not initialized"
 		status.NextActions = []string{"Check the gateway startup logs", "Verify the Docker socket path is reachable from the container"}

@@ -2,14 +2,14 @@
 
 [English](deployment.md)
 
-本项目提供两个互斥的生产部署档。两者使用同一个镜像，由 Caddy 终止 TLS，并按 Host 和 Path 将请求转发到不同服务与端口。
+本项目统一使用 VM 部署，由 Caddy 终止 TLS，并按 Host 和 Path 将请求转发到不同服务与端口。
 
-| 部署档 | 公网入口 | 服务发现 | 适用场景 |
+| 方式 | 公网入口 | 路由来源 | 适用场景 |
 |---|---|---|---|
-| VM | VM Standard 静态公网 IP | Docker 标签和显式路由 | 网关与后端服务在同一台 VM |
-| ACI | Standard Public Load Balancer | 显式路由 | 网关需要与后端 VM 分离 |
+| 独立 Azure VM | VM Standard 静态公网 IP | 指向私网后端的显式路由 | 网关与后端主机隔离 |
+| 已有/同机 VM | VM Standard 静态公网 IP | 显式路由和可选 Docker 标签 | 网关与服务共用 Docker 主机 |
 
-Application Gateway 不在最终数据路径中。Standard Load Balancer 只负责四层 TCP 转发；TLS、证书和七层路由全部由 Caddy 处理，因此域名数量不会增加 Azure Load Balancer 规则。
+不需要 Azure Load Balancer 或 NAT Gateway。VM 公网 IP 同时承担入站和出站，TLS、证书和七层路由全部由 Caddy 处理。
 
 ## 通用准备
 
@@ -29,7 +29,125 @@ docker pull pczhao1210/caddy-reverse-proxy:latest
 - 使用高强度随机管理员令牌，不能保留 `change-me`。
 - 保持 8080 和 Caddy Admin API `127.0.0.1:2019` 不对互联网开放。
 
-## VM 部署档
+## 独立 Azure VM
+
+### 前置条件
+
+- Azure Cloud Shell，或本地 Bash 4+ 与 Azure CLI 环境；脚本已使用 Azure CLI 2.88.0 验证。
+- 当前 Azure 身份可以创建资源组、网络资源、托管身份、磁盘和 VM。
+- 使用 Azure 中存储的 SSH 公钥时，部署操作者身份需要 `Microsoft.Compute/sshPublicKeys/read` 权限。交互选择还需要列出可见 SSH 公钥资源的权限；没有列表权限时可同时指定资源名和资源组。
+- 改用 Key Vault secret 时，部署操作者身份需要 secret `get` 权限；已知 secret 名时不强制要求 `list`，具有 `list` 权限则可交互选择。使用 Key Vault RBAC 时，在目标 vault 或 secret 范围授予 `Key Vault Secrets User` 即可；脚本不会修改角色分配。
+- 远程运行使用 `curl` 或 `wget`；已克隆仓库时不需要二者。
+
+脚本使用当前 Azure CLI 登录。本地没有有效登录时会启动设备代码登录。已有 VNet 位于其他资源组时，当前身份需要该子网的 join 权限；如需新建子网，还需要 subnet write 权限。
+
+### 运行交互脚本
+
+在 Azure Cloud Shell 或本地 Bash 终端任选下面一段。临时文件流程会避免 Bash 执行下载失败或不完整的内容，并保留命令的失败状态。第一个提示可选择创建独立 Azure VM 或同机仅部署容器；本节应选择 Azure VM 模式。
+
+```bash
+deploy_script=$(mktemp) &&
+    curl -fsSL https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh -o "$deploy_script" &&
+    bash "$deploy_script"
+status=$?
+rm -f "${deploy_script:-}"
+test "$status" -eq 0
+```
+
+```bash
+deploy_script=$(mktemp) &&
+    wget -qO "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
+    bash "$deploy_script"
+status=$?
+rm -f "${deploy_script:-}"
+test "$status" -eq 0
+```
+
+已克隆仓库时：
+
+```sh
+make azure-vm-deploy
+```
+
+脚本会交互选择：
+
+- Azure 订阅和区域。区域提示默认使用 Japan East（`japaneast`）；调用前设置 `LOCATION` 可修改默认区域。
+- 部署资源组与 VM 名称。
+- 已有或新建 VNet，以及其中未委派的已有或新建子网。
+- 当前区域可用的 VM 规格。低流量默认推荐 `Standard_B1ms`（1 vCPU、2 GiB）；`Standard_B1s`（1 vCPU、1 GiB）只适合作为极低流量的最低成本选项。
+- 系统盘 SKU 和容量。默认 Ubuntu Marketplace 镜像约 30 GiB，因此 30 与 32 GiB Standard SSD 都映射到 32-GiB E4 计费档；使用 E1-E3 小档位需要能够装入相应容量的 OS 镜像。
+- 已有 SSH 公钥来源。默认使用 Azure SSH Public Key 资源，也可选择 Azure Key Vault secret 或已有的本地 `.pub` 文件；脚本绝不会生成 SSH key。
+- 允许 SSH 的来源 CIDR；能检测到操作者公网 IP 时默认建议其 `/32`。
+
+Portal 中的 **Use existing key stored in Azure** 指 Azure SSH Public Key 资源（`Microsoft.Compute/sshPublicKeys`），不是 Key Vault。脚本会列出所选订阅中的这些资源并供选择。要按唯一名称跳过选择，或者在没有列表权限时完整指定资源，可使用：
+
+```sh
+SSH_PUBLIC_KEY_SOURCE=azure \
+SSH_PUBLIC_KEY_RESOURCE_NAME=Azure_Personal_Tokyo \
+SSH_PUBLIC_KEY_RESOURCE_GROUP=my-resource-group \
+bash deploy/vm/deploy.sh
+```
+
+当该名称在所选订阅的可见资源中唯一时，可以省略 `SSH_PUBLIC_KEY_RESOURCE_GROUP`。同时提供两个值时会直接读取目标资源。脚本只读取并校验其中的 OpenSSH 公钥，不会下载或处理对应私钥。
+
+Key Vault secret 的值必须是且只能是一行 OpenSSH 公钥，例如 `ssh-ed25519 AAAA...`。Key Vault **Certificate** 中的 X.509/PFX 数据和 SSH 私钥均不能作为该输入。脚本把值读取到权限为 `0600` 的临时文件，使用 `ssh-keygen` 校验后传给 `az vm create`，退出时删除；不会打印公钥值。可直接指定 vault 与 secret，跳过列表选择：
+
+```sh
+SSH_PUBLIC_KEY_SOURCE=keyvault \
+SSH_KEY_VAULT_NAME=Tokyo-KV \
+SSH_KEY_VAULT_SECRET_NAME=gateway-ssh-public-key \
+bash deploy/vm/deploy.sh
+```
+
+可选设置 `SSH_KEY_VAULT_SECRET_VERSION` 固定版本。没有 secret list 权限时，交互流程会要求输入已知 secret 名，然后继续尝试必需的 `get` 操作。
+
+确认后，脚本按需创建资源组，并创建 NSG、Standard 静态 IPv4、NIC、系统分配托管身份、Ubuntu 24.04 VM 和系统盘。cloud-init 安装 Docker、拉取公开镜像、在 VM 内生成管理员令牌、把 `/data` 持久化到 `/var/lib/caddy-reverse-proxy`、启动网关，并通过 Azure Run Command 同时等待 `/readyz` 成功和 Docker 状态变为 `healthy`。
+
+默认 Ubuntu 24.04 镜像在 Japan East 解析为 x64、Hyper-V Generation 2，无需另传架构或 generation 参数。创建资源前，脚本会读取镜像元数据，并验证所选 VM 规格支持对应架构和 generation。
+
+Azure Run Command 会先等待 cloud-init 完成，再给网关最多 5 分钟进入就绪状态。超时时会输出容器状态和最近 100 行 Docker 日志，然后开始回滚。
+
+默认容器镜像固定到 digest，因此重复部署不会在无提示的情况下切换构建版本。调用脚本时设置 `IMAGE=<仓库:tag或digest>` 可改用其他镜像。
+
+`Standard_B1s` 的内存和 CPU 基线性能均只有 `Standard_B1ms` 的一半。极低流量时可以运行当前预构建网关，但给 Ubuntu、Docker、证书操作、流量突发和路由增长留下的余量很小。应监控可用内存、OOM、CPU credits 和响应延迟；网关面向公网或预期增长时使用 `Standard_B1ms`。
+
+部署确认并开始后，任何错误默认触发回滚。脚本会删除并复查本次创建的 VM、系统盘、NIC、公网 IP、NSG，以及本次创建的 VNet 或子网；资源组和所有原有网络均会保留。只有需要保留失败资源进行诊断时才应在调用前设置 `ROLLBACK_ON_ERROR=false`，这些资源可能继续产生 Azure 费用。
+
+`/data` bind mount 可跨容器重建和 VM 重启持久化，但实际位于 VM 系统盘。VM 的系统盘删除选项为 `Delete`；删除 VM 前应备份 `/var/lib/caddy-reverse-proxy` 或创建磁盘快照。
+
+NSG 向互联网开放 TCP 80/443，TCP 22 只允许所选来源；8080 仍只绑定 VM 回环地址。脚本不会创建 Load Balancer 或 NAT Gateway。
+
+选择已有子网不会修改其路由表、子网 NSG、Azure Firewall/NVA 路径或 DNS 设置。这些控制会与脚本创建的 NIC NSG 同时生效。应确认所选子网能够访问 Ubuntu 软件源、容器镜像仓库以及每个私有后端。
+
+### 拓扑
+
+```text
+DNS -> VM Standard 静态公网 IP -> Caddy :80/:443
+                                  -> VNet 中的私网 IP 或 DNS:端口
+
+运维人员 -> SSH 隧道 -> VM 127.0.0.1:8080
+```
+
+### 部署后手工步骤
+
+1. 把每个公网域名的 A 记录指向脚本输出的公网 IP。
+2. 使用脚本输出的 SSH 和隧道命令，打开 `http://127.0.0.1:8080`，配置显式应用路由与证书。
+3. 在后端 NSG 和主机防火墙中，允许网关 VM 私网 IP 或所在子网访问所需后端端口。
+4. 使用 Azure DNS-01 时，在权威 DNS Zone 上给脚本输出的 VM 身份授予 `DNS Zone Contributor`。DNS 记录和该角色分配刻意保留为手工操作。
+
+独立 VM 不访问远端 Docker socket。后端应使用私网 IP 或私有 DNS 配置，不要为了自动发现而远程暴露 Docker Engine。
+
+## 已有或同机 VM
+
+同一个交互脚本支持在现有 Linux 主机上只部署容器。该模式需要 Bash 4+ 和已经安装且当前用户可访问的 Docker Engine；不会安装 Docker，也不会创建或修改 Azure 资源、NSG、公网 IP 或 DNS 记录。运行上方任一下载命令，然后选择 **Deploy only the gateway container on this machine**。已克隆仓库时可直接运行：
+
+```sh
+make container-deploy
+```
+
+在仓库内运行时，该模式直接委托给现有 `start.sh`；否则默认把 `start.sh`、`.env.example` 和 `config/platform.example.json` 下载到 `~/caddy-reverse-proxy`，再启动容器。下载使用临时 staging 目录，并拒绝覆盖已有的残缺或自定义 launcher 目录。可通过 `LOCAL_INSTALL_DIR` 修改 launcher 位置；`IMAGE`、`CONTAINER_NAME`、`DATA_DIR`、`HTTP_PORT`、`HTTPS_PORT`、`MANAGEMENT_PORT` 和 `DOCKER_NETWORKS` 会原样传给 `start.sh`。`DATA_DIR` 必须位于 `~/docker_files` 下；`/data` 会持久化到该目录，整个过程不修改基础设施。
+
+默认同机 launcher 会启用 Docker 发现并挂载 `/var/run/docker.sock`。该 socket 的访问权限应视为主机级权限；不接受直接 socket 访问时，应改用 socket-proxy Compose 部署。
 
 ### 拓扑
 
@@ -81,92 +199,13 @@ curl -fsS http://127.0.0.1:8080/readyz
 curl --resolve app.example.com:443:<VM 公网 IP> https://app.example.com/
 ```
 
-## ACI + Standard Load Balancer 部署档
-
-### 拓扑
-
-```text
-DNS -> Standard Public Load Balancer
-       TCP 80  -> VNet ACI:80
-       TCP 443 -> VNet ACI:443
-       HTTP readiness probe -> VNet ACI:8080/readyz
-
-ACI/Caddy -> VM 私网 IP:不同端口
-ACI 出站  -> NAT Gateway -> ACME、Azure API、镜像仓库
-```
-
-模板创建以下资源：
-
-- Standard Load Balancer 和独立的静态入站公网 IP。
-- TCP 80、TCP 443 两条负载均衡规则。
-- `/readyz` HTTP 健康探针。
-- 专用 VNet、ACI 委派子网、NSG、NAT Gateway 和独立出站公网 IP。
-- 私网 ACI 容器组，私网开放 80、443、8080。
-- Azure Files 共享并挂载到 `/data`。
-- 用于 ACR/控制面操作的 UAMI，以及用于 Caddy DNS-01 的 system identity。
-- 可选 `AcrPull`，以及在每个已配置 DNS Zone 上同时授予两个身份的 `DNS Zone Contributor`。
-
-### 前置条件
-
-- 模板默认创建专用 `10.42.0.0/24` VNet 和 `10.42.0.0/28` ACI 子网；与现有网络重叠时覆盖这些前缀。
-- 上游使用私网地址时，将专用 VNet 与后端 VNet 建立 peering。后端 NSG 应只允许来自 ACI 子网的必要端口。
-- 执行部署的身份能创建网络、ACI、存储和角色分配。
-- 目标订阅与区域已验证支持 ACI 私网 IP作为 Standard Load Balancer IP backend。
-
-### 参数与部署
-
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2Fpczhao1210%2Fcaddy-reverse-proxy%2Fmain%2Fdeploy%2Faci%2Fazuredeploy.json)
-
-模板默认使用 `pczhao1210/caddy-reverse-proxy:latest`，因此 Portal 只要求填写 `adminToken`。`dnsZones` 是可选参数，填写后模板会创建 A 记录协调与通配符证书 DNS-01 所需的两套 DNS 角色。证书域名与认证设置可稍后在 Console 中配置。
-
-使用 CLI 部署时：
-
-```sh
-cp deploy/aci/main.example.bicepparam deploy/aci/main.bicepparam
-export GATEWAY_ADMIN_TOKEN="$(openssl rand -base64 48)"
-```
-
-示例已引用公开镜像；只有需要时才添加 ACR、VNet 前缀、管理域名、镜像覆盖或 `dnsZones` 等可选设置。
-
-```sh
-make aci-build
-make aci-validate AZURE_RESOURCE_GROUP=<resource-group>
-make aci-what-if AZURE_RESOURCE_GROUP=<resource-group>
-make aci-deploy AZURE_RESOURCE_GROUP=<resource-group>
-```
-
-部署输出包含：
-
-- `ingressPublicIPAddress`：所有公网域名应解析到此地址。
-- `natPublicIPAddress`：ACI 出站地址，不能用于入站 DNS。
-- `containerPrivateIPAddress`：当前 ACI 私网地址。
-- `loadBalancerId`、`delegatedSubnetId`、两套 identity principal ID 和持久化存储账户名。
-
-模板把实际 `containerPrivateIPAddress` 写入 LB backend pool。ACI 被 IaC重新创建时，重新运行 `make aci-deploy` 会同步 backend。不要在模板外单独删除并重建容器组；如果发生这种情况，立即重跑部署并检查 backend health。
-
-管理端口 8080 没有 Load Balancer 规则，只能从 VNet、VPN 或跳板机访问。`managementHost` 默认为空；只有其 DNS 已指向入口 IP 且明确接受公网 token 保护管理入口时才设置。
-
-进入 Console 后，同时添加 `*.example.com` 与 `example.com` 证书域名，选择 Azure DNS 和托管身份。部署输出的 system identity 需要 `DNS Zone Contributor`；通过 `dnsZones` 传入的 Zone 会自动授权。精确 Host 路由优先于 `*.example.com` fallback 路由。
-
-### ACI 验证
-
-```sh
-az deployment group show -g <resource-group> -n <deployment-name> --query properties.outputs
-az network lb show -g <resource-group> -n <name>-lb
-az network lb show-backend-health -g <resource-group> -n <name>-lb
-curl --resolve app.example.com:80:<ingress-ip> http://app.example.com/
-curl --resolve app.example.com:443:<ingress-ip> https://app.example.com/
-```
-
-证书策略保存在 Azure Files 中，修改后不需要重新部署 ACI。
-
 ## 从 Application Gateway 迁移
 
 1. 将现有 DNS TTL提前降低到 300 秒，并等待旧 TTL 过期。
 2. 在新入口添加全部路由，但暂不改正式 DNS。
 3. 使用 `curl --resolve` 分别验证 HTTP、HTTPS、WebSocket、Path路由和大请求。
-4. 将 A 记录切换到 VM 或 Standard Load Balancer 的入站公网 IP。
-5. 观察 Caddy日志、`/readyz`、LB backend health、证书签发和后端错误。
+4. 将 A 记录切换到 VM 静态公网 IP。
+5. 观察 Caddy 日志、`/readyz`、证书签发和后端错误。
 6. 保留旧 Application Gateway至少一个完整 TTL窗口。
 7. 确认没有流量后再删除旧 listener、证书和 Application Gateway。
 
@@ -174,9 +213,8 @@ curl --resolve app.example.com:443:<ingress-ip> https://app.example.com/
 
 ## 可用性边界
 
-两个部署档当前都以单个 Caddy实例为写入主节点：
+VM 部署当前只有一个可写 Caddy 实例：
 
-- Standard Load Balancer 提供稳定入口，但单个 ACI 仍不是高可用部署。
 - `/data` 持久化可以避免重建后丢失证书和路由，但不能消除重启窗口。
 - 不支持让多个可写实例同时共享 `routes.json`。双活前需要把路由状态迁移到具备并发控制的外部存储。
-- 暂不启用 HTTP/3；启用时还需要 UDP 443 Load Balancer 规则和 ACI UDP 端口。
+- 暂不启用 HTTP/3；部署脚本只开放 TCP 80 和 443。

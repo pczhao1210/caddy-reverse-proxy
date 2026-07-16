@@ -9,6 +9,12 @@
       "https": false,
       "websocket": false,
       "source": "explicit",
+      "security": {
+        "maxRequestBodyBytes": 2097152,
+        "additionalDeniedMethods": ["M-SEARCH"],
+        "additionalDeniedPathPrefixes": ["/private"],
+        "blockedCidrs": ["192.0.2.0/24"]
+      },
       "upstreams": [
         {
           "name": "httpbin",

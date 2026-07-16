@@ -2,7 +2,7 @@
 
 [简体中文](operations.zh-CN.md)
 
-This guide consolidates local startup, VM/ACI deployment notes, Docker discovery labels, and runtime configuration.
+This guide consolidates local startup, standalone and co-located VM deployment notes, Docker discovery labels, and runtime configuration.
 
 ## Environment File
 
@@ -118,10 +118,7 @@ Use explicit routes for host-local upstreams, for example `http://127.0.0.1:3000
 | `make compose-up-proxy` | Start the VM stack with Docker discovery through a socket proxy. |
 | `make compose-prod-up` | Start the production VM stack and wait for readiness. |
 | `make compose-prod-down` | Stop the production VM stack while preserving its data volume. |
-| `make aci-build` | Compile the ACI + Standard Load Balancer Bicep template. |
-| `make aci-validate` | Validate the parameterized template against Azure. |
-| `make aci-what-if` | Preview Azure deployment changes. |
-| `make aci-deploy` | Deploy the ACI + Standard Load Balancer profile. |
+| `make azure-vm-deploy` | Interactively create and start a standalone Azure VM gateway. |
 | `make test-e2e` | Exercise Caddy routing with the sample VM stack. |
 | `make compose-down` | Stop the VM sample stack. |
 
@@ -138,7 +135,7 @@ Override `IMAGE` when publishing another repository or immutable tag.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GATEWAY_PROFILE` | `vm` | Deployment profile. Use `vm` for a Docker host or VM; use `aci` for Azure Container Instances with explicit routes. |
+| `GATEWAY_PROFILE` | `vm` | Deployment profile. `vm` is the only supported value. |
 | `GATEWAY_ADMIN_TOKEN` | `change-me` | Admin token for the management API and protected routes. Replace this before real deployment. |
 | `GATEWAY_ADMIN_TOKENS` | empty | Optional comma-separated token allowlist for multiple operators. |
 | `GATEWAY_AUTH_REQUIRED` | `true` | Enables token authentication for `/api/*`. |
@@ -161,6 +158,37 @@ Override `IMAGE` when publishing another repository or immutable tag.
 | `GATEWAY_CADDY_ADMIN_ENDPOINT` | `http://127.0.0.1:2019` | Local Caddy Admin API endpoint. Keep it loopback-only. |
 
 Default recommendation: leave `GATEWAY_MANAGEMENT_HOST` empty and access the UI through SSH tunnel, VPN, Bastion, Tailscale, or WireGuard.
+
+## Request Security Baseline
+
+The gateway enables a lightweight request security baseline on every explicit, discovered, and public management route. It uses native Caddy matchers and handlers; it is not an SQL injection or XSS rules engine.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `GATEWAY_SECURITY_ENABLED` | `true` | Enables the security baseline globally. |
+| `GATEWAY_SECURITY_MAX_REQUEST_BODY_BYTES` | `10485760` | Maximum request body size in bytes. `0` disables the global body limit. |
+| `GATEWAY_SECURITY_DENIED_METHODS` | `TRACE,CONNECT` | Comma-separated HTTP methods rejected with 405. |
+| `GATEWAY_SECURITY_DENIED_PATH_PREFIXES` | `/.git,/.env` | Comma-separated path prefixes rejected with 403. |
+| `GATEWAY_SECURITY_ALLOWED_CIDRS` | empty | Optional direct-client IP/CIDR allowlist. Requests outside it receive 403. |
+| `GATEWAY_SECURITY_BLOCKED_CIDRS` | empty | Direct-client IP/CIDR blocklist rejected with 403. |
+
+`remote_ip` evaluates the peer connected directly to Caddy, not an untrusted forwarded header. Confirm that any load balancer in front of the gateway preserves the source address before using CIDR policy. A blocked range takes precedence over an allowlist. Global and route-specific allowlists are cumulative, so a request must satisfy both when both are present.
+
+Explicit routes can add restrictions or override the body limit through their persisted JSON or the route API:
+
+```json
+{
+	"security": {
+		"maxRequestBodyBytes": 52428800,
+		"additionalDeniedMethods": ["M-SEARCH"],
+		"additionalDeniedPathPrefixes": ["/private"],
+		"allowedCidrs": ["10.0.0.0/8"],
+		"blockedCidrs": ["10.0.0.5"]
+	}
+}
+```
+
+A positive route body limit replaces the global value. Omitted or `0` inherits it. Set `security.disabled` to `true` only for a route that must bypass the entire baseline. Route overrides are inactive while `GATEWAY_SECURITY_ENABLED=false`. The effective global policy is visible in the Console Network view and in `/api/status`.
 
 ## Certificate Policy
 
@@ -202,7 +230,7 @@ Containers without `caddy.enable=true` are still shown in discovery. The UI can 
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `GATEWAY_DOCKER_ENABLED` | `true` in `vm`, disabled by default in `aci` | Enables local Docker discovery. |
+| `GATEWAY_DOCKER_ENABLED` | `true` | Enables local Docker discovery. The standalone Azure VM script explicitly sets it to `false`; explicit routes remain available. |
 | `GATEWAY_DOCKER_SOCKET` | `/var/run/docker.sock` | Docker socket path inside the gateway container. The sample mounts the host socket read-only. |
 | `GATEWAY_DOCKER_ENDPOINT` | empty | Optional HTTP endpoint for a Docker socket proxy, for example `http://docker-socket-proxy:2375`. |
 
@@ -214,7 +242,7 @@ Use `make compose-up-proxy` when you want Docker discovery through a restricted 
 |---|---|---|
 | `GATEWAY_AZURE_ENABLED` | `false` | Enables Azure reconciliation through `DefaultAzureCredential`. On Azure, this should use Managed Identity. |
 | `GATEWAY_AZURE_MANAGE_DNS` | `true` | Creates, updates, and cleans up gateway-managed Azure DNS A records for public/protected routes. |
-| `GATEWAY_AZURE_MANAGE_NSG` | `true` | Creates or deletes the gateway-managed VM NSG inbound rule for 80/443 in `vm` profile. Ignored for VM-style NSG management in `aci`. |
+| `GATEWAY_AZURE_MANAGE_NSG` | `true` | Creates or deletes the gateway-managed VM NSG inbound rule for 80/443. |
 | `GATEWAY_AZURE_SUBSCRIPTION_ID` | empty | Azure subscription ID. `AZURE_SUBSCRIPTION_ID` is also accepted. |
 | `GATEWAY_AZURE_RESOURCE_GROUP` | empty | Resource group containing the DNS zone and NSG. |
 | `GATEWAY_AZURE_DNS_ZONE` | empty | Legacy single Azure DNS zone name. |
@@ -222,7 +250,7 @@ Use `make compose-up-proxy` when you want Docker discovery through a restricted 
 | `GATEWAY_AZURE_NSG_NAME` | empty | Network Security Group name for VM profile 80/443 inbound rule reconciliation. |
 | `GATEWAY_AZURE_NSG_PRIORITY` | `120` | Priority for the managed VM NSG allow rule. |
 | `GATEWAY_AZURE_NSG_SOURCE_PREFIXES` | `*` | Comma-separated source CIDR prefixes for the managed VM NSG allow rule. |
-| `GATEWAY_PUBLIC_IP_ADDRESS` | empty | Required ingress IPv4 address when DNS management has public routes: VM public IP or Load Balancer ingress IP. Egress IP discovery is intentionally not used. |
+| `GATEWAY_PUBLIC_IP_ADDRESS` | empty | Required VM public IPv4 address when DNS management has public routes. Egress IP discovery is intentionally not used. |
 
 Required Managed Identity roles:
 
@@ -238,26 +266,18 @@ Cleanup behavior:
 
 ## VM Deployment Notes
 
-1. Assign a managed identity to the VM.
+For a new standalone Azure VM, run `make azure-vm-deploy`, or invoke `deploy/vm/deploy.sh` from Cloud Shell with the `curl`/`wget` commands in [deployment.md](deployment.md). The script interactively selects the region, VNet, subnet, VM size, and disk; installs Docker; disables local Docker discovery; starts the gateway; and prints its IPs, managed identity, admin token, SSH command, and management tunnel.
+
+After the script completes, manually configure DNS A records, explicit routes, backend NSG/firewall access, certificate policy, and any Azure DNS role assignment. The script does not change those resources.
+
+For an existing or co-located Docker VM:
+
+1. Assign a managed identity when Azure DNS or NSG reconciliation is required.
 2. Grant the identity the Azure roles above.
 3. Keep SSH/private management access through Tailscale, WireGuard, Bastion, VPN, or an equivalent private path.
 4. Start with `IMAGE=<published-image> DOCKER_NETWORKS=<network1,network2> ./start.sh start`.
 
 The gateway only manages inbound NSG access for 80 and 443. It does not open 8080. `start.sh` binds the management UI to `127.0.0.1:8080` on the host.
-
-## ACI Deployment Notes
-
-ACI mode is an explicit-route gateway profile. It does not discover Docker containers from another VM.
-
-Requirements:
-
-- A published gateway image in a registry reachable by ACI.
-- System-assigned and user-assigned identities on the container group.
-- DNS permissions if the gateway updates Azure DNS.
-- Persistent storage for `/data/caddy` and `/data/platform` before production use.
-- Network reachability from the container group to every upstream.
-
-The supported production path is a private, VNet-injected ACI behind Standard Public Load Balancer. The Bicep template creates a dedicated VNet, TCP 80/443 rules, a `/readyz` probe, NAT Gateway egress, Azure Files persistence, and a backend entry using the deployed ACI private IP. The UAMI is used for ACR and control-plane Azure operations; Caddy DNS-01 uses the system identity. Supplying `dnsZones` grants both identities `DNS Zone Contributor`. Peer the dedicated VNet when upstreams live in another private VNet. VM-style runtime NSG management remains disabled in ACI mode. See [deployment.md](deployment.md).
 
 ## Runtime Probes
 

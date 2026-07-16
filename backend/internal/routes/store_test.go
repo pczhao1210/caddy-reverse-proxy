@@ -85,6 +85,55 @@ func TestAddNormalizesUpstreamURL(t *testing.T) {
 	}
 }
 
+func TestAddNormalizesRouteSecurity(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	route, err := store.Add(model.RouteConfig{
+		Host: "app.localhost",
+		Security: model.RouteSecurityConfig{
+			AdditionalDeniedMethods:      []string{" trace ", "TRACE"},
+			AdditionalDeniedPathPrefixes: []string{" /private/ ", "/private"},
+			AllowedCIDRs:                 []string{" 10.0.0.0/8 ", "10.0.0.0/8"},
+		},
+		Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}},
+	})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	if len(route.Security.AdditionalDeniedMethods) != 1 || route.Security.AdditionalDeniedMethods[0] != "TRACE" {
+		t.Fatalf("denied methods = %#v", route.Security.AdditionalDeniedMethods)
+	}
+	if len(route.Security.AdditionalDeniedPathPrefixes) != 1 || route.Security.AdditionalDeniedPathPrefixes[0] != "/private" {
+		t.Fatalf("denied paths = %#v", route.Security.AdditionalDeniedPathPrefixes)
+	}
+	if len(route.Security.AllowedCIDRs) != 1 || route.Security.AllowedCIDRs[0] != "10.0.0.0/8" {
+		t.Fatalf("allowed CIDRs = %#v", route.Security.AllowedCIDRs)
+	}
+}
+
+func TestAddRejectsInvalidRouteSecurity(t *testing.T) {
+	tests := []struct {
+		name     string
+		security model.RouteSecurityConfig
+	}{
+		{name: "negative body limit", security: model.RouteSecurityConfig{MaxRequestBodyBytes: -1}},
+		{name: "invalid method", security: model.RouteSecurityConfig{AdditionalDeniedMethods: []string{"BAD METHOD"}}},
+		{name: "invalid path", security: model.RouteSecurityConfig{AdditionalDeniedPathPrefixes: []string{"private/*"}}},
+		{name: "invalid CIDR", security: model.RouteSecurityConfig{BlockedCIDRs: []string{"not-a-network"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			store := NewStore("")
+			_, err := store.Add(model.RouteConfig{
+				Host: "app.localhost", Security: test.security,
+				Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}},
+			})
+			if err == nil {
+				t.Fatal("Add() error = nil, want security validation error")
+			}
+		})
+	}
+}
+
 func TestLoadPreservesDisabledRoute(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "routes.json")
 	data := []byte(`{"routes":[{"id":"disabled","host":"disabled.localhost","enabled":false,"upstreams":[{"name":"svc","url":"http://svc:8080"}]}]}`)

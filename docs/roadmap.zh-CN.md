@@ -18,7 +18,7 @@
 - 清理陈旧的、由网关管理的 Azure DNS A 记录。
 - 通过 `DefaultAzureCredential` 协调 VM NSG 的 80/443 入站规则。
 - 当不再存在公网路由时，清理由网关管理的 VM NSG 入站规则。
-- Standard Public Load Balancer 后的 VNet 私网 ACI 配置档，包含 NAT Gateway 出站和 Azure Files 持久化。
+- 交互式独立 Azure VM 部署，支持 VNet/子网选择、静态公网 IP、受限 NSG、托管身份、Docker 安装和网关状态持久化。
 - 通过管理员令牌保护管理 API。
 - 面向小团队运维的多管理员令牌 allowlist。
 - 可配置的 protected 路由策略，支持 bearer token、`X-Admin-Token` 和可选自定义 Header 匹配。
@@ -32,7 +32,7 @@
 - 串行协调、最近成功 Docker 发现路由回退和原子路由文件替换。
 - internal CIDR 限制、确定性 Path 优先级、统一 upstream transport 和网关凭据移除。
 - 使用显式入口公网 IP 的多 Azure DNS Zone 协调。
-- 单容器 VM 生命周期脚本，以及完整 ACI + Standard Load Balancer Bicep/Deploy to Azure 资产。
+- 已有主机的单容器生命周期脚本，以及可从 Cloud Shell/本地 Azure CLI 运行的独立 Azure VM 部署脚本。
 
 ## 后续强化
 
@@ -46,7 +46,7 @@
 - Azure `Enabled: No` 表示 Azure 协调器代码可用，但当前配置未启用。
 - Azure `Configured: No` 表示缺少订阅、资源组、DNS Zone 或 NSG 名称等必要设置。
 - 本地预览中的 Docker `Active: No` 通常表示预览启动时设置了 `GATEWAY_DOCKER_ENABLED=false`，或者未挂载 Docker socket。
-- Docker 发现仅在 `vm` 配置档中有意义，在 `aci` 模式下不是预期能力。
+- 独立网关 VM 使用显式私网后端路由并刻意关闭本地发现，因此 Docker `Active: No` 属于预期状态。
 
 ## 建议的下一里程碑
 

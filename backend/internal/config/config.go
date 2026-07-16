@@ -29,11 +29,8 @@ func Load() (model.AppConfig, error) {
 		cfg.Gateway.Certificate = certificate
 	}
 	normalizeConfig(&cfg)
-	if cfg.Profile != model.ProfileVM && cfg.Profile != model.ProfileACI {
+	if cfg.Profile != model.ProfileVM {
 		return cfg, fmt.Errorf("unsupported profile %q", cfg.Profile)
-	}
-	if cfg.Profile == model.ProfileACI && os.Getenv("GATEWAY_DOCKER_ENABLED") == "" {
-		cfg.Docker.Enabled = false
 	}
 	if cfg.Control.Listen == "" {
 		return cfg, fmt.Errorf("control.listen is required")
@@ -60,6 +57,10 @@ func normalizeConfig(cfg *model.AppConfig) {
 	}
 	cfg.Gateway.InternalSourceRanges = compactStrings(cfg.Gateway.InternalSourceRanges)
 	cfg.Auth.AdminTokens = compactStrings(cfg.Auth.AdminTokens)
+	cfg.Security.DeniedMethods = normalizeMethods(cfg.Security.DeniedMethods)
+	cfg.Security.DeniedPathPrefixes = normalizePathPrefixes(cfg.Security.DeniedPathPrefixes)
+	cfg.Security.AllowedCIDRs = compactStrings(cfg.Security.AllowedCIDRs)
+	cfg.Security.BlockedCIDRs = compactStrings(cfg.Security.BlockedCIDRs)
 	cfg.Azure.NSGSourceAddressPrefixes = compactStrings(cfg.Azure.NSGSourceAddressPrefixes)
 	cfg.Azure.DNSZones = normalizeDNSZones(cfg.Azure)
 }
@@ -83,6 +84,21 @@ func validateConfig(cfg model.AppConfig) error {
 	}
 	if (cfg.Auth.ProtectedRoutes.AdditionalHeaderName == "") != (cfg.Auth.ProtectedRoutes.AdditionalHeaderValue == "") {
 		return fmt.Errorf("protected route custom header requires both name and value")
+	}
+	if cfg.Security.MaxRequestBodyBytes < 0 {
+		return fmt.Errorf("security.maxRequestBodyBytes must not be negative")
+	}
+	if err := validateMethods("security.deniedMethods", cfg.Security.DeniedMethods); err != nil {
+		return err
+	}
+	if err := validatePathPrefixes("security.deniedPathPrefixes", cfg.Security.DeniedPathPrefixes); err != nil {
+		return err
+	}
+	if err := validateCIDRs("security.allowedCidrs", cfg.Security.AllowedCIDRs); err != nil {
+		return err
+	}
+	if err := validateCIDRs("security.blockedCidrs", cfg.Security.BlockedCIDRs); err != nil {
+		return err
 	}
 	if cfg.Azure.NSGPriority != 0 && (cfg.Azure.NSGPriority < 100 || cfg.Azure.NSGPriority > 4096) {
 		return fmt.Errorf("azure nsgPriority must be between 100 and 4096")
@@ -293,6 +309,12 @@ func defaults() model.AppConfig {
 			AllowBearerToken:      true,
 			AllowAdminTokenHeader: true,
 		}},
+		Security: model.SecurityConfig{
+			Enabled:             true,
+			MaxRequestBodyBytes: 10 * 1024 * 1024,
+			DeniedMethods:       []string{"TRACE", "CONNECT"},
+			DeniedPathPrefixes:  []string{"/.git", "/.env"},
+		},
 		Health:                   model.HealthConfig{Enabled: true, TimeoutSeconds: 3, DefaultPath: "/"},
 		Audit:                    model.AuditConfig{Enabled: true, File: "/data/platform/audit.jsonl"},
 		RoutesFile:               envOr("GATEWAY_ROUTES_FILE", "/data/platform/routes.json"),
@@ -453,6 +475,28 @@ func applyEnv(cfg *model.AppConfig) error {
 	if value := os.Getenv("GATEWAY_AUTH_REQUIRED"); value != "" {
 		cfg.Auth.Required = parseBool(value)
 	}
+	if value := os.Getenv("GATEWAY_SECURITY_ENABLED"); value != "" {
+		cfg.Security.Enabled = parseBool(value)
+	}
+	if value := os.Getenv("GATEWAY_SECURITY_MAX_REQUEST_BODY_BYTES"); value != "" {
+		maxBytes, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || maxBytes < 0 {
+			return fmt.Errorf("GATEWAY_SECURITY_MAX_REQUEST_BODY_BYTES must be a non-negative integer")
+		}
+		cfg.Security.MaxRequestBodyBytes = maxBytes
+	}
+	if value, found := os.LookupEnv("GATEWAY_SECURITY_DENIED_METHODS"); found {
+		cfg.Security.DeniedMethods = splitCSV(value)
+	}
+	if value, found := os.LookupEnv("GATEWAY_SECURITY_DENIED_PATH_PREFIXES"); found {
+		cfg.Security.DeniedPathPrefixes = splitCSV(value)
+	}
+	if value, found := os.LookupEnv("GATEWAY_SECURITY_ALLOWED_CIDRS"); found {
+		cfg.Security.AllowedCIDRs = splitCSV(value)
+	}
+	if value, found := os.LookupEnv("GATEWAY_SECURITY_BLOCKED_CIDRS"); found {
+		cfg.Security.BlockedCIDRs = splitCSV(value)
+	}
 	if value := os.Getenv("GATEWAY_HEALTH_ENABLED"); value != "" {
 		cfg.Health.Enabled = parseBool(value)
 	}
@@ -517,4 +561,83 @@ func compactStrings(parts []string) []string {
 		}
 	}
 	return output
+}
+
+func normalizeMethods(methods []string) []string {
+	output := compactStrings(methods)
+	for index := range output {
+		output[index] = strings.ToUpper(output[index])
+	}
+	return uniqueStrings(output)
+}
+
+func normalizePathPrefixes(prefixes []string) []string {
+	output := compactStrings(prefixes)
+	for index := range output {
+		if output[index] != "/" {
+			output[index] = strings.TrimRight(output[index], "/")
+		}
+	}
+	return uniqueStrings(output)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	output := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		output = append(output, value)
+	}
+	return output
+}
+
+func validateMethods(field string, methods []string) error {
+	for _, method := range methods {
+		if !validHTTPToken(method) {
+			return fmt.Errorf("%s contains invalid HTTP method %q", field, method)
+		}
+	}
+	return nil
+}
+
+func validHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
+			continue
+		}
+		switch character {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validatePathPrefixes(field string, prefixes []string) error {
+	for _, prefix := range prefixes {
+		if !strings.HasPrefix(prefix, "/") || strings.Contains(prefix, "*") {
+			return fmt.Errorf("%s entry %q must start with / and must not contain wildcards", field, prefix)
+		}
+	}
+	return nil
+}
+
+func validateCIDRs(field string, ranges []string) error {
+	for _, source := range ranges {
+		if net.ParseIP(source) == nil {
+			if _, _, err := net.ParseCIDR(source); err != nil {
+				return fmt.Errorf("%s contains invalid IP or CIDR %q", field, source)
+			}
+		}
+	}
+	return nil
 }

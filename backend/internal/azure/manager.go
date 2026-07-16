@@ -50,7 +50,7 @@ func NewManager(cfg model.AppConfig, logger *slog.Logger) (*Manager, error) {
 		}
 		manager.dnsClient = client
 	}
-	if cfg.Azure.ManageNSG && cfg.Profile == model.ProfileVM {
+	if cfg.Azure.ManageNSG {
 		client, err := armnetwork.NewSecurityRulesClient(cfg.Azure.SubscriptionID, credential, nil)
 		if err != nil {
 			return nil, err
@@ -88,7 +88,7 @@ func (m *Manager) Reconcile(ctx context.Context, routes []model.RouteConfig) mod
 			return result
 		}
 	}
-	if m.cfg.Azure.ManageNSG && m.cfg.Profile == model.ProfileVM {
+	if m.cfg.Azure.ManageNSG {
 		rules, deleted, err := m.reconcileNSG(ctx, len(publicRoutes) > 0)
 		result.NSGRules = rules
 		result.NSGDeleted = deleted

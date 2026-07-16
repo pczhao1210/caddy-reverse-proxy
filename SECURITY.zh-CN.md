@@ -22,8 +22,8 @@ Caddy 的管理端点绑定在平台容器内部的 `127.0.0.1:2019`。绝不能
 
 ## Azure 身份
 
-控制面 Azure 操作与 Azure DNS-01 都应优先使用托管身份。ACI 会刻意分离控制面 UAMI 与 Caddy 使用的 system identity。没有托管身份的环境可以使用 App Registration；客户端密钥只保存在 `/data/platform/certificate.json` 中，API 永不回传。该文件在 POSIX 文件系统上以 `0600` 创建；ACI Azure Files 使用 CIFS，POSIX mode bit 不是其安全边界，因此必须限制存储账户访问与网络可达性，并把整个 `/data` 作为含敏感信息的状态保护。绝不能把客户端密钥、服务主体密码或本地 Azure 令牌写入镜像。
+控制面 Azure 操作与 Azure DNS-01 都应优先使用 VM 的系统分配托管身份。没有托管身份的环境可以使用 App Registration；客户端密钥只保存在 `/data/platform/certificate.json` 中，API 永不回传。该文件在 POSIX 文件系统上以 `0600` 创建；应把 VM 磁盘和整个 `/data` 作为含敏感信息的状态保护。绝不能把客户端密钥、服务主体密码或本地 Azure 令牌写入镜像。
 
 ## 网络规则
 
-`vm` 配置档应只管理 80 和 443 所需的最小入站规则。ACI 配置档由 Standard Load Balancer 负责入站、NAT Gateway 负责出站，绝不能把 NAT 出站地址写入公网 DNS。8080 没有公网 LB 规则；后端 VM 端口应只允许 ACI 子网，并允许 `AzureLoadBalancer` 服务标签探测 ACI 8080。
+VM NSG 应允许公网 TCP 80/443，并把 TCP 22 限制在运维来源 CIDR 或私有管理路径。8080 只绑定 VM 回环地址，不能创建入站规则。后端端口应只允许网关 VM 私网 IP 或所在子网；部署脚本不会修改后端 NSG 或主机防火墙。

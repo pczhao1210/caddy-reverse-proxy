@@ -346,3 +346,80 @@ func TestRenderProtectedRouteStripsGatewayCredentials(t *testing.T) {
 		t.Fatalf("deleted request headers = %#v", deleted)
 	}
 }
+
+func TestRenderSecurityBaselineBeforeReverseProxy(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{
+		Security: model.SecurityConfig{
+			Enabled:             true,
+			MaxRequestBodyBytes: 1024,
+			DeniedMethods:       []string{"TRACE", "CONNECT"},
+			DeniedPathPrefixes:  []string{"/.git", "/api/private"},
+			AllowedCIDRs:        []string{"10.0.0.0/8"},
+			BlockedCIDRs:        []string{"10.0.0.5"},
+		},
+		Gateway: model.GatewayConfig{HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy"},
+	})
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "api", Host: "app.example.com", PathPrefix: "/api", Enabled: true,
+		Security:  model.RouteSecurityConfig{AllowedCIDRs: []string{"10.1.0.0/16"}, AdditionalDeniedMethods: []string{"M-SEARCH"}},
+		Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	if len(routes) != 6 {
+		t.Fatalf("routes length = %d, want 5 security entries plus proxy", len(routes))
+	}
+	blockedMatch := routes[0].(map[string]any)["match"].([]any)[0].(map[string]any)
+	blockedRanges := blockedMatch["remote_ip"].(map[string]any)["ranges"].([]any)
+	if len(blockedRanges) != 1 || blockedRanges[0] != "10.0.0.5" {
+		t.Fatalf("blocked ranges = %#v", blockedRanges)
+	}
+	routeAllowMatch := routes[2].(map[string]any)["match"].([]any)[0].(map[string]any)
+	notMatchers := routeAllowMatch["not"].([]any)
+	allowedRanges := notMatchers[0].(map[string]any)["remote_ip"].(map[string]any)["ranges"].([]any)
+	if len(allowedRanges) != 1 || allowedRanges[0] != "10.1.0.0/16" {
+		t.Fatalf("route allowed ranges = %#v", allowedRanges)
+	}
+	methodMatch := routes[3].(map[string]any)["match"].([]any)[0].(map[string]any)
+	methods := methodMatch["method"].([]any)
+	if len(methods) != 3 || methods[2] != "M-SEARCH" {
+		t.Fatalf("denied methods = %#v", methods)
+	}
+	pathMatch := routes[4].(map[string]any)["match"].([]any)[0].(map[string]any)
+	paths := pathMatch["path"].([]any)
+	if len(paths) != 2 || paths[0] != "/api/private" || paths[1] != "/api/private/*" {
+		t.Fatalf("denied paths = %#v", paths)
+	}
+	proxyHandlers := routes[5].(map[string]any)["handle"].([]any)
+	if len(proxyHandlers) != 2 || proxyHandlers[0].(map[string]any)["handler"] != "request_body" || proxyHandlers[0].(map[string]any)["max_size"].(float64) != 1024 {
+		t.Fatalf("proxy handlers = %#v", proxyHandlers)
+	}
+}
+
+func TestRenderRouteCanDisableSecurityBaseline(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{
+		Security: model.SecurityConfig{Enabled: true, MaxRequestBodyBytes: 1024, DeniedMethods: []string{"TRACE"}},
+		Gateway:  model.GatewayConfig{HTTPListen: ":80", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy"},
+	})
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "upload", Host: "upload.example.com", Enabled: true, Security: model.RouteSecurityConfig{Disabled: true},
+		Upstreams: []model.UpstreamTarget{{URL: "http://upload:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	if len(routes) != 1 || len(routes[0].(map[string]any)["handle"].([]any)) != 1 {
+		t.Fatalf("routes = %#v, want unmodified proxy route", routes)
+	}
+}

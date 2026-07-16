@@ -17,7 +17,6 @@ import (
 	"github.com/aidockerfarm/gateway/internal/config"
 	"github.com/aidockerfarm/gateway/internal/docker"
 	"github.com/aidockerfarm/gateway/internal/health"
-	"github.com/aidockerfarm/gateway/internal/model"
 	"github.com/aidockerfarm/gateway/internal/reconcile"
 	"github.com/aidockerfarm/gateway/internal/routes"
 )
@@ -57,7 +56,7 @@ func main() {
 	defer manager.Stop()
 
 	var dockerDiscoverer *docker.Discoverer
-	if cfg.Profile == model.ProfileVM && cfg.Docker.Enabled {
+	if cfg.Docker.Enabled {
 		dockerDiscoverer = docker.NewDiscoverer(cfg.Docker, logger.With("component", "docker"))
 	}
 	var reconcileDiscoverer reconcile.Discoverer

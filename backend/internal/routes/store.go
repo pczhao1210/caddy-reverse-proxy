@@ -3,6 +3,7 @@ package routes
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -226,6 +227,61 @@ func validate(route model.RouteConfig) error {
 			return fmt.Errorf("upstream url %q must use http or https", upstream.URL)
 		}
 	}
+	if err := validateRouteSecurity(route.Security); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateRouteSecurity(security model.RouteSecurityConfig) error {
+	if security.MaxRequestBodyBytes < 0 {
+		return fmt.Errorf("security.maxRequestBodyBytes must not be negative")
+	}
+	for _, method := range security.AdditionalDeniedMethods {
+		if !validHTTPToken(strings.ToUpper(strings.TrimSpace(method))) {
+			return fmt.Errorf("security.additionalDeniedMethods contains invalid HTTP method %q", method)
+		}
+	}
+	for _, prefix := range security.AdditionalDeniedPathPrefixes {
+		prefix = strings.TrimSpace(prefix)
+		if !strings.HasPrefix(prefix, "/") || strings.Contains(prefix, "*") {
+			return fmt.Errorf("security.additionalDeniedPathPrefixes entry %q must start with / and must not contain wildcards", prefix)
+		}
+	}
+	if err := validateIPRanges("security.allowedCidrs", security.AllowedCIDRs); err != nil {
+		return err
+	}
+	return validateIPRanges("security.blockedCidrs", security.BlockedCIDRs)
+}
+
+func validHTTPToken(value string) bool {
+	if value == "" {
+		return false
+	}
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
+			continue
+		}
+		switch character {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validateIPRanges(field string, ranges []string) error {
+	for _, source := range ranges {
+		source = strings.TrimSpace(source)
+		if net.ParseIP(source) == nil {
+			if _, _, err := net.ParseCIDR(source); err != nil {
+				return fmt.Errorf("%s contains invalid IP or CIDR %q", field, source)
+			}
+		}
+	}
 	return nil
 }
 
@@ -264,6 +320,10 @@ func normalize(route *model.RouteConfig) {
 	for index := range route.Upstreams {
 		route.Upstreams[index].URL = strings.TrimSpace(route.Upstreams[index].URL)
 	}
+	route.Security.AdditionalDeniedMethods = normalizeMethods(route.Security.AdditionalDeniedMethods)
+	route.Security.AdditionalDeniedPathPrefixes = normalizePathPrefixes(route.Security.AdditionalDeniedPathPrefixes)
+	route.Security.AllowedCIDRs = normalizeStrings(route.Security.AllowedCIDRs)
+	route.Security.BlockedCIDRs = normalizeStrings(route.Security.BlockedCIDRs)
 	if route.PathPrefix != "/" {
 		route.PathPrefix = strings.TrimRight(route.PathPrefix, "/")
 	}
@@ -290,6 +350,47 @@ func normalize(route *model.RouteConfig) {
 		route.Public = true
 		route.Protected = false
 	}
+}
+
+func normalizeMethods(methods []string) []string {
+	output := normalizeStrings(methods)
+	for index := range output {
+		output[index] = strings.ToUpper(output[index])
+	}
+	return uniqueStrings(output)
+}
+
+func normalizePathPrefixes(prefixes []string) []string {
+	output := normalizeStrings(prefixes)
+	for index := range output {
+		if output[index] != "/" {
+			output[index] = strings.TrimRight(output[index], "/")
+		}
+	}
+	return uniqueStrings(output)
+}
+
+func normalizeStrings(values []string) []string {
+	output := make([]string, 0, len(values))
+	for _, value := range values {
+		if value = strings.TrimSpace(value); value != "" {
+			output = append(output, value)
+		}
+	}
+	return uniqueStrings(output)
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	output := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		output = append(output, value)
+	}
+	return output
 }
 
 func sourceOr(value string, fallback string) string {

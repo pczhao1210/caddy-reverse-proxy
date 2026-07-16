@@ -25,13 +25,8 @@ func StatusForConfig(cfg model.AppConfig) Status {
 			"Azure DNS A record reconciliation",
 		},
 	}
-	if cfg.Profile == model.ProfileVM {
-		status.Capabilities = append(status.Capabilities, "VM NSG inbound rule reconciliation")
-		status.Capabilities = append(status.Capabilities, "NSG priority and source-prefix policy")
-	} else {
-		status.Capabilities = append(status.Capabilities, "ACI explicit-route mode")
-		status.Warnings = append(status.Warnings, "ACI mode does not support local Docker discovery")
-	}
+	status.Capabilities = append(status.Capabilities, "VM NSG inbound rule reconciliation")
+	status.Capabilities = append(status.Capabilities, "NSG priority and source-prefix policy")
 	if cfg.Azure.Enabled && cfg.Azure.SubscriptionID == "" {
 		status.MissingSettings = append(status.MissingSettings, "subscriptionId")
 	}
@@ -41,10 +36,10 @@ func StatusForConfig(cfg model.AppConfig) Status {
 	if cfg.Azure.Enabled && cfg.Azure.ManageDNS && cfg.Azure.PublicIPAddress == "" {
 		status.MissingSettings = append(status.MissingSettings, "publicIpAddress")
 	}
-	if cfg.Azure.Enabled && cfg.Profile == model.ProfileVM && cfg.Azure.ManageNSG && cfg.Azure.NetworkSecurityGroupName == "" {
+	if cfg.Azure.Enabled && cfg.Azure.ManageNSG && cfg.Azure.NetworkSecurityGroupName == "" {
 		status.MissingSettings = append(status.MissingSettings, "networkSecurityGroupName")
 	}
-	if cfg.Azure.Enabled && cfg.Profile == model.ProfileVM && cfg.Azure.ManageNSG && cfg.Azure.ResourceGroup == "" {
+	if cfg.Azure.Enabled && cfg.Azure.ManageNSG && cfg.Azure.ResourceGroup == "" {
 		status.MissingSettings = append(status.MissingSettings, "resourceGroup")
 	}
 	status.Configured = cfg.Azure.Enabled && len(status.MissingSettings) == 0

@@ -18,7 +18,7 @@ This document tracks what is currently implemented and what still needs to be co
 - Cleanup for stale gateway-managed Azure DNS A records.
 - VM NSG inbound 80/443 rule reconciliation through `DefaultAzureCredential`.
 - Cleanup for the gateway-managed VM NSG inbound rule when no public routes remain.
-- Private VNet ACI profile behind Standard Public Load Balancer with NAT Gateway egress and Azure Files persistence.
+- Interactive standalone Azure VM provisioning with VNet/subnet selection, static public IP, restricted NSG, managed identity, Docker installation, and persistent gateway state.
 - Authenticated management API through an admin token.
 - Multi-token management API allowlist for small-team operation.
 - Configurable protected-route policy with bearer token, `X-Admin-Token`, and optional custom header matching.
@@ -32,7 +32,7 @@ This document tracks what is currently implemented and what still needs to be co
 - Serialized reconciliation, last-known-good Docker discovery routes, and atomic route file replacement.
 - Internal-route CIDR enforcement, deterministic path priority, homogeneous upstream transports, and gateway credential stripping.
 - Multi-zone Azure DNS reconciliation with an explicit ingress public IP.
-- Single-container VM lifecycle script and complete ACI + Standard Load Balancer Bicep/Deploy to Azure assets.
+- Single-container lifecycle script for existing hosts and a Cloud Shell/local Azure CLI deployment script for standalone Azure VMs.
 
 ## Further Hardening
 
@@ -46,7 +46,7 @@ This document tracks what is currently implemented and what still needs to be co
 - Azure `Enabled: No` means the Azure reconcilers are available but disabled in config.
 - Azure `Configured: No` means required settings such as subscription, resource group, DNS zone, or NSG name are missing.
 - Docker `Active: No` in the local preview usually means the preview was started with `GATEWAY_DOCKER_ENABLED=false` or without a mounted Docker socket.
-- Docker discovery is only expected to work in the `vm` profile, not in `aci` mode.
+- Docker `Active: No` is expected on standalone gateway VMs, which use explicit private-backend routes and intentionally disable local discovery.
 
 ## Recommended Next Milestone
 

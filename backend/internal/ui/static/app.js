@@ -133,6 +133,12 @@ const messages = {
     'details.dnsProvider': 'DNS Challenge',
     'details.healthEnabled': 'Health Checks',
     'details.healthTimeout': 'Health Timeout',
+    'details.securityEnabled': 'Security Baseline',
+    'details.securityBodyLimit': 'Request Body Limit',
+    'details.securityDeniedMethods': 'Denied Methods',
+    'details.securityDeniedPaths': 'Denied Paths',
+    'details.securityAllowedCidrs': 'Allowed CIDRs',
+    'details.securityBlockedCidrs': 'Blocked CIDRs',
     'details.auditEnabled': 'Audit Log',
     'details.auditFile': 'Audit File',
     'source.explicit': 'Explicit',
@@ -144,18 +150,14 @@ const messages = {
     'msg.certificateSaved': 'Certificate policy applied and Caddy reloaded',
     'msg.certificateRefreshed': 'Certificate refresh requested',
     'msg.customCARequired': 'Custom ACME issuer requires a CA directory URL',
-    'msg.aciNoDockerDiscovery': 'ACI mode does not support local Docker discovery',
     'msg.azureDisabled': 'Azure managers are disabled',
     'msg.enableAzure': 'Enable Azure integration',
     'msg.assignManagedIdentityRoles': 'Assign managed identity roles',
     'msg.setAzureIdentifiers': 'Set subscription, resource group, DNS zone, and NSG names',
     'msg.runApplyAzure': 'Run Apply to reconcile DNS records and NSG rules',
-    'msg.vmOnlyDockerDiscovery': 'Local Docker discovery is only available in the vm profile',
-    'msg.useExplicitRoutesForAci': 'Use explicit routes for ACI',
-    'msg.deployOnVmForDiscovery': 'Deploy the gateway on the same VM as Docker workloads to enable discovery',
     'msg.dockerDisabled': 'Docker discovery is disabled by configuration or GATEWAY_DOCKER_ENABLED',
-    'msg.enableDockerDiscovery': 'Set GATEWAY_DOCKER_ENABLED=true',
-    'msg.mountDockerSocket': 'Mount /var/run/docker.sock read-only or provide a Docker socket proxy',
+    'msg.enableDockerDiscovery': 'Use explicit routes, or set GATEWAY_DOCKER_ENABLED=true for local workloads',
+    'msg.mountDockerSocket': 'Mount /var/run/docker.sock read-only or provide a Docker socket proxy when discovery is enabled',
     'msg.dockerNotInitialized': 'Docker discovery is configured but the discoverer was not initialized',
     'msg.checkStartupLogs': 'Check the gateway startup logs',
     'msg.verifyDockerSocketPath': 'Verify the Docker socket path is reachable from the container',
@@ -302,6 +304,12 @@ const messages = {
     'details.dnsProvider': 'DNS Challenge',
     'details.healthEnabled': '健康检查',
     'details.healthTimeout': '健康超时',
+    'details.securityEnabled': '安全基线',
+    'details.securityBodyLimit': '请求体上限',
+    'details.securityDeniedMethods': '拒绝方法',
+    'details.securityDeniedPaths': '拒绝路径',
+    'details.securityAllowedCidrs': '允许 CIDR',
+    'details.securityBlockedCidrs': '阻止 CIDR',
     'details.auditEnabled': '审计日志',
     'details.auditFile': '审计文件',
     'source.explicit': '显式',
@@ -313,18 +321,14 @@ const messages = {
     'msg.certificateSaved': '证书策略已应用，Caddy 已重新加载',
     'msg.certificateRefreshed': '已请求证书刷新',
     'msg.customCARequired': '自定义 ACME 签发器需要 CA Directory URL',
-    'msg.aciNoDockerDiscovery': 'ACI 模式不支持本地 Docker 自动发现',
     'msg.azureDisabled': 'Azure 管理器已禁用',
     'msg.enableAzure': '启用 Azure 集成',
     'msg.assignManagedIdentityRoles': '为托管身份分配角色',
     'msg.setAzureIdentifiers': '设置订阅、资源组、DNS Zone 和 NSG 名称',
     'msg.runApplyAzure': '运行“应用”以协调 DNS 记录和 NSG 规则',
-    'msg.vmOnlyDockerDiscovery': '本地 Docker 自动发现仅在 vm 配置档中可用',
-    'msg.useExplicitRoutesForAci': '在 ACI 中使用显式路由',
-    'msg.deployOnVmForDiscovery': '将网关部署在与 Docker 工作负载相同的 VM 上以启用发现',
     'msg.dockerDisabled': 'Docker 自动发现已被配置或 GATEWAY_DOCKER_ENABLED 禁用',
-    'msg.enableDockerDiscovery': '设置 GATEWAY_DOCKER_ENABLED=true',
-    'msg.mountDockerSocket': '以只读方式挂载 /var/run/docker.sock，或提供 Docker socket 代理',
+    'msg.enableDockerDiscovery': '使用显式路由，或为本机工作负载设置 GATEWAY_DOCKER_ENABLED=true',
+    'msg.mountDockerSocket': '启用发现时，以只读方式挂载 /var/run/docker.sock，或提供 Docker socket 代理',
     'msg.dockerNotInitialized': 'Docker 自动发现已配置，但 discoverer 未初始化',
     'msg.checkStartupLogs': '检查网关启动日志',
     'msg.verifyDockerSocketPath': '确认容器内可访问 Docker socket 路径',
@@ -343,18 +347,14 @@ const messages = {
 };
 
 const backendMessageKeys = new Map([
-  ['ACI mode does not support local Docker discovery', 'msg.aciNoDockerDiscovery'],
   ['Azure managers are disabled', 'msg.azureDisabled'],
   ['Enable Azure integration', 'msg.enableAzure'],
   ['Assign managed identity roles', 'msg.assignManagedIdentityRoles'],
   ['Set subscription, resource group, DNS zone, and NSG names', 'msg.setAzureIdentifiers'],
   ['Run Apply to reconcile DNS records and NSG rules', 'msg.runApplyAzure'],
-  ['Local Docker discovery is only available in the vm profile', 'msg.vmOnlyDockerDiscovery'],
-  ['Use explicit routes for ACI', 'msg.useExplicitRoutesForAci'],
-  ['Deploy the gateway on the same VM as Docker workloads to enable discovery', 'msg.deployOnVmForDiscovery'],
   ['Docker discovery is disabled by configuration or GATEWAY_DOCKER_ENABLED', 'msg.dockerDisabled'],
-  ['Set GATEWAY_DOCKER_ENABLED=true', 'msg.enableDockerDiscovery'],
-  ['Mount /var/run/docker.sock read-only or provide a Docker socket proxy', 'msg.mountDockerSocket'],
+  ['Use explicit routes, or set GATEWAY_DOCKER_ENABLED=true for local workloads', 'msg.enableDockerDiscovery'],
+  ['Mount /var/run/docker.sock read-only or provide a Docker socket proxy when discovery is enabled', 'msg.mountDockerSocket'],
   ['Docker discovery is configured but the discoverer was not initialized', 'msg.dockerNotInitialized'],
   ['Check the gateway startup logs', 'msg.checkStartupLogs'],
   ['Verify the Docker socket path is reachable from the container', 'msg.verifyDockerSocketPath'],
@@ -694,6 +694,7 @@ document.addEventListener('alpine:init', () => {
       const reconcileAzure = this.status?.lastReconcile?.azure || {};
       const certificate = this.status?.certificate || {};
       const health = this.status?.health || {};
+      const security = this.status?.security || {};
       const audit = this.status?.audit || {};
       return this.detailList({
         [this.t('details.enabled')]: this.yesNo(azure.enabled),
@@ -714,6 +715,12 @@ document.addEventListener('alpine:init', () => {
         [this.t('details.dnsProvider')]: certificate.dnsProvider || this.t('status.none'),
         [this.t('details.healthEnabled')]: this.yesNo(health.enabled),
         [this.t('details.healthTimeout')]: health.timeoutSeconds ? health.timeoutSeconds + 's' : '-',
+        [this.t('details.securityEnabled')]: this.yesNo(security.enabled),
+        [this.t('details.securityBodyLimit')]: this.formatBytes(security.maxRequestBodyBytes),
+        [this.t('details.securityDeniedMethods')]: this.listText(security.deniedMethods),
+        [this.t('details.securityDeniedPaths')]: this.listText(security.deniedPathPrefixes),
+        [this.t('details.securityAllowedCidrs')]: this.listText(security.allowedCidrs),
+        [this.t('details.securityBlockedCidrs')]: this.listText(security.blockedCidrs),
         [this.t('details.auditEnabled')]: this.yesNo(audit.enabled),
         [this.t('details.auditFile')]: audit.file || '-',
         [this.t('details.warnings')]: this.listText([...(azure.warnings || []), ...(reconcileAzure.warnings || [])]) || this.t('status.none'),
@@ -763,6 +770,14 @@ document.addEventListener('alpine:init', () => {
 
     listText(values) {
       return (values || []).map((value) => this.translateBackendText(value)).join(', ') || '-';
+    },
+
+    formatBytes(value) {
+      const bytes = Number(value) || 0;
+      if (bytes === 0) return this.t('status.none');
+      if (bytes % (1024 * 1024) === 0) return bytes / (1024 * 1024) + ' MiB';
+      if (bytes % 1024 === 0) return bytes / 1024 + ' KiB';
+      return bytes + ' B';
     },
 
     translateBackendText(value) {

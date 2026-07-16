@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 IMAGE=${IMAGE:-pczhao1210/caddy-reverse-proxy:latest}
 PUSH_IMAGE=${PUSH_IMAGE:-}
 CONTAINER_NAME=${CONTAINER_NAME:-caddy-reverse-proxy}
@@ -118,28 +118,28 @@ stop_container() {
 }
 
 validate_networks() {
+  networks=
   [ -z "$DOCKER_NETWORKS" ] && return
-  old_ifs=$IFS
-  IFS=,
-  set -- $DOCKER_NETWORKS
-  IFS=$old_ifs
-  for network in "$@"; do
+  networks=$(printf '%s\n' "$DOCKER_NETWORKS" | tr ',' '\n')
+  while IFS= read -r network; do
     docker network inspect "$network" >/dev/null 2>&1 || fail "Docker network does not exist: $network"
-  done
+  done <<EOF
+$networks
+EOF
 }
 
 connect_networks() {
+  networks=
   [ -z "$DOCKER_NETWORKS" ] && return
-  old_ifs=$IFS
-  IFS=,
-  set -- $DOCKER_NETWORKS
-  IFS=$old_ifs
-  for network in "$@"; do
+  networks=$(printf '%s\n' "$DOCKER_NETWORKS" | tr ',' '\n')
+  while IFS= read -r network; do
     if ! docker network connect "$network" "$CONTAINER_NAME"; then
       stop_container
       fail "Failed to connect $CONTAINER_NAME to Docker network $network."
     fi
-  done
+  done <<EOF
+$networks
+EOF
 }
 
 wait_for_readiness() {

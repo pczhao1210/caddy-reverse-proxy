@@ -84,6 +84,7 @@ type bindContainerRequest struct {
 	ContainerID string `json:"containerId"`
 	Host        string `json:"host"`
 	Port        int    `json:"port"`
+	Scheme      string `json:"scheme"`
 	Exposure    string `json:"exposure"`
 	HTTPS       bool   `json:"https"`
 	WebSocket   bool   `json:"websocket"`
@@ -237,6 +238,7 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	gatewayNetworks := gatewayContainerNetworks(containers)
+	containers, routeHints = withoutGatewayContainer(containers, routeHints)
 	for index := range containers {
 		if port, err := bindPort(containers[index], 0); err == nil {
 			policy := containerBindPolicy(containers[index], gatewayNetworks, port)
@@ -275,7 +277,16 @@ func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "container not found")
 		return
 	}
+	if gateway, found := gatewayContainer(containers); found && gateway.ID == container.ID {
+		writeError(w, http.StatusBadRequest, "the gateway container cannot be bound as an upstream")
+		return
+	}
 	port, err := bindPort(container, request.Port)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	scheme, err := normalizeUpstreamScheme(request.Scheme)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -299,7 +310,7 @@ func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
 		HTTPS:     request.HTTPS,
 		WebSocket: request.WebSocket,
 		Source:    "explicit",
-		Upstreams: []model.UpstreamTarget{{Name: upstreamName, URL: fmt.Sprintf("http://%s:%d", upstreamName, port)}},
+		Upstreams: []model.UpstreamTarget{{Name: upstreamName, URL: fmt.Sprintf("%s://%s:%d", scheme, upstreamName, port)}},
 	}
 	created, err := s.store.Add(route)
 	if err != nil {
@@ -310,7 +321,7 @@ func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, err.Error())
 		return
 	}
-	s.audit("route.bind", map[string]any{"routeId": created.ID, "containerId": container.ID, "host": created.Host, "port": port, "exposure": created.Exposure})
+	s.audit("route.bind", map[string]any{"routeId": created.ID, "containerId": container.ID, "host": created.Host, "port": port, "scheme": scheme, "exposure": created.Exposure})
 	writeJSON(w, http.StatusCreated, map[string]any{"route": created, "reconcile": s.reconciler.Sync(r.Context())})
 }
 
@@ -345,6 +356,38 @@ func findContainer(containers []model.ContainerService, id string) (model.Contai
 		}
 	}
 	return model.ContainerService{}, false
+}
+
+func withoutGatewayContainer(containers []model.ContainerService, routeHints []model.RouteConfig) ([]model.ContainerService, []model.RouteConfig) {
+	gateway, found := gatewayContainer(containers)
+	if !found {
+		return containers, routeHints
+	}
+	visible := make([]model.ContainerService, 0, len(containers)-1)
+	for _, container := range containers {
+		if container.ID != gateway.ID {
+			visible = append(visible, container)
+		}
+	}
+	gatewayRouteID := "docker-" + shortID(gateway.ID)
+	visibleHints := make([]model.RouteConfig, 0, len(routeHints))
+	for _, route := range routeHints {
+		if route.ID != gatewayRouteID {
+			visibleHints = append(visibleHints, route)
+		}
+	}
+	return visible, visibleHints
+}
+
+func normalizeUpstreamScheme(value string) (string, error) {
+	scheme := strings.ToLower(strings.TrimSpace(value))
+	if scheme == "" {
+		return "http", nil
+	}
+	if scheme != "http" && scheme != "https" {
+		return "", fmt.Errorf("upstream scheme must be http or https")
+	}
+	return scheme, nil
 }
 
 func bindPort(container model.ContainerService, requested int) (int, error) {
@@ -385,17 +428,21 @@ func bindUpstreamName(container model.ContainerService, gatewayNetworks []string
 }
 
 func gatewayContainerNetworks(containers []model.ContainerService) []string {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return nil
-	}
-	gateway, ok := findContainer(containers, hostname)
+	gateway, ok := gatewayContainer(containers)
 	if !ok {
 		return nil
 	}
 	output := make([]string, len(gateway.Networks))
 	copy(output, gateway.Networks)
 	return output
+}
+
+func gatewayContainer(containers []model.ContainerService) (model.ContainerService, bool) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		return model.ContainerService{}, false
+	}
+	return findContainer(containers, hostname)
 }
 
 func containerBindPolicy(container model.ContainerService, gatewayNetworks []string, port int) model.ContainerBindPolicy {

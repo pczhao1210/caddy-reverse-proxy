@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -14,6 +15,15 @@ import (
 
 type testCertificateStore struct {
 	certificate model.CertificateConfig
+}
+
+type testDiscoverer struct {
+	containers []model.ContainerService
+	routes     []model.RouteConfig
+}
+
+func (d *testDiscoverer) Discover(context.Context) ([]model.ContainerService, []model.RouteConfig, error) {
+	return d.containers, d.routes, nil
 }
 
 func (s *testCertificateStore) Save(certificate model.CertificateConfig) error {
@@ -145,6 +155,91 @@ func TestContainerBindPolicyPublishedPortSuggestsHostGateway(t *testing.T) {
 	}
 	if policy.SuggestedUpstream != "http://host.docker.internal:18080" {
 		t.Fatalf("SuggestedUpstream = %q", policy.SuggestedUpstream)
+	}
+}
+
+func TestWithoutGatewayContainerFiltersContainerAndRouteHint(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname() error = %v", err)
+	}
+	gatewayID := hostname + "abcdef"
+	containers := []model.ContainerService{
+		{ID: gatewayID, Name: "gateway"},
+		{ID: "workload-id", Name: "workload"},
+	}
+	hints := []model.RouteConfig{
+		{ID: "docker-" + shortID(gatewayID)},
+		{ID: "docker-workload"},
+	}
+
+	visible, visibleHints := withoutGatewayContainer(containers, hints)
+	if len(visible) != 1 || visible[0].ID != "workload-id" {
+		t.Fatalf("visible containers = %#v, want only workload", visible)
+	}
+	if len(visibleHints) != 1 || visibleHints[0].ID != "docker-workload" {
+		t.Fatalf("visible route hints = %#v, want only workload hint", visibleHints)
+	}
+}
+
+func TestContainersEndpointExcludesGatewayContainer(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname() error = %v", err)
+	}
+	discoverer := &testDiscoverer{containers: []model.ContainerService{
+		{ID: hostname + "abcdef", Name: "gateway", Networks: []string{"proxy"}, Ports: []model.ContainerPort{{PrivatePort: 8080, Type: "tcp"}}},
+		{ID: "workload-id", Name: "workload", Networks: []string{"proxy"}, Ports: []model.ContainerPort{{PrivatePort: 8080, Type: "tcp"}}},
+	}}
+	handler := NewServer(Options{Discoverer: discoverer}).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/discovery/containers", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/discovery/containers status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if strings.Contains(response.Body.String(), `"name":"gateway"`) || !strings.Contains(response.Body.String(), `"name":"workload"`) {
+		t.Fatalf("unexpected discovery response: %s", response.Body.String())
+	}
+}
+
+func TestBindEndpointRejectsGatewayContainer(t *testing.T) {
+	hostname, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("os.Hostname() error = %v", err)
+	}
+	gatewayID := hostname + "abcdef"
+	discoverer := &testDiscoverer{containers: []model.ContainerService{{
+		ID: gatewayID, Name: "gateway", Networks: []string{"proxy"}, Ports: []model.ContainerPort{{PrivatePort: 8080, Type: "tcp"}},
+	}}}
+	handler := NewServer(Options{Discoverer: discoverer}).Handler()
+	request := httptest.NewRequest(http.MethodPost, "/api/discovery/bind", strings.NewReader(`{"containerId":"`+gatewayID+`","port":8080}`))
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "gateway container cannot be bound") {
+		t.Fatalf("POST /api/discovery/bind status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestNormalizeUpstreamScheme(t *testing.T) {
+	for _, test := range []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{input: "", want: "http"},
+		{input: " HTTPS ", want: "https"},
+		{input: "tcp", wantErr: true},
+	} {
+		got, err := normalizeUpstreamScheme(test.input)
+		if (err != nil) != test.wantErr {
+			t.Fatalf("normalizeUpstreamScheme(%q) error = %v, wantErr %t", test.input, err, test.wantErr)
+		}
+		if got != test.want {
+			t.Fatalf("normalizeUpstreamScheme(%q) = %q, want %q", test.input, got, test.want)
+		}
 	}
 }
 

@@ -105,9 +105,25 @@ func (d *Discoverer) Discover(ctx context.Context) ([]model.ContainerService, []
 
 func toService(container containerPayload) model.ContainerService {
 	ports := make([]model.ContainerPort, 0, len(container.Ports))
+	portIndexes := make(map[string]int, len(container.Ports))
 	for _, port := range container.Ports {
-		ports = append(ports, model.ContainerPort{PrivatePort: port.PrivatePort, PublicPort: port.PublicPort, Type: port.Type})
+		portType := strings.ToLower(strings.TrimSpace(port.Type))
+		key := strconv.Itoa(port.PrivatePort) + "/" + portType
+		if index, exists := portIndexes[key]; exists {
+			if ports[index].PublicPort == 0 && port.PublicPort > 0 {
+				ports[index].PublicPort = port.PublicPort
+			}
+			continue
+		}
+		portIndexes[key] = len(ports)
+		ports = append(ports, model.ContainerPort{PrivatePort: port.PrivatePort, PublicPort: port.PublicPort, Type: portType})
 	}
+	sort.Slice(ports, func(left int, right int) bool {
+		if ports[left].PrivatePort != ports[right].PrivatePort {
+			return ports[left].PrivatePort < ports[right].PrivatePort
+		}
+		return ports[left].Type < ports[right].Type
+	})
 	networks := make([]string, 0, len(container.NetworkSettings.Networks))
 	endpoints := make([]model.NetworkEndpoint, 0, len(container.NetworkSettings.Networks))
 	addresses := make([]string, 0, len(container.NetworkSettings.Networks))

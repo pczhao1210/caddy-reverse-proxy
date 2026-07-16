@@ -207,7 +207,7 @@ A positive route body limit replaces the global value. Omitted or `0` inherits i
 | `GATEWAY_CERTIFICATE_AZURE_CLIENT_ID` | empty | Client ID required for App Registration authentication. |
 | `GATEWAY_CERTIFICATE_AZURE_CLIENT_SECRET` | empty | Client secret required for App Registration authentication. Prefer Console entry to shell history. |
 
-The Network page includes certificate controls backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE`, applied immediately, and restored after restart. Client secrets are persisted but never returned by the API.
+The Network page includes certificate controls backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE` and then reconciled immediately; the Console reports persistence and Caddy reload failures separately. Saved settings are restored after restart. Client secrets are persisted but never returned by the API. The refresh endpoint reloads the current TLS configuration through reconciliation; it does not force ACME certificate renewal.
 
 Wildcard names require DNS-01. Add both `*.example.com` and `example.com` when the apex is needed, select Azure DNS, and use Let's Encrypt or a custom ACME issuer. Caddy's ZeroSSL issuer does not accept configurable DNS challenges. The Azure identity needs `DNS Zone Contributor` on the authoritative zone. Wildcard certificate subjects and wildcard route hosts are independent; exact route hosts are evaluated before `*.example.com` routes.
 
@@ -224,7 +224,7 @@ The `vm` profile imports these labels from running containers.
 | `caddy.websocket` | No | `true` | Marks websocket/SSE-friendly workloads. |
 | `exposure.mode` | No | `public` | One of `public`, `protected`, `internal`. |
 
-Containers without `caddy.enable=true` are still shown in discovery. The UI can also bind a discovered container manually; manual bindings are saved as explicit routes and do not require labels.
+Containers without `caddy.enable=true` are still shown in discovery. The gateway container itself is excluded. The UI can also bind a discovered container manually; manual bindings require an explicit container port and upstream protocol, are saved as explicit routes, and do not require labels.
 
 ## Docker Discovery Variables
 

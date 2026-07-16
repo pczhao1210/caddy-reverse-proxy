@@ -45,3 +45,22 @@ func TestDiscoverUsesHTTPEndpointAndHealthPathLabel(t *testing.T) {
 		t.Fatalf("upstream URL = %q", routes[0].Upstreams[0].URL)
 	}
 }
+
+func TestToServiceDeduplicatesContainerPorts(t *testing.T) {
+	service := toService(containerPayload{
+		Names: []string{"/web"},
+		Ports: []portPayload{
+			{PrivatePort: 443, PublicPort: 8443, Type: "tcp"},
+			{PrivatePort: 80, PublicPort: 0, Type: "TCP"},
+			{PrivatePort: 80, PublicPort: 8080, Type: "tcp"},
+			{PrivatePort: 80, PublicPort: 8080, Type: "tcp"},
+		},
+	})
+
+	if len(service.Ports) != 2 {
+		t.Fatalf("ports = %#v, want two unique container ports", service.Ports)
+	}
+	if service.Ports[0].PrivatePort != 80 || service.Ports[0].PublicPort != 8080 || service.Ports[0].Type != "tcp" {
+		t.Fatalf("first port = %#v, want normalized 80/tcp mapping", service.Ports[0])
+	}
+}

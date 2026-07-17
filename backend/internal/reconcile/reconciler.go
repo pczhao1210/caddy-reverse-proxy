@@ -18,6 +18,10 @@ type CertificateUpdater interface {
 	UpdateCertificate(model.CertificateConfig)
 }
 
+type ConfigUpdater interface {
+	UpdateConfig(model.AppConfig)
+}
+
 type Loader interface {
 	Load(context.Context, []byte) error
 }
@@ -170,6 +174,15 @@ func (r *Reconciler) UpdateCertificate(cert model.CertificateConfig) {
 	r.mu.Unlock()
 	if updater, ok := r.renderer.(CertificateUpdater); ok {
 		updater.UpdateCertificate(cert)
+	}
+}
+
+func (r *Reconciler) UpdateConfig(cfg model.AppConfig) {
+	r.mu.Lock()
+	r.cfg = cfg
+	r.mu.Unlock()
+	if updater, ok := r.renderer.(ConfigUpdater); ok {
+		updater.UpdateConfig(cfg)
 	}
 }
 

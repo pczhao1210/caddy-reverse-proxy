@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -89,7 +91,7 @@ func (m *Manager) Reconcile(ctx context.Context, routes []model.RouteConfig) mod
 		}
 	}
 	if m.cfg.Azure.ManageNSG {
-		rules, deleted, err := m.reconcileNSG(ctx, len(publicRoutes) > 0)
+		rules, deleted, err := m.reconcileNSG(ctx, publicNSGPorts(publicRoutes))
 		result.NSGRules = rules
 		result.NSGDeleted = deleted
 		if err != nil {
@@ -274,19 +276,19 @@ func recordSetRelativeName(record *armdns.RecordSet) (string, bool) {
 	return name, true
 }
 
-func (m *Manager) reconcileNSG(ctx context.Context, shouldAllowPublicTraffic bool) (int, int, error) {
+func (m *Manager) reconcileNSG(ctx context.Context, destinationPorts []int) (int, int, error) {
 	if m.nsgClient == nil {
 		return 0, 0, nil
 	}
 	if m.cfg.Azure.ResourceGroup == "" || m.cfg.Azure.NetworkSecurityGroupName == "" {
 		return 0, 0, fmt.Errorf("resourceGroup and networkSecurityGroupName are required for Azure NSG reconciliation")
 	}
-	if !shouldAllowPublicTraffic {
+	if len(destinationPorts) == 0 {
 		deleted, err := m.deleteNSGRule(ctx)
 		return 0, deleted, err
 	}
 	poller, err := m.nsgClient.BeginCreateOrUpdate(ctx, m.cfg.Azure.ResourceGroup, m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, armnetwork.SecurityRule{
-		Properties: nsgRuleProperties(m.cfg.Azure),
+		Properties: nsgRuleProperties(m.cfg.Azure, destinationPorts),
 	}, nil)
 	if err != nil {
 		return 0, 0, fmt.Errorf("reconcile NSG rule %s: %w", managedNSGRuleName, err)
@@ -297,7 +299,7 @@ func (m *Manager) reconcileNSG(ctx context.Context, shouldAllowPublicTraffic boo
 	return 1, 0, nil
 }
 
-func nsgRuleProperties(cfg model.AzureConfig) *armnetwork.SecurityRulePropertiesFormat {
+func nsgRuleProperties(cfg model.AzureConfig, destinationPorts []int) *armnetwork.SecurityRulePropertiesFormat {
 	priority := cfg.NSGPriority
 	if priority <= 0 {
 		priority = 120
@@ -306,11 +308,18 @@ func nsgRuleProperties(cfg model.AzureConfig) *armnetwork.SecurityRuleProperties
 	if len(sources) == 0 {
 		sources = []string{"*"}
 	}
+	ports := make([]*string, 0, len(destinationPorts))
+	for _, port := range destinationPorts {
+		ports = append(ports, to.Ptr(strconv.Itoa(port)))
+	}
+	if len(ports) == 0 {
+		ports = []*string{to.Ptr("80"), to.Ptr("443")}
+	}
 	properties := &armnetwork.SecurityRulePropertiesFormat{
 		Description:              to.Ptr("Managed by AI Docker Farm Gateway"),
 		Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolTCP),
 		SourcePortRange:          to.Ptr("*"),
-		DestinationPortRanges:    []*string{to.Ptr("80"), to.Ptr("443")},
+		DestinationPortRanges:    ports,
 		DestinationAddressPrefix: to.Ptr("*"),
 		Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
 		Priority:                 to.Ptr(priority),
@@ -322,6 +331,24 @@ func nsgRuleProperties(cfg model.AzureConfig) *armnetwork.SecurityRuleProperties
 		properties.SourceAddressPrefixes = toPtrs(sources)
 	}
 	return properties
+}
+
+func publicNSGPorts(routes []model.RouteConfig) []int {
+	if len(routes) == 0 {
+		return nil
+	}
+	unique := map[int]struct{}{80: {}, 443: {}}
+	for _, route := range routes {
+		if route.ListenerPort > 0 && route.ListenerPort <= 65535 {
+			unique[route.ListenerPort] = struct{}{}
+		}
+	}
+	ports := make([]int, 0, len(unique))
+	for port := range unique {
+		ports = append(ports, port)
+	}
+	sort.Ints(ports)
+	return ports
 }
 
 func toPtrs(values []string) []*string {

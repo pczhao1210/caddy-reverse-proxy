@@ -21,10 +21,11 @@ The platform is intentionally packaged as one gateway image. The control plane o
 ## Runtime components
 
 - Gateway process: starts the API server, reconcile loop, and Caddy runtime.
-- Caddy runtime: required child process that listens on 80 and 443 and receives generated config over a localhost-only admin endpoint. Startup or unexpected runtime failure terminates the container for orchestrator restart.
-- Route sources: persisted explicit routes, plus optional Docker discovery for co-located workloads.
+- Caddy runtime: required child process that listens on the default 80/443 endpoints plus configured listener ports and receives generated config over a localhost-only admin endpoint. Startup or unexpected runtime failure terminates the container for orchestrator restart.
+- Route sources: persisted listeners, backend pools, and routing rules, plus optional Docker discovery for co-located workloads.
 - Reconciler: merges route sources, renders desired gateway config, reloads Caddy, and records status.
 - Request security baseline: emits native Caddy matchers and handlers before each proxy for body-size limits, denied methods and paths, and direct-client IP/CIDR policy.
+- Settings store: atomically persists Console-managed security, authentication, desired deployment, and Azure settings. Security and token updates propagate to the running API/Reconciler/Renderer; deployment and Azure client changes activate on restart.
 - Health checker: probes configured upstream health paths during reconcile and records route-level readiness.
 - Audit logger: appends route, bind, reconcile, DNS, and NSG change summaries to JSONL state.
 - Management UI: static assets embedded in the Go binary and served by the API process.
@@ -33,12 +34,13 @@ The platform is intentionally packaged as one gateway image. The control plane o
 ## VM flow
 
 ```text
-explicit routes ---------------------> route model -> Caddy config -> public HTTPS route
-local Docker Engine -> optional discovery ----^
+listeners + backend pools + routing rules -> route compiler -> runtime route model -> Caddy config
+legacy Route API / Docker bind ------------^             ^
+local Docker Engine -> optional discovery ----------------+
 ```
 
 On a standalone gateway VM, Docker discovery is disabled and Console/API routes point to private VNet IPs or DNS names. On a co-located Docker host, discovery can read labels through a restricted socket proxy. Workloads should not publish host ports directly; they should share a private Docker network with the gateway container.
 
 ## State and persistence
 
-The platform stores routes, audit data, and the Console certificate policy under `/data/platform`; the policy is created with mode `0600` on POSIX filesystems. Caddy certificate storage uses `/data/caddy`. All of `/data` must be persistent in production. The Azure VM deployment bind-mounts `/var/lib/caddy-reverse-proxy`; `start.sh` uses `~/docker_files/caddy-reverse-proxy` on an existing host.
+The platform stores versioned routing resources, audit data, the Console certificate policy, and Console-managed settings under `/data/platform`. `settings.json` contains the admin token; it and other sensitive state are created with mode `0600` on POSIX filesystems. Legacy route files are atomically migrated to listeners, backend pools, and routing rules. Caddy certificate storage uses `/data/caddy`. All of `/data` must be persistent in production. The Azure VM deployment bind-mounts `/var/lib/caddy-reverse-proxy`; `start.sh` uses `~/docker_files/caddy-reverse-proxy` on an existing host.

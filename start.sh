@@ -59,7 +59,8 @@ fail() {
 }
 
 require_docker() {
-  command -v docker >/dev/null 2>&1 || fail "Docker is not installed or not in PATH."
+  command -v docker >/dev/null 2>&1 || fail \
+    "Docker is not installed or not in PATH. Use the interactive local deployment command in the README for guided Debian/Ubuntu installation."
   docker info >/dev/null 2>&1 || fail "Docker daemon is not reachable."
 }
 
@@ -265,6 +266,7 @@ case "$command_name" in
       --restart unless-stopped \
       --env-file "$ENV_FILE" \
       -e GATEWAY_PROFILE=vm \
+      -e GATEWAY_DEPLOYMENT_MODE=container-socket \
       -e GATEWAY_ADMIN_TOKEN="$ADMIN_TOKEN" \
       -e GATEWAY_DOCKER_ENABLED=true \
       -p "$HTTP_PORT:80" \

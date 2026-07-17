@@ -75,6 +75,13 @@ func main() {
 			azureManager = manager
 		}
 	}
+	var azurePermissionChecker api.AzurePermissionChecker
+	permissionChecker, err := gatewayazure.NewPermissionChecker()
+	if err != nil {
+		logger.Warn("Azure permission checker did not start", "error", err)
+	} else {
+		azurePermissionChecker = permissionChecker
+	}
 
 	caddyClient := caddy.NewClient(cfg.Gateway.CaddyAdminEndpoint)
 	var healthChecker reconcile.HealthChecker
@@ -95,14 +102,16 @@ func main() {
 	go reconciler.Run(ctx)
 
 	apiServer := api.NewServer(api.Options{
-		Config:           cfg,
-		Store:            store,
-		Discoverer:       apiDiscoverer,
-		Reconciler:       reconciler,
-		Runtime:          manager,
-		AuditLog:         auditLogger,
-		CertificateStore: config.NewCertificateStore(cfg.Gateway.CertificateFile),
-		Logger:           logger.With("component", "api"),
+		Config:                 cfg,
+		Store:                  store,
+		Discoverer:             apiDiscoverer,
+		Reconciler:             reconciler,
+		Runtime:                manager,
+		AuditLog:               auditLogger,
+		CertificateStore:       config.NewCertificateStore(cfg.Gateway.CertificateFile),
+		SettingsStore:          config.NewSettingsStore(config.SettingsPath(cfg)),
+		AzurePermissionChecker: azurePermissionChecker,
+		Logger:                 logger.With("component", "api"),
 	})
 
 	server := &http.Server{

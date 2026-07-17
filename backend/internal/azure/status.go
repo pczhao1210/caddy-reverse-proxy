@@ -19,13 +19,13 @@ func StatusForConfig(cfg model.AppConfig) Status {
 		Enabled:   cfg.Azure.Enabled,
 		ManageDNS: cfg.Azure.ManageDNS,
 		ManageNSG: cfg.Azure.ManageNSG,
-		Mode:      string(cfg.Profile),
+		Mode:      string(cfg.DeploymentMode),
 		Capabilities: []string{
 			"DefaultAzureCredential",
 			"Azure DNS A record reconciliation",
 		},
 	}
-	status.Capabilities = append(status.Capabilities, "VM NSG inbound rule reconciliation")
+	status.Capabilities = append(status.Capabilities, "VM NSG listener-port reconciliation")
 	status.Capabilities = append(status.Capabilities, "NSG priority and source-prefix policy")
 	if cfg.Azure.Enabled && cfg.Azure.SubscriptionID == "" {
 		status.MissingSettings = append(status.MissingSettings, "subscriptionId")

@@ -75,7 +75,7 @@ func TestRecordSetRelativeName(t *testing.T) {
 }
 
 func TestNSGRulePropertiesUsesPriorityAndSourcePrefixes(t *testing.T) {
-	properties := nsgRuleProperties(model.AzureConfig{NSGPriority: 220, NSGSourceAddressPrefixes: []string{"10.0.0.0/8", "192.168.0.0/16"}})
+	properties := nsgRuleProperties(model.AzureConfig{NSGPriority: 220, NSGSourceAddressPrefixes: []string{"10.0.0.0/8", "192.168.0.0/16"}}, []int{80, 443, 8443})
 	if properties.Priority == nil || *properties.Priority != 220 {
 		t.Fatalf("Priority = %#v", properties.Priority)
 	}
@@ -85,15 +85,38 @@ func TestNSGRulePropertiesUsesPriorityAndSourcePrefixes(t *testing.T) {
 	if len(properties.SourceAddressPrefixes) != 2 || *properties.SourceAddressPrefixes[0] != "10.0.0.0/8" || *properties.SourceAddressPrefixes[1] != "192.168.0.0/16" {
 		t.Fatalf("SourceAddressPrefixes = %#v", properties.SourceAddressPrefixes)
 	}
+	if len(properties.DestinationPortRanges) != 3 || *properties.DestinationPortRanges[2] != "8443" {
+		t.Fatalf("DestinationPortRanges = %#v", properties.DestinationPortRanges)
+	}
 }
 
 func TestNSGRulePropertiesDefaultsToSharedPublicRule(t *testing.T) {
-	properties := nsgRuleProperties(model.AzureConfig{})
+	properties := nsgRuleProperties(model.AzureConfig{}, nil)
 	if properties.Priority == nil || *properties.Priority != 120 {
 		t.Fatalf("Priority = %#v", properties.Priority)
 	}
 	if properties.SourceAddressPrefix == nil || *properties.SourceAddressPrefix != "*" {
 		t.Fatalf("SourceAddressPrefix = %#v", properties.SourceAddressPrefix)
+	}
+}
+
+func TestPublicNSGPortsIncludesCustomListenersAndACMEPorts(t *testing.T) {
+	ports := publicNSGPorts([]model.RouteConfig{
+		{ListenerPort: 8443},
+		{ListenerPort: 8080},
+		{ListenerPort: 8443},
+	})
+	want := []int{80, 443, 8080, 8443}
+	if len(ports) != len(want) {
+		t.Fatalf("publicNSGPorts() = %#v, want %#v", ports, want)
+	}
+	for index := range want {
+		if ports[index] != want[index] {
+			t.Fatalf("publicNSGPorts() = %#v, want %#v", ports, want)
+		}
+	}
+	if ports := publicNSGPorts(nil); ports != nil {
+		t.Fatalf("publicNSGPorts(nil) = %#v, want nil", ports)
 	}
 }
 

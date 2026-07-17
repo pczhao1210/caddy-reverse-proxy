@@ -34,6 +34,31 @@ func TestLoadVMProfileAllowsDisabledDockerDiscovery(t *testing.T) {
 	}
 }
 
+func TestLoadAcceptsAzureVMDeploymentMode(t *testing.T) {
+	t.Setenv("GATEWAY_DEPLOYMENT_MODE", "azure-vm")
+	t.Setenv("GATEWAY_CONFIG_FILE", "")
+	t.Setenv("GATEWAY_CERTIFICATE_FILE", filepath.Join(t.TempDir(), "certificate.json"))
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.DeploymentMode != model.ModeAzureVM {
+		t.Fatalf("DeploymentMode = %q, want %q", cfg.DeploymentMode, model.ModeAzureVM)
+	}
+}
+
+func TestLoadRejectsUnsupportedDeploymentMode(t *testing.T) {
+	t.Setenv("GATEWAY_DEPLOYMENT_MODE", "other")
+	t.Setenv("GATEWAY_CONFIG_FILE", "")
+	t.Setenv("GATEWAY_CERTIFICATE_FILE", filepath.Join(t.TempDir(), "certificate.json"))
+
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), `unsupported deployment mode "other"`) {
+		t.Fatalf("Load() error = %v, want unsupported deployment mode error", err)
+	}
+}
+
 func TestNormalizeCertificateConfigDefaultsToLetsEncrypt(t *testing.T) {
 	tests := []struct {
 		name   string

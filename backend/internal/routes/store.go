@@ -9,19 +9,25 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/aidockerfarm/gateway/internal/model"
 )
 
 type fileFormat struct {
-	Routes []model.RouteConfig `json:"routes"`
+	Version      int                 `json:"version,omitempty"`
+	Listeners    []model.Listener    `json:"listeners,omitempty"`
+	BackendPools []model.BackendPool `json:"backendPools,omitempty"`
+	RoutingRules []model.RoutingRule `json:"routingRules,omitempty"`
+	Routes       []model.RouteConfig `json:"routes,omitempty"`
 }
 
 type Store struct {
-	path   string
-	mu     sync.RWMutex
-	routes []model.RouteConfig
+	path         string
+	mu           sync.RWMutex
+	listeners    []model.Listener
+	backendPools []model.BackendPool
+	routingRules []model.RoutingRule
+	routes       []model.RouteConfig
 }
 
 func NewStore(path string) *Store {
@@ -45,10 +51,42 @@ func (s *Store) Load() error {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return err
 	}
-	for index := range payload.Routes {
-		normalize(&payload.Routes[index])
+	if payload.Version > 2 {
+		return fmt.Errorf("routes file version %d is not supported", payload.Version)
 	}
-	s.routes = payload.Routes
+	snapshot := s.snapshotLocked()
+	s.listeners = nil
+	s.backendPools = nil
+	s.routingRules = nil
+	s.routes = nil
+	migrated := false
+	if payload.Version >= 2 || len(payload.Listeners) > 0 || len(payload.BackendPools) > 0 || len(payload.RoutingRules) > 0 {
+		s.listeners = payload.Listeners
+		s.backendPools = payload.BackendPools
+		s.routingRules = payload.RoutingRules
+		if err := s.normalizeResourcesLocked(); err != nil {
+			s.restoreLocked(snapshot)
+			return err
+		}
+	} else {
+		migrated = true
+		for _, route := range payload.Routes {
+			if _, err := s.migrateRouteLocked(route); err != nil {
+				s.restoreLocked(snapshot)
+				return fmt.Errorf("migrate route %q: %w", route.ID, err)
+			}
+		}
+	}
+	if err := s.rebuildRoutesLocked(); err != nil {
+		s.restoreLocked(snapshot)
+		return err
+	}
+	if migrated {
+		if err := s.saveLocked(); err != nil {
+			s.restoreLocked(snapshot)
+			return fmt.Errorf("save migrated routes: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -81,81 +119,29 @@ func (s *Store) SetRuntimeStatus(statuses []model.RouteHealthStatus) {
 			s.routes[index].LastError = status.Error
 		}
 	}
+	for index := range s.routingRules {
+		status, ok := byID[s.routingRules[index].ID]
+		if !ok {
+			continue
+		}
+		if status.Healthy {
+			s.routingRules[index].LastError = ""
+		} else {
+			s.routingRules[index].LastError = status.Error
+		}
+	}
 }
 
 func (s *Store) Add(route model.RouteConfig) (model.RouteConfig, error) {
-	if err := validate(route); err != nil {
-		return route, err
-	}
-	normalize(&route)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if route.ID == "" {
-		route.ID = fmt.Sprintf("route-%d", time.Now().UnixNano())
-	}
-	for _, existing := range s.routes {
-		if existing.ID == route.ID {
-			return route, fmt.Errorf("route id %q already exists", route.ID)
-		}
-		if existing.Host == route.Host && existing.PathPrefix == route.PathPrefix {
-			return route, fmt.Errorf("route for host %q already exists", route.Host)
-		}
-	}
-	route.Source = sourceOr(route.Source, "explicit")
-	route.LastUpdated = time.Now().UTC()
-	s.routes = append(s.routes, route)
-	if err := s.saveLocked(); err != nil {
-		s.routes = s.routes[:len(s.routes)-1]
-		return route, err
-	}
-	return route, nil
+	return s.addCompatibilityRoute(route)
 }
 
 func (s *Store) Replace(route model.RouteConfig) (model.RouteConfig, error) {
-	if route.ID == "" {
-		return route, fmt.Errorf("route id is required")
-	}
-	if err := validate(route); err != nil {
-		return route, err
-	}
-	normalize(&route)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, existing := range s.routes {
-		if existing.ID != route.ID && existing.Host == route.Host && existing.PathPrefix == route.PathPrefix {
-			return route, fmt.Errorf("route for host %q and path %q already exists", route.Host, route.PathPrefix)
-		}
-	}
-	for index := range s.routes {
-		if s.routes[index].ID == route.ID {
-			previous := s.routes[index]
-			route.LastUpdated = time.Now().UTC()
-			s.routes[index] = route
-			if err := s.saveLocked(); err != nil {
-				s.routes[index] = previous
-				return route, err
-			}
-			return route, nil
-		}
-	}
-	return route, fmt.Errorf("route id %q not found", route.ID)
+	return s.replaceCompatibilityRoute(route)
 }
 
 func (s *Store) Delete(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for index := range s.routes {
-		if s.routes[index].ID == id {
-			previous := s.routes[index]
-			s.routes = append(s.routes[:index], s.routes[index+1:]...)
-			if err := s.saveLocked(); err != nil {
-				s.routes = append(s.routes[:index], append([]model.RouteConfig{previous}, s.routes[index:]...)...)
-				return err
-			}
-			return nil
-		}
-	}
-	return fmt.Errorf("route id %q not found", id)
+	return s.deleteCompatibilityRoute(id)
 }
 
 func (s *Store) saveLocked() error {
@@ -166,7 +152,12 @@ func (s *Store) saveLocked() error {
 	if err := os.MkdirAll(directory, 0o755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(fileFormat{Routes: s.routes}, "", "  ")
+	data, err := json.MarshalIndent(fileFormat{
+		Version:      2,
+		Listeners:    s.listeners,
+		BackendPools: s.backendPools,
+		RoutingRules: s.routingRules,
+	}, "", "  ")
 	if err != nil {
 		return err
 	}

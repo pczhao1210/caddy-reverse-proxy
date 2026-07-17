@@ -8,7 +8,7 @@ This document tracks what is currently implemented and what still needs to be co
 
 - Single container image with the Go control plane and embedded Caddy runtime.
 - Management API and embedded Alpine.js UI.
-- Explicit route CRUD with JSON file persistence.
+- Listener, backend-pool, and routing-rule CRUD with versioned JSON persistence and legacy route migration.
 - Caddy JSON config rendering and Admin API reloads.
 - VM profile Docker discovery through the Docker socket.
 - Docker label route hints for `caddy.enable`, `caddy.host`, `caddy.port`, `caddy.websocket`, and `exposure.mode`.
@@ -16,7 +16,7 @@ This document tracks what is currently implemented and what still needs to be co
 - Public, internal, and protected exposure modes at the Caddy routing layer.
 - Azure DNS A record reconciliation through `DefaultAzureCredential`.
 - Cleanup for stale gateway-managed Azure DNS A records.
-- VM NSG inbound 80/443 rule reconciliation through `DefaultAzureCredential`.
+- VM NSG reconciliation for public listener ports through `DefaultAzureCredential`, retaining 80/443 for ACME and default ingress.
 - Cleanup for the gateway-managed VM NSG inbound rule when no public routes remain.
 - Interactive standalone Azure VM provisioning with VNet/subnet selection, static public IP, restricted NSG, managed identity, Docker installation, and persistent gateway state.
 - Authenticated management API through an admin token.
@@ -40,6 +40,18 @@ This document tracks what is currently implemented and what still needs to be co
 - Health checks currently use simple HTTP status probes; future work can add per-route intervals, thresholds, and active/passive policy controls.
 - The E2E test is a local Docker script and should be promoted into CI once the target runner can expose ports 80 and 8080.
 - Active-active instances require an external route store with concurrency control; multiple writers cannot share `routes.json` safely.
+
+## Routing Resource Model
+
+The persisted v2 model and the Routes UI now use three reusable resources:
+
+- Listener: a frontend hostname, port, and HTTP/HTTPS protocol.
+- Backend pool: a named set of IP addresses or DNS names.
+- Routing rule: selects one listener and backend pool, then defines backend protocol/port, path, health path, exposure, and WebSocket behavior.
+
+The store compiles these resources into the existing runtime route model consumed by reconciliation, health checks, Azure, and Caddy. A legacy `routes` file is migrated atomically to v2 on load. The old route API remains as a compatibility adapter for Docker bind and existing clients.
+
+Certificate policy is still managed globally by subject rather than as a separate per-listener binding. Docker-discovered service identities also remain runtime inputs rather than persisted first-class resources.
 
 ## Current UI Status Meanings
 

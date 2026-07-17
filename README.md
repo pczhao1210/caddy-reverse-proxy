@@ -17,6 +17,7 @@ Current digest: `sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e0303
 - Automatic HTTPS through HTTP-01 or Azure DNS-01, including wildcard certificates.
 - Managed Identity or App Registration authentication for Azure DNS-01.
 - Built-in request security baseline for body-size limits, denied methods and paths, and IP/CIDR access policy.
+- Console-managed security policy, login-token rotation, desired deployment mode, and Azure DNS/NSG settings.
 
 ## Deployment modes
 
@@ -36,9 +37,9 @@ Start the VM profile directly from the repository:
 ./start.sh start
 ```
 
-The script pulls `pczhao1210/caddy-reverse-proxy:latest` when it is missing and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state.
+The script pulls `pczhao1210/caddy-reverse-proxy:latest` when it is missing and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state. `start.sh` requires Docker to be available; use the interactive local deployment mode below when Docker is not installed yet.
 
-Open `http://127.0.0.1:8080`, sign in with that token, then configure routes and certificates in the Console. To request `*.example.com`, open **Network → Certificates**, add `*.example.com` and `example.com` as subjects, select Azure DNS, and provide the Azure authentication settings. The apex subject is separate because a wildcard does not cover `example.com` itself.
+Open `http://127.0.0.1:8080`, sign in with that token, then configure routes, security, settings, and certificates in the Console. Security and token changes apply immediately. Deployment and Azure integration changes are staged for restart because they affect startup-time clients and topology; the launcher must still provide the selected Docker network, socket, and port mappings. To request `*.example.com`, open **Certificates**, add `*.example.com` and `example.com` as subjects, select Azure DNS, and provide the Azure authentication settings. The apex subject is separate because a wildcard does not cover `example.com` itself.
 
 Attach the gateway to existing workload networks when container-name routing is needed:
 
@@ -57,11 +58,10 @@ Other lifecycle commands accept either form, such as `build` or `--build`:
 
 `build` and `push` default to `pczhao1210/caddy-reverse-proxy:latest`; set `IMAGE` or `PUSH_IMAGE` to publish another repository or tag. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image, network, and path overrides.
 
-The interactive deployment script supports two modes: create a standalone Azure VM, or deploy only the gateway container on the current machine. Azure mode requires Azure Cloud Shell or local Bash 4+ with Azure CLI; local mode requires Bash 4+ and a reachable Docker Engine. Choose one block below; each downloads the script to a temporary file and runs it only after a successful download:
+The interactive deployment script supports two modes: create a standalone Azure VM, or deploy only the gateway container on the current machine. Azure mode requires Azure Cloud Shell or local Bash 4+ with Azure CLI; local mode requires Bash 4+ and checks Docker. It can offer to install missing Docker on Debian/Ubuntu after confirmation. It can also explain and offer to repair a stopped service or missing access to the standard socket. Choose one block below; each downloads the script to a temporary file and runs it only after a successful download:
 
 ```bash
-deploy_script=$(mktemp) &&
-	curl -fsSL https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh -o "$deploy_script" &&
+deploy_script=$(mktemp) && curl -fsSL -o "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
 	bash "$deploy_script"
 status=$?
 rm -f "${deploy_script:-}"
@@ -69,15 +69,14 @@ test "$status" -eq 0
 ```
 
 ```bash
-deploy_script=$(mktemp) &&
-	wget -qO "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
+deploy_script=$(mktemp) && wget -qO "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
 	bash "$deploy_script"
 status=$?
 rm -f "${deploy_script:-}"
 test "$status" -eq 0
 ```
 
-Select the first mode to create Azure infrastructure. It selects the subscription, region, VNet, subnet, VM size, and OS disk; creates a static public IP, NSG, NIC, managed identity, and Ubuntu VM; installs Docker; and starts the gateway. Select the second mode when Docker already runs on the current host. It reuses `start.sh` from a checkout or installs the minimal launcher files under `~/caddy-reverse-proxy`, then starts only the container without changing Azure infrastructure or DNS.
+Select the first mode to create Azure infrastructure. It selects the subscription, region, VNet, subnet, VM size, and OS disk; creates a static public IP, NSG, NIC, managed identity, and Ubuntu VM; installs Docker; and starts the gateway. Select the second mode to deploy on the current host. It reuses `start.sh` from a checkout or installs the minimal launcher files under `~/caddy-reverse-proxy`, then starts only the container without changing Azure infrastructure or DNS.
 
 From a local clone, use `make azure-vm-deploy` or `make container-deploy`. Set `IMAGE` to override the digest-pinned image. Azure mode supports `ROLLBACK_ON_ERROR=false`; local mode supports the same `CONTAINER_NAME`, `DATA_DIR`, port, and `DOCKER_NETWORKS` overrides as `start.sh`. See [docs/deployment.md](docs/deployment.md) for permissions, persistence, and network constraints.
 

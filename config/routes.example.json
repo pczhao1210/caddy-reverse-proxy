@@ -1,12 +1,38 @@
 {
-  "routes": [
+  "version": 2,
+  "listeners": [
     {
-      "id": "sample-httpbin",
-      "host": "httpbin.localhost",
+      "id": "listener-httpbin",
+      "name": "HTTPBin HTTP",
+      "hostname": "httpbin.localhost",
+      "port": 80,
+      "protocol": "http",
+      "source": "explicit"
+    }
+  ],
+  "backendPools": [
+    {
+      "id": "pool-httpbin",
+      "name": "HTTPBin",
+      "targets": [
+        {
+          "name": "httpbin",
+          "address": "httpbin"
+        }
+      ],
+      "source": "explicit"
+    }
+  ],
+  "routingRules": [
+    {
+      "id": "rule-httpbin",
+      "name": "HTTPBin root",
+      "listenerId": "listener-httpbin",
+      "backendPoolId": "pool-httpbin",
+      "backendPort": 8080,
+      "backendProtocol": "http",
       "exposure": "public",
       "enabled": true,
-      "public": true,
-      "https": false,
       "websocket": false,
       "source": "explicit",
       "security": {
@@ -14,13 +40,7 @@
         "additionalDeniedMethods": ["M-SEARCH"],
         "additionalDeniedPathPrefixes": ["/private"],
         "blockedCidrs": ["192.0.2.0/24"]
-      },
-      "upstreams": [
-        {
-          "name": "httpbin",
-          "url": "http://httpbin:8080"
-        }
-      ]
+      }
     }
   ]
 }

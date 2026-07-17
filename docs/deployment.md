@@ -35,6 +35,7 @@ Production requirements:
 
 - Azure Cloud Shell, or Bash 4+ with Azure CLI installed locally. The script is validated with Azure CLI 2.88.0.
 - An Azure identity that can create resource groups, networking resources, managed identities, disks, and VMs.
+- `ssh-keygen` when using an existing or newly generated SSH key. Password authentication does not require it.
 - To use an SSH public key stored in Azure, the operator identity needs `Microsoft.Compute/sshPublicKeys/read` permission. Interactive selection also needs permission to list the visible SSH public key resources; specify both the resource name and resource group when list permission is unavailable.
 - To use a Key Vault secret instead, the operator identity needs secret `get` permission. `list` permission enables interactive secret selection but is optional when the secret name is known. With Key Vault RBAC, `Key Vault Secrets User` scoped to the target vault or secret is sufficient; the script does not change role assignments.
 - `curl` or `wget` for remote invocation. A local clone needs neither.
@@ -46,8 +47,7 @@ The script uses the active Azure CLI login. If none exists locally, it starts de
 Choose one block in Azure Cloud Shell or a local Bash terminal. The temporary-file sequence prevents Bash from running partial or failed downloads and preserves the command's failure status. The first prompt selects either standalone Azure VM creation or local container-only deployment; choose the Azure VM option for this section.
 
 ```bash
-deploy_script=$(mktemp) &&
-    curl -fsSL https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh -o "$deploy_script" &&
+deploy_script=$(mktemp) && curl -fsSL -o "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
     bash "$deploy_script"
 status=$?
 rm -f "${deploy_script:-}"
@@ -55,8 +55,7 @@ test "$status" -eq 0
 ```
 
 ```bash
-deploy_script=$(mktemp) &&
-    wget -qO "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
+deploy_script=$(mktemp) && wget -qO "$deploy_script" https://raw.githubusercontent.com/pczhao1210/caddy-reverse-proxy/main/deploy/vm/deploy.sh &&
     bash "$deploy_script"
 status=$?
 rm -f "${deploy_script:-}"
@@ -76,8 +75,14 @@ The script interactively selects:
 - An existing or new VNet and a non-delegated existing or new subnet.
 - An available VM size. `Standard_B1ms` (1 vCPU, 2 GiB) is recommended for low traffic; `Standard_B1s` (1 vCPU, 1 GiB) is a minimum-cost option only for very low traffic.
 - OS disk SKU and size. The default Ubuntu Marketplace image is about 30 GiB, so 30 and 32 GiB Standard SSD disks both map to the 32-GiB E4 billing tier. Smaller E1-E3 tiers require an OS image that fits within those sizes.
-- An existing SSH public key source. The default source is an Azure SSH Public Key resource; an Azure Key Vault secret or existing local `.pub` file is also supported. The script never generates an SSH key.
+- VM administrator authentication. The recommended default is an existing SSH public key from Azure, Key Vault, or a local `.pub` file. The script can instead generate a new local Ed25519 key pair or enable password authentication.
 - The source CIDR permitted to use SSH. The detected operator public IP `/32` is offered when available.
+
+For a new key pair, the script asks for a private-key path, refuses to overwrite either the private or public file, and waits until after the deployment confirmation prompt but before creating any Azure resource before running `ssh-keygen`. If key generation fails, no Azure resource is created. `ssh-keygen` prompts directly for an optional passphrase. Only the `.pub` file is sent to Azure; the private key remains local, is retained if Azure deployment later rolls back, and is included with `-i` in the printed SSH commands.
+
+Password authentication is less secure than a passphrase-protected SSH key. The script passes only `--authentication-type password`; Azure CLI securely prompts for the password and its confirmation while creating the VM, so the script never reads, stores, or prints it. Azure CLI passwords must contain 12-123 characters and meet at least three of the lowercase, uppercase, digit, and special-character categories.
+
+Set `VM_AUTHENTICATION_TYPE=ssh`, `generate`, or `password` to preselect a mode. For generated keys, `SSH_PRIVATE_KEY_FILE` changes the default private-key path.
 
 The portal option **Use existing key stored in Azure** refers to an Azure SSH Public Key resource (`Microsoft.Compute/sshPublicKeys`), not Key Vault. The script lists these resources from the selected subscription and lets you select one. To resolve a uniquely named resource without the selection prompt, or to identify it fully without list permission:
 
@@ -115,14 +120,14 @@ After a confirmed deployment starts, any error triggers rollback by default. The
 
 The `/data` bind mount is durable across container replacement and VM restart, but it is stored on the VM OS disk. The VM is created with its OS disk delete option set to `Delete`; back up `/var/lib/caddy-reverse-proxy` or snapshot the disk before deleting the VM.
 
-The NSG exposes TCP 80/443 to the internet and TCP 22 only to the selected source. Port 8080 remains bound to VM loopback. The script does not create a Load Balancer or NAT Gateway.
+The initial NSG exposes TCP 80/443 to the internet and TCP 22 only to the selected source. Port 8080 remains bound to VM loopback. The standalone container uses host networking so configured listener ports can bind directly; a custom public port still requires managed NSG reconciliation or a manual NSG rule. The script does not create a Load Balancer or NAT Gateway.
 
 Selecting an existing subnet does not alter its route table, subnet NSG, Azure Firewall or NVA path, or DNS settings. Those controls continue to apply in addition to the NIC NSG created by the script. Confirm that the selected subnet can reach Ubuntu package repositories, the container registry, and each private backend.
 
 ### Topology
 
 ```text
-DNS -> VM Standard static public IP -> Caddy :80/:443
+DNS -> VM Standard static public IP -> Caddy :80/:443/:custom-listener
                                       -> private-IP-or-DNS:port in the VNet
 
 Operator -> SSH tunnel -> VM 127.0.0.1:8080
@@ -139,13 +144,15 @@ The standalone VM has no access to a remote Docker socket. Configure backends by
 
 ## Existing or co-located VM
 
-The same interactive script supports a container-only mode for an existing Linux host. It requires Bash 4+ and an already installed, reachable Docker Engine; it does not install Docker or create or modify Azure resources, NSGs, public IPs, or DNS records. Run either download block above and select **Deploy only the gateway container on this machine**. From a cloned repository, use:
+The same interactive script supports a container-only mode for an existing Linux host. It requires Bash 4+ and first checks the Docker CLI, daemon, and socket permissions. When Docker is missing, it offers to install the distribution `docker.io` package only on Debian/Ubuntu hosts with `apt-get`; it can also offer to enable and start a stopped service. Install Docker Engine using the distribution's supported method first on other systems. This mode does not create or modify Azure resources, NSGs, public IPs, or DNS records. Run either download block above and select **Deploy only the gateway container on this machine**. From a cloned repository, use:
 
 ```sh
 make container-deploy
 ```
 
 Inside a checkout, this mode delegates to the existing `start.sh`. Otherwise it downloads `start.sh`, `.env.example`, and `config/platform.example.json` into `~/caddy-reverse-proxy` by default, then starts the container. The download uses a temporary staging directory and refuses to overwrite an existing incomplete or customized launcher directory. Override the launcher location with `LOCAL_INSTALL_DIR`; `IMAGE`, `CONTAINER_NAME`, `DATA_DIR`, `HTTP_PORT`, `HTTPS_PORT`, `MANAGEMENT_PORT`, and `DOCKER_NETWORKS` are passed through to `start.sh`. `DATA_DIR` must remain below `~/docker_files`; the mode preserves `/data` there and makes no infrastructure changes.
+
+If the Docker daemon is running but the current user cannot access `/var/run/docker.sock`, the script explains that the `docker` group grants root-equivalent host access. After confirmation, it adds the user to that group and tries to continue this deployment in a temporary group session. If `sg` is unavailable or that session fails, the script stops and asks the user to sign out, sign back in, and rerun it. Later Docker commands in the original terminal may require the same sign-in refresh.
 
 The default co-located launcher enables Docker discovery and mounts `/var/run/docker.sock`. Treat access to that socket as host-level privilege. Use the socket-proxy Compose deployment when direct socket access is not acceptable.
 

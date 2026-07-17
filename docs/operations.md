@@ -136,12 +136,13 @@ Override `IMAGE` when publishing another repository or immutable tag.
 | Variable | Default | Meaning |
 |---|---|---|
 | `GATEWAY_PROFILE` | `vm` | Deployment profile. `vm` is the only supported value. |
+| `GATEWAY_DEPLOYMENT_MODE` | `container-socket` | UI/runtime deployment identity: `container-socket` or `azure-vm`. The launchers set this explicitly. |
 | `GATEWAY_ADMIN_TOKEN` | `change-me` | Admin token for the management API and protected routes. Replace this before real deployment. |
 | `GATEWAY_ADMIN_TOKENS` | empty | Optional comma-separated token allowlist for multiple operators. |
 | `GATEWAY_AUTH_REQUIRED` | `true` | Enables token authentication for `/api/*`. |
 | `GATEWAY_RECONCILE_SECONDS` | `30` | Periodic reconcile interval in seconds. Route changes and manual Apply also reconcile. |
 | `GATEWAY_CONFIG_FILE` | `/config/platform.example.json` | JSON platform config inside the container. Environment variables override it. |
-| `GATEWAY_ROUTES_FILE` | `/data/platform/routes.json` | Writable route store for UI-created routes and Docker binds. |
+| `GATEWAY_ROUTES_FILE` | `/data/platform/routes.json` | Writable v2 listener, backend-pool, and routing-rule store. Legacy routes and Docker binds are migrated through the compatibility adapter. |
 | `GATEWAY_STATE_DIR` | `/data/platform` | Platform state directory. |
 | `GATEWAY_CADDY_DATA_DIR` | `/data/caddy` | Caddy certificate/runtime data. Persist this in production. |
 | `GATEWAY_CERTIFICATE_FILE` | `/data/platform/certificate.json` | Console-managed certificate settings. Stored atomically and created with mode `0600` on POSIX filesystems. |
@@ -159,9 +160,29 @@ Override `IMAGE` when publishing another repository or immutable tag.
 
 Default recommendation: leave `GATEWAY_MANAGEMENT_HOST` empty and access the UI through SSH tunnel, VPN, Bastion, Tailscale, or WireGuard.
 
+## Routing UI Semantics
+
+The Console composes a route from a Listener, Backend Pool, and Routing Rule:
+
+- A backend pool normally contains one address per line without a scheme or port. Private IPs such as `10.0.0.5`, reachable public IPs, and DNS names such as `ex.example.com` are accepted. DNS names are resolved from the gateway runtime, and every address must be network-reachable from that runtime. For HTTPS backends, the certificate must validate for the address or hostname used.
+- The routing rule's backend protocol and port are shared by all pool targets. The API and migration layer retain an optional per-target port override for legacy routes, but new Console configurations should use the shared rule port.
+- A backend address controls where Caddy connects; it does not change the incoming HTTP `Host` by default. Leave **Backend Host header** empty for applications that route on the frontend hostname. Set it to `ex.example.com` when proxying to an external virtual host that expects that hostname.
+- An empty route path prefix matches every path on the listener. `/api` matches `/api` and `/api/...`; Caddy preserves that prefix when forwarding upstream.
+- The health path is optional. Empty uses `health.defaultPath`, which defaults to `/`. HTTP 2xx and 3xx responses are healthy. If `/` returns 404, enter a real readiness path such as `/healthz`. Probe failure marks status only; it does not stop proxying or withdraw DNS.
+- `public` permits any client that can reach the listener, subject to the global security baseline. `protected` additionally requires an enabled gateway token header. `internal` accepts only direct client IPs in `gateway.internalSourceRanges` and does not participate in managed public DNS/NSG reconciliation.
+- Caddy's HTTP reverse proxy automatically handles WebSocket Upgrade requests over HTTP or HTTPS. No routing-rule WebSocket switch is required.
+
+## Console-Managed Settings
+
+The **Security** page edits the global request baseline, internal route source ranges, and protected-route token header policy. It persists and reloads Caddy immediately. The **Settings** page edits the desired deployment mode, Azure integration values, and admin login token.
+
+Console-managed settings are atomically stored in `/data/platform/settings.json` with mode `0600` on POSIX filesystems. They are loaded after the JSON config and environment variables for the fields the Console owns. Protect this file because it contains the admin token in the form required for authentication. Delete it while the gateway is stopped to return those fields to file/environment control.
+
+Security policy changes are applied immediately. A new admin token takes effect immediately and invalidates the old token. Deployment-mode and Azure changes are saved for the next process start because Docker discovery, credentials, and Azure SDK clients are constructed at startup. Changing deployment mode in the Console does not change Docker network mode, mounts, host port publication, or VM infrastructure; the launcher must also satisfy the selected topology.
+
 ## Request Security Baseline
 
-The gateway enables a lightweight request security baseline on every explicit, discovered, and public management route. It uses native Caddy matchers and handlers; it is not an SQL injection or XSS rules engine.
+The gateway enables a lightweight request security baseline on every explicit, discovered, and public management route. It uses native Caddy matchers and handlers; it is not an SQL injection or XSS rules engine. The **Security** page edits the same global policy exposed by the environment variables below.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -188,7 +209,7 @@ Explicit routes can add restrictions or override the body limit through their pe
 }
 ```
 
-A positive route body limit replaces the global value. Omitted or `0` inherits it. Set `security.disabled` to `true` only for a route that must bypass the entire baseline. Route overrides are inactive while `GATEWAY_SECURITY_ENABLED=false`. The effective global policy is visible in the Console Network view and in `/api/status`.
+A positive route body limit replaces the global value. Omitted or `0` inherits it. Set `security.disabled` to `true` only for a route that must bypass the entire baseline. Route overrides are inactive while `GATEWAY_SECURITY_ENABLED=false`. The effective global policy is visible in the Console Platform view and in `/api/status`.
 
 ## Certificate Policy
 
@@ -207,7 +228,9 @@ A positive route body limit replaces the global value. Omitted or `0` inherits i
 | `GATEWAY_CERTIFICATE_AZURE_CLIENT_ID` | empty | Client ID required for App Registration authentication. |
 | `GATEWAY_CERTIFICATE_AZURE_CLIENT_SECRET` | empty | Client secret required for App Registration authentication. Prefer Console entry to shell history. |
 
-The Network page includes certificate controls backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE` and then reconciled immediately; the Console reports persistence and Caddy reload failures separately. Saved settings are restored after restart. Client secrets are persisted but never returned by the API. The refresh endpoint reloads the current TLS configuration through reconciliation; it does not force ACME certificate renewal.
+The Certificates page is backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE` and then reconciled immediately; the Console reports persistence and Caddy reload failures separately. Saved settings are restored after restart. Client secrets are persisted but never returned by the API.
+
+Caddy automatically renews managed certificates before expiry. Renewal requires the gateway and Caddy runtime to remain operational, `/data/caddy` to stay persistent, and the configured HTTP-01, TLS-ALPN-01, or DNS-01 challenge to remain usable. The refresh endpoint only reloads the current TLS policy through reconciliation; it does not force renewal. The Console does not currently expose individual certificate expiry timestamps or renewal-attempt history.
 
 Wildcard names require DNS-01. Add both `*.example.com` and `example.com` when the apex is needed, select Azure DNS, and use Let's Encrypt or a custom ACME issuer. Caddy's ZeroSSL issuer does not accept configurable DNS challenges. The Azure identity needs `DNS Zone Contributor` on the authoritative zone. Wildcard certificate subjects and wildcard route hosts are independent; exact route hosts are evaluated before `*.example.com` routes.
 
@@ -221,7 +244,7 @@ The `vm` profile imports these labels from running containers.
 | `caddy.host` | Yes | `webui.example.com` | Public host name. |
 | `caddy.port` | No | `8080` | Upstream container port. |
 | `caddy.health_path` | No | `/healthz` | Upstream HTTP health-check path. |
-| `caddy.websocket` | No | `true` | Marks websocket/SSE-friendly workloads. |
+| `caddy.websocket` | No | `true` | Legacy compatibility hint. Caddy proxies WebSocket upgrades automatically; the generated proxy configuration does not require this flag. |
 | `exposure.mode` | No | `public` | One of `public`, `protected`, `internal`. |
 
 Containers without `caddy.enable=true` are still shown in discovery. The gateway container itself is excluded. The UI can also bind a discovered container manually; manual bindings require an explicit container port and upstream protocol, are saved as explicit routes, and do not require labels.
@@ -242,12 +265,12 @@ Use `make compose-up-proxy` when you want Docker discovery through a restricted 
 |---|---|---|
 | `GATEWAY_AZURE_ENABLED` | `false` | Enables Azure reconciliation through `DefaultAzureCredential`. On Azure, this should use Managed Identity. |
 | `GATEWAY_AZURE_MANAGE_DNS` | `true` | Creates, updates, and cleans up gateway-managed Azure DNS A records for public/protected routes. |
-| `GATEWAY_AZURE_MANAGE_NSG` | `true` | Creates or deletes the gateway-managed VM NSG inbound rule for 80/443. |
+| `GATEWAY_AZURE_MANAGE_NSG` | `true` | Creates, updates, or deletes the gateway-managed VM NSG rule for public listener ports. The rule retains 80/443 for default ingress and ACME. |
 | `GATEWAY_AZURE_SUBSCRIPTION_ID` | empty | Azure subscription ID. `AZURE_SUBSCRIPTION_ID` is also accepted. |
 | `GATEWAY_AZURE_RESOURCE_GROUP` | empty | Resource group containing the DNS zone and NSG. |
 | `GATEWAY_AZURE_DNS_ZONE` | empty | Legacy single Azure DNS zone name. |
 | `GATEWAY_AZURE_DNS_ZONES` | empty | JSON array of `{name,resourceGroup}` entries. Hostnames use the longest matching zone suffix. |
-| `GATEWAY_AZURE_NSG_NAME` | empty | Network Security Group name for VM profile 80/443 inbound rule reconciliation. |
+| `GATEWAY_AZURE_NSG_NAME` | empty | Network Security Group name for VM public-listener inbound rule reconciliation. |
 | `GATEWAY_AZURE_NSG_PRIORITY` | `120` | Priority for the managed VM NSG allow rule. |
 | `GATEWAY_AZURE_NSG_SOURCE_PREFIXES` | `*` | Comma-separated source CIDR prefixes for the managed VM NSG allow rule. |
 | `GATEWAY_PUBLIC_IP_ADDRESS` | empty | Required VM public IPv4 address when DNS management has public routes. Egress IP discovery is intentionally not used. |
@@ -257,16 +280,22 @@ Required Managed Identity roles:
 - `DNS Zone Contributor` on the DNS zone or containing scope.
 - `Network Contributor` on the NSG or containing scope when NSG reconciliation is enabled.
 
+The standalone VM deployment creates a system-assigned managed identity with `az vm create --assign-identity`; role assignment remains an explicit operator step. The gateway uses `DefaultAzureCredential`, so no managed-identity secret is configured in the Console. `Configured` validates that required IDs and names are present.
+
+In **Settings > Azure Integration**, **Check permissions** queries `Microsoft.Authorization/permissions` for every configured DNS zone and the target NSG. It verifies the effective `read`, `write`, and `delete` actions used for DNS A records and NSG security rules without changing either resource. The check uses the identity selected by `DefaultAzureCredential` in the running process: normally Managed Identity on the VM, but Azure CLI or another developer credential can be selected locally. New or changed role assignments can take several minutes to propagate; retry the check after propagation. A successful check confirms effective ARM actions, while Reconcile remains the end-to-end operational test.
+
+Reconcile upserts desired A records, lists gateway-managed A records for cleanup, waits for the NSG rule operation, and reports counts, warnings, or the Azure API error on the Platform page. It is not a general drift monitor for unrelated DNS records or NSG rules.
+
 Cleanup behavior:
 
 - DNS cleanup deletes only A records marked with `managed-by=ai-docker-farm-gateway` metadata.
 - Deleting, disabling, or internalizing a route removes its managed DNS record on the next reconcile.
 - Upstream health failures are reported in route status but do not remove DNS records; disable or delete a route to withdraw DNS without creating probe-driven DNS cache churn.
-- The NSG rule is shared by all public/protected routes and is deleted only when no public/protected route remains, unless `GATEWAY_MANAGEMENT_HOST` is set.
+- The NSG rule is shared by all public/protected routes, updates when their listener-port set changes, and is deleted only when no public/protected route remains, unless `GATEWAY_MANAGEMENT_HOST` is set.
 
 ## VM Deployment Notes
 
-For a new standalone Azure VM, run `make azure-vm-deploy`, or invoke `deploy/vm/deploy.sh` from Cloud Shell with the `curl`/`wget` commands in [deployment.md](deployment.md). The script interactively selects the region, VNet, subnet, VM size, and disk; installs Docker; disables local Docker discovery; starts the gateway; and prints its IPs, managed identity, admin token, SSH command, and management tunnel.
+For a new standalone Azure VM, run `make azure-vm-deploy`, or invoke `deploy/vm/deploy.sh` from Cloud Shell with the `curl`/`wget` commands in [deployment.md](deployment.md). The script interactively selects the region, VNet, subnet, VM size, and disk; installs Docker; disables local Docker discovery; starts the gateway with host networking; binds management to `127.0.0.1:8080`; and prints its IPs, managed identity, admin token, SSH command, and management tunnel.
 
 After the script completes, manually configure DNS A records, explicit routes, backend NSG/firewall access, certificate policy, and any Azure DNS role assignment. The script does not change those resources.
 
@@ -277,7 +306,7 @@ For an existing or co-located Docker VM:
 3. Keep SSH/private management access through Tailscale, WireGuard, Bastion, VPN, or an equivalent private path.
 4. Start with `IMAGE=<published-image> DOCKER_NETWORKS=<network1,network2> ./start.sh start`.
 
-The gateway only manages inbound NSG access for 80 and 443. It does not open 8080. `start.sh` binds the management UI to `127.0.0.1:8080` on the host.
+When Azure NSG reconciliation is enabled, the gateway manages inbound access for 80/443 and every enabled public listener port. It never opens 8080. `start.sh` and the standalone VM deployment bind the management UI to `127.0.0.1:8080` on the host. Standard Container + Socket deployments publish only 80/443 unless the operator adds explicit host-port mappings.
 
 ## Runtime Probes
 

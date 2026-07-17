@@ -23,25 +23,37 @@ func Load() (model.AppConfig, error) {
 	if err := applyEnv(&cfg); err != nil {
 		return cfg, err
 	}
+	if settings, found, err := NewSettingsStore(SettingsPath(cfg)).Load(); err != nil {
+		return cfg, err
+	} else if found {
+		ApplySettings(&cfg, settings)
+	}
 	if certificate, found, err := NewCertificateStore(cfg.Gateway.CertificateFile).Load(); err != nil {
 		return cfg, err
 	} else if found {
 		cfg.Gateway.Certificate = certificate
 	}
-	normalizeConfig(&cfg)
-	if cfg.Profile != model.ProfileVM {
-		return cfg, fmt.Errorf("unsupported profile %q", cfg.Profile)
-	}
-	if cfg.Control.Listen == "" {
-		return cfg, fmt.Errorf("control.listen is required")
-	}
-	if cfg.Gateway.CaddyAdminEndpoint == "" {
-		return cfg, fmt.Errorf("gateway.caddyAdminEndpoint is required")
-	}
-	if err := validateConfig(cfg); err != nil {
+	if err := NormalizeAndValidate(&cfg); err != nil {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func NormalizeAndValidate(cfg *model.AppConfig) error {
+	normalizeConfig(cfg)
+	if cfg.Profile != model.ProfileVM {
+		return fmt.Errorf("unsupported profile %q", cfg.Profile)
+	}
+	if cfg.DeploymentMode != model.ModeContainerSocket && cfg.DeploymentMode != model.ModeAzureVM {
+		return fmt.Errorf("unsupported deployment mode %q", cfg.DeploymentMode)
+	}
+	if cfg.Control.Listen == "" {
+		return fmt.Errorf("control.listen is required")
+	}
+	if cfg.Gateway.CaddyAdminEndpoint == "" {
+		return fmt.Errorf("gateway.caddyAdminEndpoint is required")
+	}
+	return validateConfig(*cfg)
 }
 
 func normalizeConfig(cfg *model.AppConfig) {
@@ -290,8 +302,9 @@ func validateCertificateSubject(subject string) error {
 
 func defaults() model.AppConfig {
 	return model.AppConfig{
-		Profile: model.ProfileVM,
-		Control: model.ControlConfig{Listen: ":8080"},
+		Profile:        model.ProfileVM,
+		DeploymentMode: model.ModeContainerSocket,
+		Control:        model.ControlConfig{Listen: ":8080"},
 		Gateway: model.GatewayConfig{
 			HTTPListen:           ":80",
 			HTTPSListen:          ":443",
@@ -336,6 +349,9 @@ func mergeFile(path string, cfg *model.AppConfig) error {
 func applyEnv(cfg *model.AppConfig) error {
 	if value := os.Getenv("GATEWAY_PROFILE"); value != "" {
 		cfg.Profile = model.DeploymentProfile(strings.ToLower(value))
+	}
+	if value := os.Getenv("GATEWAY_DEPLOYMENT_MODE"); value != "" {
+		cfg.DeploymentMode = model.DeploymentMode(strings.ToLower(strings.TrimSpace(value)))
 	}
 	if value := os.Getenv("GATEWAY_CONTROL_LISTEN"); value != "" {
 		cfg.Control.Listen = value

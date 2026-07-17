@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>AI Docker Farm Gateway</title>
+    <title>Caddy Proxy</title>
     <link rel="stylesheet" href="/styles.css">
     <script src="/app.js" defer></script>
     <script src="/vendor/alpine.min.js" defer></script>
@@ -12,12 +12,12 @@
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <div class="brand-mark">AG</div>
-          <div><strong>AI Docker Farm</strong><span>Edge Gateway</span></div>
+          <div class="brand-mark">CP</div>
+          <div><strong>Caddy Proxy</strong><span x-text="t('app.productType')"></span></div>
         </div>
 
         <nav class="nav" :aria-label="t('nav.primary')">
-          <template x-for="item in navItems" :key="item.view">
+          <template x-for="item in visibleNavItems()" :key="item.view">
             <button class="nav-item" :class="{ active: activeView === item.view }" :aria-current="activeView === item.view ? 'page' : null" type="button" @click="setActiveView(item.view)">
               <span x-text="t(item.label)"></span>
             </button>
@@ -26,16 +26,17 @@
 
         <div class="sidebar-footer">
           <label class="language-select"><span x-text="t('language.label')"></span><select x-model="locale"><option value="en">English</option><option value="zh-CN">中文</option></select></label>
-          <button type="button" class="ghost-button" :disabled="busy()" @click="refreshAll()" x-text="t('actions.refresh')"></button>
           <button type="button" class="ghost-button danger" :disabled="busy()" @click="signOut()" x-text="t('actions.signOut')"></button>
         </div>
       </aside>
 
       <main class="main" :aria-busy="busy()">
         <header class="topbar">
-          <div><h1 x-text="t('app.heading')"></h1><p id="subtitle" x-text="subtitle()"></p></div>
+          <div class="topbar-copy"><h1 x-text="viewTitle()"></h1><p x-text="viewDescription()"></p></div>
           <div class="topbar-actions">
-            <button type="button" class="primary-button" :disabled="busy()" @click="reconcile()" x-text="t('actions.apply')"></button>
+            <span id="subtitle" class="update-meta" x-text="subtitle()"></span>
+            <button type="button" class="secondary-button" :disabled="busy()" :title="t('actions.refreshTitle')" @click="refreshAll()" x-text="t('actions.refresh')"></button>
+            <button type="button" class="primary-button" :disabled="busy()" :title="t('actions.applyTitle')" @click="reconcile()" x-text="t('actions.apply')"></button>
           </div>
         </header>
 
@@ -43,36 +44,96 @@
         <section class="notice" x-show="notice" x-text="notice" role="status" aria-live="polite"></section>
 
         <section id="dashboard" class="view" x-show="activeView === 'dashboard'">
-          <div class="metric-grid">
-            <div class="metric"><span x-text="t('metrics.profile')"></span><strong x-text="status?.profile || '-'"></strong></div>
+          <div class="metric-grid" :class="{ 'three-columns': !discoveryVisible() }">
+            <div class="metric"><span x-text="t('metrics.profile')"></span><strong x-text="deploymentLabel()"></strong></div>
             <div class="metric"><span x-text="t('metrics.routes')"></span><strong x-text="routes().length"></strong></div>
-            <div class="metric"><span x-text="t('metrics.docker')"></span><strong x-text="dockerActiveText()"></strong></div>
+            <div class="metric" x-show="discoveryVisible()"><span x-text="t('metrics.docker')"></span><strong x-text="dockerActiveText()"></strong></div>
             <div class="metric"><span x-text="t('metrics.caddy')"></span><strong x-text="caddyLoadedText()"></strong></div>
+          </div>
+          <div class="panel action-panel" x-show="dashboardActions().length">
+            <div class="panel-header"><h2 x-text="t('sections.nextActions')"></h2></div>
+            <div class="action-list"><template x-for="action in dashboardActions()" :key="action.text"><div class="action-item" :class="action.tone || ''"><p x-text="action.text"></p><button class="secondary-button" type="button" :disabled="busy()" @click="runDashboardAction(action)" x-text="action.label"></button></div></template></div>
           </div>
           <div class="panel"><div class="panel-header"><h2 x-text="t('sections.recentReconcile')"></h2></div><dl class="details"><template x-for="detail in reconcileDetails()" :key="detail.label"><div class="detail-row"><dt x-text="detail.label"></dt><dd x-text="detail.value"></dd></div></template></dl></div>
         </section>
 
         <section id="routes" class="view" x-show="activeView === 'routes'">
-          <div class="split">
+          <nav class="resource-tabs" :aria-label="t('routes.resourceNavigation')" role="tablist">
+            <button type="button" role="tab" :aria-selected="routeSection === 'listeners'" :class="{ active: routeSection === 'listeners' }" @click="setRouteSection('listeners')"><span x-text="t('routes.listeners')"></span><span class="tab-count" x-text="listeners().length"></span></button>
+            <button type="button" role="tab" :aria-selected="routeSection === 'backendPools'" :class="{ active: routeSection === 'backendPools' }" @click="setRouteSection('backendPools')"><span x-text="t('routes.backendPools')"></span><span class="tab-count" x-text="backendPools().length"></span></button>
+            <button type="button" role="tab" :aria-selected="routeSection === 'routingRules'" :class="{ active: routeSection === 'routingRules' }" @click="setRouteSection('routingRules')"><span x-text="t('routes.routingRules')"></span><span class="tab-count" x-text="routingRules().length"></span></button>
+          </nav>
+
+          <div class="split" x-show="routeSection === 'listeners'">
             <div class="panel">
-              <div class="panel-header"><h2 x-text="t('sections.activeRoutes')"></h2></div>
-              <div class="table-wrap"><table><thead><tr><th x-text="t('tables.host')"></th><th x-text="t('tables.path')"></th><th x-text="t('tables.exposure')"></th><th x-text="t('tables.source')"></th><th x-text="t('tables.upstream')"></th><th x-text="t('tables.health')"></th><th x-text="t('tables.https')"></th><th></th></tr></thead><tbody>
-                <template x-for="route in routes()" :key="route.id">
-                  <tr><td x-text="route.host"></td><td x-text="route.pathPrefix || '/'"></td><td><span class="pill" :class="exposureClass(route.exposure)" x-text="exposureLabel(route.exposure)"></span></td><td x-text="sourceLabel(route.source)"></td><td><template x-for="upstream in route.upstreams || []" :key="upstream.url"><div x-text="upstream.url"></div></template></td><td><span class="pill" :class="routeHealth(route).className" :title="routeHealth(route).detail || null" x-text="routeHealth(route).text"></span></td><td><span class="pill" :class="route.https ? 'ok' : 'warn'" x-text="route.https ? t('status.on') : t('status.off')"></span></td><td><button x-show="route.source === 'explicit'" class="link-button" type="button" :disabled="busy()" @click="requestDeleteRoute(route)" x-text="t('actions.delete')"></button></td></tr>
+              <div class="panel-header"><h2 x-text="t('sections.listeners')"></h2></div>
+              <div class="table-wrap"><table><thead><tr><th x-text="t('tables.name')"></th><th x-text="t('tables.hostname')"></th><th x-text="t('tables.protocol')"></th><th x-text="t('tables.port')"></th><th x-text="t('tables.actions')"></th></tr></thead><tbody>
+                <template x-for="listener in listeners()" :key="listener.id">
+                  <tr><td :data-label="t('tables.name')" x-text="listener.name"></td><td :data-label="t('tables.hostname')" x-text="listener.hostname"></td><td :data-label="t('tables.protocol')"><span class="pill" :class="listener.protocol === 'https' ? 'ok' : ''" x-text="listener.protocol.toUpperCase()"></span></td><td :data-label="t('tables.port')" x-text="listener.port"></td><td :data-label="t('tables.actions')"><div class="table-actions"><button class="link-button" type="button" :disabled="busy()" @click="beginEditListener(listener)" x-text="t('actions.edit')"></button><button class="link-button danger" type="button" :disabled="busy()" @click="requestDeleteResource('listener', listener)" x-text="t('actions.delete')"></button></div></td></tr>
                 </template>
-                <tr x-show="routes().length === 0"><td colspan="8" x-text="t('empty.noRoutes')"></td></tr>
+                <tr class="table-message" x-show="listeners().length === 0"><td colspan="5" x-text="t('empty.noListeners')"></td></tr>
               </tbody></table></div>
             </div>
-            <form class="panel form-panel" @submit.prevent="saveRoute()">
-              <div class="panel-header"><h2 x-text="t('sections.addRoute')"></h2></div>
-              <label><span x-text="t('forms.host')"></span><input x-model.trim="routeForm.host" placeholder="app.example.com" required></label>
-              <label><span x-text="t('forms.pathPrefix')"></span><input x-model.trim="routeForm.pathPrefix" placeholder="/api"></label>
-              <label><span x-text="t('forms.upstreamUrl')"></span><input x-model.trim="routeForm.upstream" placeholder="http://service:8080" required></label>
-              <label><span x-text="t('forms.healthPath')"></span><input x-model.trim="routeForm.healthPath" placeholder="/healthz"></label>
-              <label><span x-text="t('forms.exposure')"></span><select x-model="routeForm.exposure"><option value="public" x-text="t('exposure.public')"></option><option value="protected" x-text="t('exposure.protected')"></option><option value="internal" x-text="t('exposure.internal')"></option></select></label>
-              <label class="check"><input type="checkbox" x-model="routeForm.https"> <span x-text="t('forms.https')"></span></label>
-              <button class="primary-button" type="submit" :disabled="busy()" x-text="t('actions.add')"></button>
+            <form class="panel form-panel" @submit.prevent="saveListener()">
+              <div class="panel-header"><h2 id="listener-form-heading" x-text="editingListenerId ? t('sections.editListener') : t('sections.addListener')"></h2><span class="pill warn" x-show="editingListenerId" x-text="t('status.editing')"></span></div>
+              <label><span x-text="t('forms.name')"></span><input x-model.trim="listenerForm.name" placeholder="Public HTTPS" required></label>
+              <label><span x-text="t('forms.hostname')"></span><input x-model.trim="listenerForm.hostname" placeholder="app.example.com" required></label>
+              <label><span x-text="t('forms.protocol')"></span><select x-model="listenerForm.protocol" @change="onListenerProtocolChanged()"><option value="http">HTTP</option><option value="https">HTTPS</option></select></label>
+              <label><span x-text="t('forms.port')"></span><input type="number" min="1" max="65535" x-model.number="listenerForm.port" required></label>
+              <p class="form-note" x-text="listenerPortHint()"></p>
+              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy()" x-text="editingListenerId ? t('actions.saveChanges') : t('actions.add')"></button><button class="secondary-button" x-show="editingListenerId" type="button" :disabled="busy()" @click="resetListenerForm()" x-text="t('actions.cancelEdit')"></button></div>
             </form>
+          </div>
+
+          <div class="split" x-show="routeSection === 'backendPools'">
+            <div class="panel">
+              <div class="panel-header"><h2 x-text="t('sections.backendPools')"></h2></div>
+              <div class="table-wrap"><table><thead><tr><th x-text="t('tables.name')"></th><th x-text="t('tables.targets')"></th><th x-text="t('tables.actions')"></th></tr></thead><tbody>
+                <template x-for="pool in backendPools()" :key="pool.id">
+                  <tr><td :data-label="t('tables.name')" x-text="pool.name"></td><td :data-label="t('tables.targets')"><template x-for="target in pool.targets || []" :key="backendTargetLabel(target)"><div x-text="backendTargetLabel(target)"></div></template></td><td :data-label="t('tables.actions')"><div class="table-actions"><button class="link-button" type="button" :disabled="busy()" @click="beginEditBackendPool(pool)" x-text="t('actions.edit')"></button><button class="link-button danger" type="button" :disabled="busy()" @click="requestDeleteResource('backendPool', pool)" x-text="t('actions.delete')"></button></div></td></tr>
+                </template>
+                <tr class="table-message" x-show="backendPools().length === 0"><td colspan="3" x-text="t('empty.noBackendPools')"></td></tr>
+              </tbody></table></div>
+            </div>
+            <form class="panel form-panel" @submit.prevent="saveBackendPool()">
+              <div class="panel-header"><h2 id="backend-pool-form-heading" x-text="editingBackendPoolId ? t('sections.editBackendPool') : t('sections.addBackendPool')"></h2><span class="pill warn" x-show="editingBackendPoolId" x-text="t('status.editing')"></span></div>
+              <label><span x-text="t('forms.name')"></span><input x-model.trim="backendPoolForm.name" placeholder="Application pool" required></label>
+              <label><span x-text="t('forms.targets')"></span><textarea x-model="backendPoolForm.targetsText" rows="6" placeholder="10.0.0.4&#10;app.internal" required></textarea></label>
+              <p class="form-note" x-text="t('forms.targetsHint')"></p>
+              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy()" x-text="editingBackendPoolId ? t('actions.saveChanges') : t('actions.add')"></button><button class="secondary-button" x-show="editingBackendPoolId" type="button" :disabled="busy()" @click="resetBackendPoolForm()" x-text="t('actions.cancelEdit')"></button></div>
+            </form>
+          </div>
+
+          <div x-show="routeSection === 'routingRules'">
+            <div class="resource-prerequisite" x-show="listeners().length === 0 || backendPools().length === 0">
+              <p x-text="t('routes.prerequisites')"></p>
+              <div class="form-actions"><button class="secondary-button small" type="button" x-show="listeners().length === 0" @click="setRouteSection('listeners')" x-text="t('actions.addListener')"></button><button class="secondary-button small" type="button" x-show="backendPools().length === 0" @click="setRouteSection('backendPools')" x-text="t('actions.addBackendPool')"></button></div>
+            </div>
+            <div class="routing-rules-layout">
+              <div class="panel">
+                <div class="panel-header"><h2 x-text="t('sections.routingRules')"></h2></div>
+                <div class="table-wrap"><table><thead><tr><th x-text="t('tables.name')"></th><th x-text="t('tables.listener')"></th><th x-text="t('tables.backendPool')"></th><th x-text="t('tables.backend')"></th><th x-text="t('tables.path')"></th><th x-text="t('tables.exposure')"></th><th x-text="t('tables.health')"></th><th x-text="t('tables.actions')"></th></tr></thead><tbody>
+                  <template x-for="rule in routingRules()" :key="rule.id">
+                    <tr><td :data-label="t('tables.name')"><div x-text="rule.name"></div><span class="pill" :class="rule.enabled ? 'ok' : 'warn'" x-text="rule.enabled ? t('status.active') : t('status.disabled')"></span></td><td :data-label="t('tables.listener')" x-text="listenerLabel(rule.listenerId)"></td><td :data-label="t('tables.backendPool')" x-text="backendPoolLabel(rule.backendPoolId)"></td><td :data-label="t('tables.backend')" x-text="rule.backendProtocol.toUpperCase() + ' : ' + rule.backendPort"></td><td :data-label="t('tables.path')" x-text="rule.pathPrefix || '/'"></td><td :data-label="t('tables.exposure')"><span class="pill" :class="exposureClass(rule.exposure)" x-text="exposureLabel(rule.exposure)"></span></td><td :data-label="t('tables.health')"><span class="pill" :class="routingRuleHealth(rule).className" x-text="routingRuleHealth(rule).text"></span><small class="table-detail" x-show="routingRuleHealth(rule).detail" x-text="routingRuleHealth(rule).detail"></small></td><td :data-label="t('tables.actions')"><div class="table-actions"><button class="link-button" type="button" :disabled="busy()" @click="beginEditRoutingRule(rule)" x-text="t('actions.edit')"></button><button class="link-button danger" type="button" :disabled="busy()" @click="requestDeleteResource('routingRule', rule)" x-text="t('actions.delete')"></button></div></td></tr>
+                  </template>
+                  <tr class="table-message" x-show="routingRules().length === 0"><td colspan="8" x-text="t('empty.noRoutingRules')"></td></tr>
+                </tbody></table></div>
+              </div>
+              <form class="panel form-panel routing-rule-form" @submit.prevent="saveRoutingRule()">
+                <div class="panel-header"><h2 id="routing-rule-form-heading" x-text="editingRoutingRuleId ? t('sections.editRoutingRule') : t('sections.addRoutingRule')"></h2><span class="pill warn" x-show="editingRoutingRuleId" x-text="t('status.editing')"></span></div>
+                <label><span x-text="t('forms.name')"></span><input x-model.trim="routingRuleForm.name" placeholder="Application route" required></label>
+                <label><span x-text="t('forms.listener')"></span><select x-model="routingRuleForm.listenerId" required><option value="" x-text="t('forms.selectListener')"></option><template x-for="listener in listeners()" :key="listener.id"><option :value="listener.id" x-text="listenerLabel(listener.id)"></option></template></select></label>
+                <label><span x-text="t('forms.backendPool')"></span><select x-model="routingRuleForm.backendPoolId" required><option value="" x-text="t('forms.selectBackendPool')"></option><template x-for="pool in backendPools()" :key="pool.id"><option :value="pool.id" x-text="pool.name"></option></template></select></label>
+                <label><span x-text="t('forms.backendProtocol')"></span><select x-model="routingRuleForm.backendProtocol" @change="onBackendProtocolChanged()"><option value="http">HTTP</option><option value="https">HTTPS</option></select><small class="field-note" x-text="t('forms.backendProtocolHint')"></small></label>
+                <label><span x-text="t('forms.backendPort')"></span><input type="number" min="1" max="65535" x-model.number="routingRuleForm.backendPort" required></label>
+                <label><span x-text="t('forms.backendHostHeader')"></span><input x-model.trim="routingRuleForm.backendHostHeader" placeholder="ex.example.com"><small class="field-note" x-text="t('forms.backendHostHeaderHint')"></small></label>
+                <label><span x-text="t('forms.pathPrefix')"></span><input x-model.trim="routingRuleForm.pathPrefix" placeholder="/api"><small class="field-note" x-text="t('forms.pathPrefixHint')"></small></label>
+                <label><span x-text="t('forms.healthPath')"></span><input x-model.trim="routingRuleForm.healthPath" placeholder="/healthz"><small class="field-note" x-text="healthPathHint()"></small></label>
+                <label><span x-text="t('forms.exposure')"></span><select x-model="routingRuleForm.exposure"><option value="public" x-text="t('exposure.public')"></option><option value="protected" x-text="t('exposure.protected')"></option><option value="internal" x-text="t('exposure.internal')"></option></select><small class="field-note" x-text="exposureHint()"></small></label>
+                <label class="check"><input type="checkbox" x-model="routingRuleForm.enabled"> <span x-text="t('forms.enabled')"></span></label>
+                <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || !canSaveRoutingRule()" x-text="editingRoutingRuleId ? t('actions.saveChanges') : t('actions.add')"></button><button class="secondary-button" x-show="editingRoutingRuleId" type="button" :disabled="busy()" @click="resetRoutingRuleForm()" x-text="t('actions.cancelEdit')"></button></div>
+              </form>
+            </div>
           </div>
         </section>
 
@@ -90,10 +151,89 @@
           </div>
         </section>
 
-        <section id="network" class="view" x-show="activeView === 'network'">
-          <div class="network-grid">
+        <section id="platform" class="view" x-show="activeView === 'platform'">
+          <div class="platform-grid">
             <div class="network-status-stack"><div class="panel"><div class="panel-header"><h2 x-text="t('sections.azureNetwork')"></h2></div><dl class="details"><template x-for="detail in networkDetails()" :key="detail.label"><div class="detail-row"><dt x-text="detail.label"></dt><dd x-text="detail.value"></dd></div></template></dl></div><div class="panel"><div class="panel-header"><h2 x-text="t('sections.runtimeSecurity')"></h2></div><dl class="details"><template x-for="detail in runtimeDetails()" :key="detail.label"><div class="detail-row"><dt x-text="detail.label"></dt><dd x-text="detail.value"></dd></div></template></dl></div></div>
-            <form class="panel form-panel" @submit.prevent="saveCertificate()" @input="markCertificateDirty()" @change="markCertificateDirty()">
+          </div>
+        </section>
+
+        <section id="security" class="view" x-show="activeView === 'security'">
+          <form class="settings-layout" @submit.prevent="saveSecuritySettings()">
+            <div class="panel form-panel">
+              <div class="panel-header"><h2 x-text="t('sections.securityBaseline')"></h2></div>
+              <label class="check"><input type="checkbox" x-model="securityForm.enabled"> <span x-text="t('forms.securityEnabled')"></span></label>
+              <label><span x-text="t('forms.maxRequestBodyMiB')"></span><input type="number" min="0" step="1" x-model.number="securityForm.maxRequestBodyMiB"><small class="field-note" x-text="t('forms.deniedMethodsHint')"></small></label>
+              <label><span x-text="t('forms.deniedMethods')"></span><textarea rows="3" x-model="securityForm.deniedMethodsText" placeholder="TRACE&#10;CONNECT"></textarea></label>
+              <label><span x-text="t('forms.deniedPaths')"></span><textarea rows="3" x-model="securityForm.deniedPathsText" placeholder="/.git&#10;/.env"></textarea><small class="field-note" x-text="t('forms.deniedPathsHint')"></small></label>
+              <label><span x-text="t('forms.allowedCidrs')"></span><textarea rows="3" x-model="securityForm.allowedCidrsText" placeholder="198.51.100.0/24"></textarea><small class="field-note" x-text="t('forms.allowedCidrsHint')"></small></label>
+              <label><span x-text="t('forms.blockedCidrs')"></span><textarea rows="3" x-model="securityForm.blockedCidrsText" placeholder="203.0.113.0/24"></textarea></label>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-header"><h2 x-text="t('sections.accessPolicy')"></h2></div>
+              <label><span x-text="t('forms.internalSourceRanges')"></span><textarea rows="7" required x-model="securityForm.internalSourceRangesText" placeholder="10.0.0.0/8&#10;172.16.0.0/12&#10;192.168.0.0/16"></textarea><small class="field-note" x-text="t('forms.internalSourceRangesHint')"></small></label>
+              <label class="check"><input type="checkbox" x-model="securityForm.allowBearerToken"> <span x-text="t('forms.allowBearerToken')"></span></label>
+              <label class="check"><input type="checkbox" x-model="securityForm.allowAdminTokenHeader"> <span x-text="t('forms.allowAdminTokenHeader')"></span></label>
+              <p class="form-note warn-text" x-show="!securityForm.allowBearerToken && !securityForm.allowAdminTokenHeader" x-text="t('msg.protectedPolicyRequired')"></p>
+              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || !settings?.persistenceAvailable || (!securityForm.allowBearerToken && !securityForm.allowAdminTokenHeader)" x-text="t('actions.saveSecurity')"></button></div>
+              <p class="form-note warn-text" x-show="settings && !settings.persistenceAvailable" x-text="t('msg.settingsUnavailable')"></p>
+            </div>
+          </form>
+        </section>
+
+        <section id="settings" class="view" x-show="activeView === 'settings'">
+          <form class="settings-layout" @submit.prevent="saveSystemSettings()">
+            <div class="panel form-panel">
+              <div class="panel-header"><h2 x-text="t('sections.systemSettings')"></h2><span class="pill warn" x-show="settings?.restartRequired" x-text="t('status.restartRequired')"></span></div>
+              <label><span x-text="t('forms.deploymentMode')"></span><select x-model="systemForm.deploymentMode"><option value="container-socket" x-text="t('deployment.containerSocket')"></option><option value="azure-vm" x-text="t('deployment.azureVM')"></option></select></label>
+              <p class="form-note"><strong x-text="activeDeploymentText()"></strong></p>
+              <p class="form-note" x-text="t('settings.deploymentNote')"></p>
+              <label><span class="field-heading"><span x-text="t('forms.adminTokenNew')"></span><span class="pill ok" x-show="settings?.adminTokenConfigured" x-text="t('certificate.secretConfigured')"></span></span><input type="password" autocomplete="new-password" x-model="systemForm.adminToken"><small class="field-note" x-text="t('forms.adminTokenHint')"></small></label>
+            </div>
+            <div class="panel form-panel">
+              <div class="panel-header"><h2 x-text="t('sections.azureSettings')"></h2></div>
+              <label class="check"><input type="checkbox" x-model="systemForm.azureEnabled" @change="azurePermissionCheck = null"> <span x-text="t('forms.azureEnabled')"></span></label>
+              <div class="nested-fields" x-show="systemForm.azureEnabled" @input="azurePermissionCheck = null">
+                <label class="check"><input type="checkbox" x-model="systemForm.azureManageDNS"> <span x-text="t('forms.azureManageDns')"></span></label>
+                <label class="check"><input type="checkbox" x-model="systemForm.azureManageNSG"> <span x-text="t('forms.azureManageNsg')"></span></label>
+                <label><span x-text="t('forms.azureSubscriptionId')"></span><input :required="systemForm.azureEnabled" x-model.trim="systemForm.azureSubscriptionId" autocomplete="off"></label>
+                <label><span x-text="t('forms.azureResourceGroup')"></span><input :required="systemForm.azureEnabled && (systemForm.azureManageDNS || systemForm.azureManageNSG)" x-model.trim="systemForm.azureResourceGroup" autocomplete="off"></label>
+                <label x-show="systemForm.azureManageDNS"><span x-text="t('forms.azureDnsZones')"></span><textarea rows="3" :required="systemForm.azureEnabled && systemForm.azureManageDNS" x-model="systemForm.azureDNSZonesText" placeholder="example.com | dns-rg"></textarea><small class="field-note" x-text="t('forms.azureDnsZonesHint')"></small></label>
+                <label x-show="systemForm.azureManageDNS"><span x-text="t('forms.azurePublicIp')"></span><input inputmode="decimal" :required="systemForm.azureEnabled && systemForm.azureManageDNS" x-model.trim="systemForm.azurePublicIP" placeholder="203.0.113.10"></label>
+                <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgName')"></span><input :required="systemForm.azureEnabled && systemForm.azureManageNSG" x-model.trim="systemForm.azureNSGName"></label>
+                <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgPriority')"></span><input type="number" min="100" max="4096" :required="systemForm.azureEnabled && systemForm.azureManageNSG" x-model.number="systemForm.azureNSGPriority"></label>
+                <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgSources')"></span><textarea rows="3" x-model="systemForm.azureNSGSourcesText" placeholder="*"></textarea><small class="field-note" x-text="t('forms.azureNsgSourcesHint')"></small></label>
+              </div>
+              <p class="form-note" x-text="t('settings.azureIdentityNote')"></p>
+              <p class="form-note" x-text="t('settings.azureStatusNote')"></p>
+              <p class="form-note" x-text="t('settings.azurePermissionCheckNote')"></p>
+              <div class="permission-results" x-show="azurePermissionCheck" x-cloak>
+                <div class="permission-results-header"><strong x-text="t('settings.azurePermissionsTitle')"></strong><span class="form-note" x-text="format('settings.azurePermissionMetadata', { credential: azurePermissionCheck?.credential || 'DefaultAzureCredential', time: formatDate(azurePermissionCheck?.checkedAt) })"></span></div>
+                <template x-for="group in azurePermissionGroups()" :key="group.key">
+                  <div class="permission-group">
+                    <div class="permission-group-header"><strong x-text="group.label"></strong><span class="pill" :class="permissionGroupState(group).className" x-text="permissionGroupState(group).text"></span></div>
+                    <p class="form-note" x-show="!group.configured" x-text="t('settings.azurePermissionNotConfigured')"></p>
+                    <div class="permission-targets" x-show="group.configured">
+                      <template x-for="target in group.targets" :key="target.scope">
+                        <div class="permission-target">
+                          <div class="permission-target-name"><strong x-text="target.name"></strong><span x-text="format('settings.azurePermissionResourceGroup', { resourceGroup: target.resourceGroup })"></span></div>
+                          <span class="pill" :class="permissionTargetState(target).className" x-text="permissionTargetState(target).text"></span>
+                          <small class="permission-detail warn-text" x-show="target.missingActions?.length" x-text="format('settings.azurePermissionMissing', { actions: target.missingActions?.join(', ') || '' })"></small>
+                          <small class="permission-detail error-text" x-show="target.error" x-text="target.error"></small>
+                        </div>
+                      </template>
+                    </div>
+                  </div>
+                </template>
+              </div>
+              <div class="form-actions"><button class="secondary-button" type="button" :disabled="busy() || !systemForm.azureEnabled" @click="checkAzurePermissions()" x-text="t('actions.checkAzurePermissions')"></button><button class="primary-button" type="submit" :disabled="busy() || !settings?.persistenceAvailable" x-text="t('actions.saveSettings')"></button></div>
+              <p class="form-note warn-text" x-show="settings && !settings.persistenceAvailable" x-text="t('msg.settingsUnavailable')"></p>
+            </div>
+          </form>
+        </section>
+
+        <section id="certificates" class="view" x-show="activeView === 'certificates'">
+          <div class="certificate-layout">
+            <form class="panel form-panel certificate-panel" @submit.prevent="saveCertificate()" @input="markCertificateDirty()" @change="markCertificateDirty()">
               <div class="panel-header"><h2 x-text="t('sections.certificates')"></h2><span class="pill" x-text="certificateForm.runtimeOnly ? t('status.runtimeOnly') : t('status.persisted')"></span></div>
               <label><span x-text="t('forms.certificateIssuer')"></span><select x-model="certificateForm.issuer" @change="normalizeCertificateIssuerForm()"><option value="letsencrypt" x-text="t('certificate.letsencrypt')"></option><option value="zerossl" x-text="t('certificate.zerossl')"></option><option value="custom" x-text="t('certificate.custom')"></option></select></label>
               <label><span x-text="t('forms.certificateEmail')"></span><input type="email" x-model.trim="certificateForm.email" placeholder="ops@example.com"></label>
@@ -128,11 +268,11 @@
       </form>
     </dialog>
 
-    <dialog x-ref="deleteRouteDialog" class="confirm-dialog" aria-labelledby="delete-route-title" @cancel.prevent="cancelDeleteRoute()">
-      <form method="dialog" @submit.prevent="confirmDeleteRoute()">
-        <h2 id="delete-route-title" x-text="t('actions.confirmDelete')"></h2>
-        <p x-text="format('msg.confirmDeleteRoute', { host: routeToDelete?.host || '-' })"></p>
-        <div class="form-actions"><button class="secondary-button" type="button" @click="cancelDeleteRoute()" x-text="t('actions.cancel')"></button><button class="danger-button" type="submit" x-text="t('actions.confirmDelete')"></button></div>
+    <dialog x-ref="deleteResourceDialog" class="confirm-dialog" aria-labelledby="delete-resource-title" @cancel.prevent="cancelDeleteResource()">
+      <form method="dialog" @submit.prevent="confirmDeleteResource()">
+        <h2 id="delete-resource-title" x-text="t('actions.confirmDelete')"></h2>
+        <p x-text="deleteResourceConfirmation()"></p>
+        <div class="form-actions"><button class="secondary-button" type="button" @click="cancelDeleteResource()" x-text="t('actions.cancel')"></button><button class="danger-button" type="submit" x-text="t('actions.confirmDelete')"></button></div>
       </form>
     </dialog>
   </body>

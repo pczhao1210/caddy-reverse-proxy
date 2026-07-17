@@ -6,13 +6,17 @@ import (
 )
 
 type DeploymentProfile string
+type DeploymentMode string
 
 const (
-	ProfileVM DeploymentProfile = "vm"
+	ProfileVM           DeploymentProfile = "vm"
+	ModeContainerSocket DeploymentMode    = "container-socket"
+	ModeAzureVM         DeploymentMode    = "azure-vm"
 )
 
 type AppConfig struct {
 	Profile                  DeploymentProfile `json:"profile"`
+	DeploymentMode           DeploymentMode    `json:"deploymentMode"`
 	Control                  ControlConfig     `json:"control"`
 	Gateway                  GatewayConfig     `json:"gateway"`
 	Docker                   DockerConfig      `json:"docker"`
@@ -139,23 +143,87 @@ type UpstreamTarget struct {
 	HealthPath string `json:"healthPath,omitempty"`
 }
 
+type Listener struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Hostname    string    `json:"hostname"`
+	Port        int       `json:"port"`
+	Protocol    string    `json:"protocol"`
+	Source      string    `json:"source"`
+	LastUpdated time.Time `json:"lastUpdated,omitempty"`
+}
+
+type BackendTarget struct {
+	Name       string `json:"name,omitempty"`
+	Address    string `json:"address"`
+	Port       int    `json:"port,omitempty"`
+	HealthPath string `json:"healthPath,omitempty"`
+}
+
+type BackendPool struct {
+	ID          string          `json:"id"`
+	Name        string          `json:"name"`
+	Targets     []BackendTarget `json:"targets"`
+	Source      string          `json:"source"`
+	LastUpdated time.Time       `json:"lastUpdated,omitempty"`
+}
+
+type RoutingRule struct {
+	ID              string              `json:"id"`
+	Name            string              `json:"name"`
+	ListenerID      string              `json:"listenerId"`
+	BackendPoolID   string              `json:"backendPoolId"`
+	BackendPort     int                 `json:"backendPort"`
+	BackendProtocol string              `json:"backendProtocol"`
+	PathPrefix      string              `json:"pathPrefix,omitempty"`
+	HealthPath      string              `json:"healthPath,omitempty"`
+	Exposure        string              `json:"exposure"`
+	Enabled         bool                `json:"enabled"`
+	WebSocket       bool                `json:"websocket"`
+	Headers         map[string]string   `json:"headers,omitempty"`
+	Security        RouteSecurityConfig `json:"security,omitempty"`
+	Source          string              `json:"source"`
+	LastError       string              `json:"-"`
+	LastUpdated     time.Time           `json:"lastUpdated,omitempty"`
+}
+
+func (rule *RoutingRule) UnmarshalJSON(data []byte) error {
+	type routingRule RoutingRule
+	type routingRulePayload struct {
+		routingRule
+		Enabled *bool `json:"enabled"`
+	}
+	payload := routingRulePayload{routingRule: routingRule{Enabled: true}}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	output := RoutingRule(payload.routingRule)
+	if payload.Enabled != nil {
+		output.Enabled = *payload.Enabled
+	}
+	*rule = output
+	return nil
+}
+
 type RouteConfig struct {
-	ID          string              `json:"id"`
-	Host        string              `json:"host"`
-	PathPrefix  string              `json:"pathPrefix,omitempty"`
-	Exposure    string              `json:"exposure"`
-	Enabled     bool                `json:"enabled"`
-	Public      bool                `json:"public"`
-	HTTPS       bool                `json:"https"`
-	WebSocket   bool                `json:"websocket"`
-	Protected   bool                `json:"protected"`
-	Source      string              `json:"source"`
-	Headers     map[string]string   `json:"headers,omitempty"`
-	Security    RouteSecurityConfig `json:"security,omitempty"`
-	Upstreams   []UpstreamTarget    `json:"upstreams"`
-	Discovered  bool                `json:"discovered"`
-	LastError   string              `json:"lastError,omitempty"`
-	LastUpdated time.Time           `json:"lastUpdated,omitempty"`
+	ID               string              `json:"id"`
+	Host             string              `json:"host"`
+	ListenerPort     int                 `json:"listenerPort,omitempty"`
+	ListenerProtocol string              `json:"listenerProtocol,omitempty"`
+	PathPrefix       string              `json:"pathPrefix,omitempty"`
+	Exposure         string              `json:"exposure"`
+	Enabled          bool                `json:"enabled"`
+	Public           bool                `json:"public"`
+	HTTPS            bool                `json:"https"`
+	WebSocket        bool                `json:"websocket"`
+	Protected        bool                `json:"protected"`
+	Source           string              `json:"source"`
+	Headers          map[string]string   `json:"headers,omitempty"`
+	Security         RouteSecurityConfig `json:"security,omitempty"`
+	Upstreams        []UpstreamTarget    `json:"upstreams"`
+	Discovered       bool                `json:"discovered"`
+	LastError        string              `json:"lastError,omitempty"`
+	LastUpdated      time.Time           `json:"lastUpdated,omitempty"`
 }
 
 func (route *RouteConfig) UnmarshalJSON(data []byte) error {

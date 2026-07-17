@@ -52,6 +52,114 @@ func TestRenderProtectedRouteSkipsAutoHTTPSAndAddsFallback(t *testing.T) {
 	}
 }
 
+func TestRenderUsesListenerPortAndProtocol(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "custom-listener", Host: "app.example.com", ListenerPort: 8443, ListenerProtocol: "https",
+		Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	listens := server["listen"].([]any)
+	found := false
+	for _, listen := range listens {
+		found = found || listen == ":8443"
+	}
+	if !found {
+		t.Fatalf("listen = %#v, want :8443", listens)
+	}
+	match := server["routes"].([]any)[0].(map[string]any)["match"].([]any)[0].(map[string]any)
+	ports := match["local_port"].([]any)
+	if len(ports) != 1 || ports[0].(float64) != 8443 || match["protocol"] != "https" {
+		t.Fatalf("listener match = %#v", match)
+	}
+}
+
+func TestRenderHTTPListenerDoesNotDisableHTTPSForSameHost(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+	routes := []model.RouteConfig{
+		{ID: "http", Host: "app.example.com", ListenerPort: 80, ListenerProtocol: "http", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}},
+		{ID: "https", Host: "app.example.com", ListenerPort: 443, ListenerProtocol: "https", Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}},
+	}
+	data, err := renderer.Render(routes)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	if automaticHTTPS, exists := server["automatic_https"]; exists {
+		t.Fatalf("automatic_https = %#v, want no skip for host with HTTPS listener", automaticHTTPS)
+	}
+}
+
+func TestRenderSecurityEntriesUseListenerMatch(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{
+		Gateway:  model.GatewayConfig{HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy"},
+		Security: model.SecurityConfig{Enabled: true, DeniedMethods: []string{"TRACE"}, DeniedPathPrefixes: []string{"/.git"}},
+	})
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "secure-listener", Host: "app.example.com", ListenerPort: 8443, ListenerProtocol: "https",
+		Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	if len(routes) < 2 {
+		t.Fatalf("routes length = %d, want security and proxy entries", len(routes))
+	}
+	for _, entry := range routes {
+		match := entry.(map[string]any)["match"].([]any)[0].(map[string]any)
+		ports := match["local_port"].([]any)
+		if len(ports) != 1 || ports[0].(float64) != 8443 || match["protocol"] != "https" {
+			t.Fatalf("listener match = %#v", match)
+		}
+	}
+}
+
+func TestRenderSetsConfiguredUpstreamHostHeader(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "external", Host: "app.example.com", Enabled: true, Headers: map[string]string{"Host": "ex.example.com"},
+		Upstreams: []model.UpstreamTarget{{URL: "https://ex.example.com:443"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	route := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)[0].(map[string]any)
+	handler := route["handle"].([]any)[0].(map[string]any)
+	requestHeaders := handler["headers"].(map[string]any)["request"].(map[string]any)
+	set := requestHeaders["set"].(map[string]any)
+	host := set["Host"].([]any)
+	if len(host) != 1 || host[0] != "ex.example.com" {
+		t.Fatalf("Host header = %#v", host)
+	}
+}
+
 func TestRenderManagementHostIsProtected(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{
 		Control: model.ControlConfig{Listen: ":8080", ManagementHost: "admin.example.com"},

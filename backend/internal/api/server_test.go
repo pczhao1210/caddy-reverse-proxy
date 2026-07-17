@@ -10,11 +10,40 @@ import (
 	"strings"
 	"testing"
 
+	gatewayazure "github.com/aidockerfarm/gateway/internal/azure"
+	appconfig "github.com/aidockerfarm/gateway/internal/config"
 	"github.com/aidockerfarm/gateway/internal/model"
+	"github.com/aidockerfarm/gateway/internal/routes"
 )
 
 type testCertificateStore struct {
 	certificate model.CertificateConfig
+}
+
+type testSettingsStore struct {
+	settings appconfig.Settings
+	found    bool
+}
+
+type testAzurePermissionChecker struct {
+	config model.AzureConfig
+	result gatewayazure.PermissionCheckResult
+	err    error
+}
+
+func (c *testAzurePermissionChecker) Check(_ context.Context, config model.AzureConfig) (gatewayazure.PermissionCheckResult, error) {
+	c.config = config
+	return c.result, c.err
+}
+
+func (s *testSettingsStore) Load() (appconfig.Settings, bool, error) {
+	return s.settings, s.found, nil
+}
+
+func (s *testSettingsStore) Save(settings appconfig.Settings) error {
+	s.settings = settings
+	s.found = true
+	return nil
 }
 
 type testDiscoverer struct {
@@ -33,6 +62,7 @@ func (s *testCertificateStore) Save(certificate model.CertificateConfig) error {
 
 type testCertificateReconciler struct {
 	certificate model.CertificateConfig
+	config      model.AppConfig
 }
 
 func (r *testCertificateReconciler) Sync(context.Context) model.ReconcileResult {
@@ -45,6 +75,10 @@ func (r *testCertificateReconciler) Last() model.ReconcileResult {
 
 func (r *testCertificateReconciler) UpdateCertificate(certificate model.CertificateConfig) {
 	r.certificate = certificate
+}
+
+func (r *testCertificateReconciler) UpdateConfig(config model.AppConfig) {
+	r.config = config
 }
 
 type testRuntimeStatus struct {
@@ -81,6 +115,198 @@ func TestHealthEndpointsReflectRuntimeReadiness(t *testing.T) {
 	runtime.ready = true
 	runtime.err = nil
 	assertStatus("/readyz", http.StatusOK)
+}
+
+func TestStatusIncludesDeploymentMode(t *testing.T) {
+	handler := NewServer(Options{
+		Config:     model.AppConfig{DeploymentMode: model.ModeAzureVM},
+		Store:      routes.NewStore(""),
+		Reconciler: &testCertificateReconciler{},
+	}).Handler()
+	request := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/status status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"deploymentMode":"azure-vm"`) {
+		t.Fatalf("status response does not include deployment mode: %s", response.Body.String())
+	}
+}
+
+func TestRoutingResourceAPILifecycle(t *testing.T) {
+	store := routes.NewStore("")
+	handler := NewServer(Options{Store: store, Reconciler: &testCertificateReconciler{}}).Handler()
+	request := func(method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(method, path, strings.NewReader(body)))
+		return recorder
+	}
+
+	response := request(http.MethodPost, "/api/listeners", `{"id":"listener-public","name":"Public HTTPS","hostname":"app.example.com","port":443,"protocol":"https"}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST /api/listeners status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = request(http.MethodPost, "/api/backend-pools", `{"id":"pool-app","name":"Application","targets":[{"address":"10.0.0.4"}]}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST /api/backend-pools status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = request(http.MethodPost, "/api/routing-rules", `{"id":"rule-api","name":"API","listenerId":"listener-public","backendPoolId":"pool-app","backendPort":8080,"backendProtocol":"http","pathPrefix":"/api","enabled":true}`)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST /api/routing-rules status = %d, body = %s", response.Code, response.Body.String())
+	}
+	compiled := store.List()
+	if len(compiled) != 1 || compiled[0].Host != "app.example.com" || compiled[0].Upstreams[0].URL != "http://10.0.0.4:8080" {
+		t.Fatalf("compiled routes = %#v", compiled)
+	}
+
+	response = request(http.MethodDelete, "/api/listeners/listener-public", "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("DELETE referenced listener status = %d, body = %s", response.Code, response.Body.String())
+	}
+	response = request(http.MethodDelete, "/api/backend-pools/pool-app", "")
+	if response.Code != http.StatusConflict {
+		t.Fatalf("DELETE referenced backend pool status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response = request(http.MethodDelete, "/api/routing-rules/rule-api", ""); response.Code != http.StatusOK {
+		t.Fatalf("DELETE routing rule status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response = request(http.MethodDelete, "/api/listeners/listener-public", ""); response.Code != http.StatusOK {
+		t.Fatalf("DELETE listener status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response = request(http.MethodDelete, "/api/backend-pools/pool-app", ""); response.Code != http.StatusOK {
+		t.Fatalf("DELETE backend pool status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestSecuritySettingsPersistAndUpdateRuntimeConfig(t *testing.T) {
+	config := settingsTestConfig()
+	settingsStore := &testSettingsStore{settings: appconfig.SettingsFromConfig(config), found: true}
+	reconciler := &testCertificateReconciler{}
+	handler := NewServer(Options{Config: config, Reconciler: reconciler, SettingsStore: settingsStore}).Handler()
+	body := `{"security":{"enabled":true,"maxRequestBodyBytes":2097152,"deniedMethods":["TRACE"],"deniedPathPrefixes":["/.git"],"allowedCidrs":[],"blockedCidrs":["203.0.113.0/24"]},"internalSourceRanges":["10.0.0.0/8"],"protectedRoutes":{"allowBearerToken":true,"allowAdminTokenHeader":false}}`
+	request := authenticatedRequest(http.MethodPut, "/api/settings/security", body, "old-token")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT /api/settings/security status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !settingsStore.found || settingsStore.settings.Security.MaxRequestBodyBytes != 2*1024*1024 {
+		t.Fatalf("saved settings = %#v", settingsStore.settings)
+	}
+	if reconciler.config.Security.MaxRequestBodyBytes != 2*1024*1024 || reconciler.config.Auth.ProtectedRoutes.AllowAdminTokenHeader {
+		t.Fatalf("runtime config = %#v", reconciler.config)
+	}
+}
+
+func TestSecuritySettingsRejectNoProtectedTokenPolicy(t *testing.T) {
+	config := settingsTestConfig()
+	settingsStore := &testSettingsStore{settings: appconfig.SettingsFromConfig(config), found: true}
+	handler := NewServer(Options{Config: config, Reconciler: &testCertificateReconciler{}, SettingsStore: settingsStore}).Handler()
+	body := `{"security":{"enabled":true},"internalSourceRanges":["10.0.0.0/8"],"protectedRoutes":{"allowBearerToken":false,"allowAdminTokenHeader":false}}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest(http.MethodPut, "/api/settings/security", body, "old-token"))
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "at least one token header policy") {
+		t.Fatalf("PUT /api/settings/security status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestAzureSettingsEqualTreatsNilAndEmptySlicesAsEqual(t *testing.T) {
+	left := model.AzureConfig{ManageDNS: true, ManageNSG: true}
+	right := model.AzureConfig{ManageDNS: true, ManageNSG: true, DNSZones: []model.AzureDNSZoneConfig{}, NSGSourceAddressPrefixes: []string{}}
+	if !azureSettingsEqual(left, right) {
+		t.Fatalf("azureSettingsEqual() = false for semantically equal configs")
+	}
+}
+
+func TestAzurePermissionCheckUsesSubmittedSettings(t *testing.T) {
+	checker := &testAzurePermissionChecker{result: gatewayazure.PermissionCheckResult{
+		Credential: "DefaultAzureCredential",
+		DNS: gatewayazure.PermissionGroupResult{
+			Configured: true,
+			Targets:    []gatewayazure.PermissionTargetResult{{Name: "new.example.com", ResourceGroup: "dns-rg", Granted: true}},
+		},
+	}}
+	handler := NewServer(Options{AzurePermissionChecker: checker}).Handler()
+	body := `{"azure":{"enabled":true,"manageDNS":true,"subscriptionId":"new-subscription","resourceGroup":"default-rg","dnsZones":[{"name":"new.example.com","resourceGroup":"dns-rg"}]}}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/settings/azure/permissions", strings.NewReader(body)))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("POST /api/settings/azure/permissions status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if checker.config.SubscriptionID != "new-subscription" || len(checker.config.DNSZones) != 1 || checker.config.DNSZones[0].ResourceGroup != "dns-rg" {
+		t.Fatalf("checker config = %#v", checker.config)
+	}
+	if !strings.Contains(response.Body.String(), `"granted":true`) {
+		t.Fatalf("permission response = %s", response.Body.String())
+	}
+}
+
+func TestSystemSettingsRotateTokenAndStageDeploymentMode(t *testing.T) {
+	config := settingsTestConfig()
+	settingsStore := &testSettingsStore{settings: appconfig.SettingsFromConfig(config), found: true}
+	reconciler := &testCertificateReconciler{}
+	handler := NewServer(Options{Config: config, Reconciler: reconciler, SettingsStore: settingsStore}).Handler()
+	body := `{"deploymentMode":"azure-vm","adminToken":"new-token","azure":{"enabled":false,"manageDNS":false,"manageNSG":false}}`
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest(http.MethodPut, "/api/settings/system", body, "old-token"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("PUT /api/settings/system status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"restartRequired":true`) {
+		t.Fatalf("response does not require restart: %s", response.Body.String())
+	}
+	if settingsStore.settings.DeploymentMode != model.ModeAzureVM || settingsStore.settings.Auth.AdminToken != "new-token" {
+		t.Fatalf("saved settings = %#v", settingsStore.settings)
+	}
+	if settingsStore.settings.DockerEnabled == nil || *settingsStore.settings.DockerEnabled {
+		t.Fatalf("saved DockerEnabled = %#v, want false", settingsStore.settings.DockerEnabled)
+	}
+
+	oldTokenResponse := httptest.NewRecorder()
+	handler.ServeHTTP(oldTokenResponse, authenticatedRequest(http.MethodGet, "/api/settings", "", "old-token"))
+	if oldTokenResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("old token status = %d, want 401", oldTokenResponse.Code)
+	}
+	newTokenResponse := httptest.NewRecorder()
+	handler.ServeHTTP(newTokenResponse, authenticatedRequest(http.MethodGet, "/api/settings", "", "new-token"))
+	if newTokenResponse.Code != http.StatusOK {
+		t.Fatalf("new token status = %d, body = %s", newTokenResponse.Code, newTokenResponse.Body.String())
+	}
+	if strings.Contains(newTokenResponse.Body.String(), "new-token") {
+		t.Fatalf("settings response exposed admin token: %s", newTokenResponse.Body.String())
+	}
+}
+
+func settingsTestConfig() model.AppConfig {
+	return model.AppConfig{
+		Profile:        model.ProfileVM,
+		DeploymentMode: model.ModeContainerSocket,
+		Control:        model.ControlConfig{Listen: ":8080"},
+		Gateway: model.GatewayConfig{
+			CaddyAdminEndpoint:   "http://127.0.0.1:2019",
+			InternalSourceRanges: []string{"10.0.0.0/8"},
+			Certificate:          model.CertificateConfig{Issuer: "letsencrypt"},
+		},
+		Auth: model.AuthConfig{
+			Required:   true,
+			AdminToken: "old-token",
+			ProtectedRoutes: model.ProtectedRouteConfig{
+				AllowBearerToken:      true,
+				AllowAdminTokenHeader: true,
+			},
+		},
+		Security: model.SecurityConfig{Enabled: true, MaxRequestBodyBytes: 10 * 1024 * 1024},
+	}
+}
+
+func authenticatedRequest(method, path, body, token string) *http.Request {
+	request := httptest.NewRequest(method, path, strings.NewReader(body))
+	request.Header.Set("Authorization", "Bearer "+token)
+	return request
 }
 
 func TestContainerBindPolicySharedNetworkAllowsBind(t *testing.T) {

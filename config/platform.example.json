@@ -1,5 +1,6 @@
 {
   "profile": "vm",
+  "deploymentMode": "container-socket",
   "control": {
     "listen": ":8080",
     "managementHost": ""

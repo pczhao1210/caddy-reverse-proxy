@@ -29,7 +29,12 @@ SSH_PUBLIC_KEY_RESOURCE_GROUP=${SSH_PUBLIC_KEY_RESOURCE_GROUP:-}
 SSH_KEY_VAULT_NAME=${SSH_KEY_VAULT_NAME:-}
 SSH_KEY_VAULT_SECRET_NAME=${SSH_KEY_VAULT_SECRET_NAME:-}
 SSH_KEY_VAULT_SECRET_VERSION=${SSH_KEY_VAULT_SECRET_VERSION:-}
+VM_AUTHENTICATION_TYPE=${VM_AUTHENTICATION_TYPE:-}
+SSH_PRIVATE_KEY_FILE=${SSH_PRIVATE_KEY_FILE:-}
 SSH_PUBLIC_KEY_DESCRIPTION=
+VM_AUTHENTICATION_DESCRIPTION=
+GENERATE_SSH_KEY=false
+VM_AUTHENTICATION_ARGS=()
 
 TEMP_FILES=()
 TEMP_DIRS=()
@@ -275,7 +280,7 @@ choose_local_ssh_public_key() {
   selected_index=$(select_index "Existing SSH public key" 0 "${key_labels[@]}")
   if ((selected_index == ${#key_files[@]})); then
     candidate=$(prompt_value "Existing SSH public key file path")
-    [[ -n "$candidate" ]] || fail "An existing SSH public key file is required; this script does not generate SSH keys."
+    [[ -n "$candidate" ]] || fail "An existing SSH public key file is required."
   else
     candidate=${key_files[$selected_index]}
   fi
@@ -424,6 +429,110 @@ choose_ssh_public_key() {
     local|file) choose_local_ssh_public_key ;;
     *) fail "SSH_PUBLIC_KEY_SOURCE must be azure, keyvault, or local." ;;
   esac
+}
+
+choose_generated_ssh_key() {
+  local default_private_key private_key
+
+  default_private_key=${SSH_PRIVATE_KEY_FILE:-$HOME/.ssh/${VM_NAME}_ed25519}
+  while :; do
+    private_key=$(prompt_value "New SSH private key file" "$default_private_key")
+    case "$private_key" in
+      ~/*) private_key="$HOME/${private_key#\~/}" ;;
+    esac
+    if [[ "$private_key" != /* ]]; then
+      printf 'SSH private key path must be absolute.\n' >&2
+      continue
+    fi
+    private_key=$(realpath -m -- "$private_key")
+    if [[ -e "$private_key" || -e "$private_key.pub" ]]; then
+      printf 'Refusing to overwrite an existing SSH key: %s\n' "$private_key" >&2
+      default_private_key=$private_key
+      continue
+    fi
+    SSH_PRIVATE_KEY_FILE=$private_key
+    SSH_PUBLIC_KEY_FILE="$private_key.pub"
+    SSH_PUBLIC_KEY_DESCRIPTION="new Ed25519 key pair $private_key"
+    return
+  done
+}
+
+choose_vm_authentication() {
+  local requested=${VM_AUTHENTICATION_TYPE,,} selected_index source=${SSH_PUBLIC_KEY_SOURCE,,}
+
+  if [[ "$requested" == password ]] && \
+    [[ -n "$source" || -n "$SSH_PRIVATE_KEY_FILE" || -n "$SSH_PUBLIC_KEY_FILE" || -n "$SSH_PUBLIC_KEY_RESOURCE_NAME" || \
+      -n "$SSH_PUBLIC_KEY_RESOURCE_GROUP" || -n "$SSH_KEY_VAULT_NAME" || -n "$SSH_KEY_VAULT_SECRET_NAME" ]]; then
+    fail "Password authentication cannot be combined with SSH public key settings."
+  fi
+  if [[ -z "$requested" ]]; then
+    case "$source" in
+      generate|generated|new|new-key) requested=generate ;;
+      "")
+        if [[ -n "$SSH_PUBLIC_KEY_FILE" || -n "$SSH_PUBLIC_KEY_RESOURCE_NAME" || \
+          -n "$SSH_PUBLIC_KEY_RESOURCE_GROUP" || -n "$SSH_KEY_VAULT_NAME" || \
+          -n "$SSH_KEY_VAULT_SECRET_NAME" ]]; then
+          requested=ssh
+        fi
+        ;;
+      *) requested=ssh ;;
+    esac
+  fi
+  if [[ -z "$requested" ]]; then
+    selected_index=$(select_index "VM administrator authentication" 0 \
+      "Use an existing SSH public key (recommended)" \
+      "Generate a new local Ed25519 SSH key pair" \
+      "Use password authentication (less secure)")
+    case "$selected_index" in
+      0) requested=ssh ;;
+      1) requested=generate ;;
+      2) requested=password ;;
+    esac
+  fi
+
+  case "$requested" in
+    ssh|key|existing)
+      require_command ssh-keygen
+      VM_AUTHENTICATION_TYPE=ssh
+      choose_ssh_public_key
+      VM_AUTHENTICATION_DESCRIPTION="SSH public key: $SSH_PUBLIC_KEY_DESCRIPTION"
+      ;;
+    generate|generated|new|new-key)
+      require_command ssh-keygen
+      VM_AUTHENTICATION_TYPE=ssh
+      GENERATE_SSH_KEY=true
+      choose_generated_ssh_key
+      VM_AUTHENTICATION_DESCRIPTION="SSH public key: $SSH_PUBLIC_KEY_DESCRIPTION"
+      ;;
+    password)
+      VM_AUTHENTICATION_TYPE=password
+      VM_AUTHENTICATION_DESCRIPTION="password (entered securely when Azure CLI creates the VM)"
+      ;;
+    *) fail "VM_AUTHENTICATION_TYPE must be ssh, generate, or password." ;;
+  esac
+}
+
+prepare_vm_authentication() {
+  local key_dir
+
+  if [[ "$VM_AUTHENTICATION_TYPE" == password ]]; then
+    VM_AUTHENTICATION_ARGS=(--authentication-type password)
+    return
+  fi
+  if [[ "$GENERATE_SSH_KEY" == true ]]; then
+    [[ ! -e "$SSH_PRIVATE_KEY_FILE" && ! -e "$SSH_PUBLIC_KEY_FILE" ]] || fail \
+      "Refusing to overwrite an existing SSH key: $SSH_PRIVATE_KEY_FILE"
+    key_dir=$(dirname -- "$SSH_PRIVATE_KEY_FILE")
+    mkdir -p -- "$key_dir"
+    [[ "$key_dir" != "$HOME/.ssh" ]] || chmod 0700 "$key_dir"
+    printf '\nGenerating Ed25519 SSH key pair at %s.\n' "$SSH_PRIVATE_KEY_FILE" >&2
+    printf 'ssh-keygen will prompt for an optional passphrase.\n' >&2
+    ssh-keygen -t ed25519 -a 100 -f "$SSH_PRIVATE_KEY_FILE" -C "$ADMIN_USERNAME@$VM_NAME"
+    SSH_PRIVATE_KEY_FILE=$(realpath -e -- "$SSH_PRIVATE_KEY_FILE")
+    validate_ssh_public_key_file "$SSH_PRIVATE_KEY_FILE.pub"
+  fi
+  VM_AUTHENTICATION_ARGS=(--authentication-type ssh)
+  VM_AUTHENTICATION_ARGS+=(--ssh-key-values "$SSH_PUBLIC_KEY_FILE")
 }
 
 ipv4_to_int() {
@@ -776,6 +885,100 @@ detect_public_ip() {
   fi
 }
 
+run_as_root() {
+  if ((EUID == 0)); then
+    "$@"
+    return
+  fi
+  command -v sudo >/dev/null 2>&1 || fail "Administrator privileges are required. Install sudo or run the command as root."
+  sudo "$@"
+}
+
+start_local_docker_service() {
+  if command -v systemctl >/dev/null 2>&1 && run_as_root systemctl enable --now docker; then
+    return
+  fi
+  if command -v service >/dev/null 2>&1 && run_as_root service docker start; then
+    return
+  fi
+  fail "Docker is installed, but its service could not be started automatically."
+}
+
+install_local_docker() {
+  command -v apt-get >/dev/null 2>&1 || fail \
+    "Docker is not installed. Automatic installation is supported on Debian/Ubuntu hosts with apt-get; install Docker Engine and rerun this script."
+
+  printf 'Docker was not found. This host can install the distribution docker.io package.\n' >&2
+  confirm "Install Docker Engine and enable its service now" || fail \
+    "Docker is required for local container deployment."
+  run_as_root apt-get update
+  run_as_root env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
+  hash -r
+  command -v docker >/dev/null 2>&1 || fail "Docker installation completed, but the docker command is still unavailable."
+  start_local_docker_service
+}
+
+continue_with_docker_group() {
+  local target_user quoted_script
+
+  [[ "${DOCKER_GROUP_RETRY:-false}" != true ]] || fail \
+    "Docker is still inaccessible after applying docker group membership. Sign out and back in, then rerun this script."
+  target_user=${SUDO_USER:-${USER:-}}
+  [[ -n "$target_user" ]] || target_user=$(id -un)
+  [[ "$target_user" != root ]] || fail "Docker is running, but root cannot access its socket. Check the Docker daemon logs."
+
+  if [[ " $(id -nG "$target_user") " != *" docker "* ]]; then
+    printf 'The docker group grants root-equivalent access to this host.\n' >&2
+    confirm "Add $target_user to the docker group" || fail \
+      "The current user cannot access Docker. Grant Docker socket access and rerun this script."
+    run_as_root usermod -aG docker "$target_user"
+  fi
+
+  command -v sg >/dev/null 2>&1 || fail \
+    "Docker access was updated. Sign out and back in, then rerun this script."
+  printf 'Restarting local deployment with the updated docker group membership...\n' >&2
+  printf -v quoted_script '%q' "$0"
+  if sg docker -c "DEPLOY_MODE=local DOCKER_GROUP_RETRY=true exec bash $quoted_script"; then
+    exit 0
+  fi
+  fail "The temporary docker group session failed. Sign out and back in, then rerun this script."
+}
+
+ensure_local_docker() {
+  local current_context docker_error service_stopped=false
+
+  if ! command -v docker >/dev/null 2>&1; then
+    install_local_docker
+  fi
+  if docker_error=$(docker info --format '{{.ServerVersion}}' 2>&1); then
+    return
+  fi
+
+  current_context=$(docker context show 2>/dev/null || printf 'default\n')
+  if [[ -z "${DOCKER_HOST:-}" && "$current_context" == default ]]; then
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl is-active --quiet docker || service_stopped=true
+    elif command -v service >/dev/null 2>&1; then
+      service docker status >/dev/null 2>&1 || service_stopped=true
+    fi
+  fi
+  if [[ "$service_stopped" == true ]]; then
+    printf 'Docker is installed, but its system service is not running.\n' >&2
+    confirm "Start and enable Docker now" || fail "A running Docker Engine is required."
+    start_local_docker_service
+    if docker_error=$(docker info --format '{{.ServerVersion}}' 2>&1); then
+      return
+    fi
+  fi
+
+  if [[ -z "${DOCKER_HOST:-}" && -S /var/run/docker.sock && "${docker_error,,}" == *"permission denied"* ]]; then
+    continue_with_docker_group
+  fi
+
+  docker_error=${docker_error//$'\n'/'; '}
+  fail "Docker is installed but not reachable${docker_error:+: $docker_error}"
+}
+
 find_checkout_launcher() {
   local script_dir checkout_root
 
@@ -883,9 +1086,8 @@ validate_local_settings() {
 deploy_local_container() {
   local networks_display
 
-  require_command docker
+  ensure_local_docker
   require_command realpath
-  docker info >/dev/null 2>&1 || fail "Local container mode requires a reachable Docker Engine."
   LOCAL_INSTALL_DIR=$(realpath -m -- "$LOCAL_INSTALL_DIR")
   [[ "$LOCAL_INSTALL_DIR" != / ]] || fail "LOCAL_INSTALL_DIR cannot be the filesystem root."
   find_checkout_launcher
@@ -960,6 +1162,8 @@ runcmd:
       chmod 0600 /var/lib/caddy-reverse-proxy/platform/admin-token
       printf '%s\n' \
         'GATEWAY_PROFILE=vm' \
+        'GATEWAY_DEPLOYMENT_MODE=azure-vm' \
+        'GATEWAY_CONTROL_LISTEN=127.0.0.1:8080' \
         "GATEWAY_ADMIN_TOKEN=\$token" \
         'GATEWAY_AUTH_REQUIRED=true' \
         'GATEWAY_DOCKER_ENABLED=false' \
@@ -971,10 +1175,7 @@ runcmd:
         --name caddy-reverse-proxy \
         --restart unless-stopped \
         --env-file /etc/caddy-reverse-proxy/gateway.env \
-        -p 80:80 \
-        -p 443:443 \
-        -p 127.0.0.1:8080:8080 \
-        --add-host host.docker.internal:host-gateway \
+        --network host \
         -v /var/lib/caddy-reverse-proxy:/data \
         --security-opt no-new-privileges:true \
         --health-cmd='wget -q -T 2 -O /dev/null http://127.0.0.1:8080/readyz || exit 1' \
@@ -1041,7 +1242,6 @@ require_command find
 require_command grep
 require_command realpath
 require_command sed
-require_command ssh-keygen
 
 if ! az account show >/dev/null 2>&1; then
   printf 'No active Azure CLI login was found. Starting device-code login...\n' >&2
@@ -1068,7 +1268,7 @@ choose_subnet
 choose_vm_size
 validate_vm_image_compatibility
 choose_disk
-choose_ssh_public_key
+choose_vm_authentication
 
 DETECTED_IP=$(detect_public_ip)
 DEFAULT_SSH_SOURCE=${SSH_SOURCE_CIDR:-}
@@ -1128,7 +1328,7 @@ printf '  OS image:      %s (%s, Hyper-V %s)\n' \
   "$UBUNTU_IMAGE" "$IMAGE_ARCHITECTURE" "$IMAGE_HYPERV_GENERATION" >&2
 printf '  VNet/subnet:   %s / %s\n' "$VNET_NAME" "$SUBNET_NAME" >&2
 printf '  OS disk:       %s GiB %s\n' "$DISK_SIZE_GB" "$DISK_SKU" >&2
-printf '  SSH public key:%s\n' " $SSH_PUBLIC_KEY_DESCRIPTION" >&2
+printf '  Authentication:%s\n' " $VM_AUTHENTICATION_DESCRIPTION" >&2
 printf '  Public ports:  TCP 80, 443; TCP 22 from %s\n' "$SSH_SOURCE_CIDR" >&2
 printf '  Container image: %s\n' "$IMAGE" >&2
 printf '  Rollback:      remove new VM/network resources; retain the resource group\n' >&2
@@ -1136,6 +1336,7 @@ printf '  DNS/routes:    not configured by this script\n' >&2
 
 confirm "Create these Azure resources" || fail "Deployment cancelled."
 
+prepare_vm_authentication
 DEPLOYMENT_STARTED=true
 if [[ "$RESOURCE_GROUP_EXISTS" == true ]]; then
   printf '\nUsing existing resource group %s.\n' "$RESOURCE_GROUP" >&2
@@ -1258,8 +1459,7 @@ az vm create \
   --image "$UBUNTU_IMAGE" \
   --size "$VM_SIZE" \
   --admin-username "$ADMIN_USERNAME" \
-  --authentication-type ssh \
-  --ssh-key-values "$SSH_PUBLIC_KEY_FILE" \
+  "${VM_AUTHENTICATION_ARGS[@]}" \
   --assign-identity \
   --os-disk-name "$OS_DISK_NAME" \
   --os-disk-size-gb "$DISK_SIZE_GB" \
@@ -1286,6 +1486,11 @@ PRINCIPAL_ID=$(az vm identity show \
 
 DEPLOYMENT_SUCCEEDED=true
 
+SSH_IDENTITY_OPTION=
+if [[ "$GENERATE_SSH_KEY" == true ]]; then
+  printf -v SSH_IDENTITY_OPTION ' -i %q' "$SSH_PRIVATE_KEY_FILE"
+fi
+
 cat <<EOF
 
 Deployment completed.
@@ -1299,10 +1504,10 @@ Managed identity:      $PRINCIPAL_ID
 Admin token:           $ADMIN_TOKEN
 
 SSH:
-  ssh $ADMIN_USERNAME@$PUBLIC_IP
+  ssh$SSH_IDENTITY_OPTION $ADMIN_USERNAME@$PUBLIC_IP
 
 Management UI tunnel:
-  ssh -L 8080:127.0.0.1:8080 $ADMIN_USERNAME@$PUBLIC_IP
+  ssh$SSH_IDENTITY_OPTION -L 8080:127.0.0.1:8080 $ADMIN_USERNAME@$PUBLIC_IP
   Open http://127.0.0.1:8080
 
 Next manual steps:

@@ -8,6 +8,7 @@ services:
       - ${GATEWAY_ENV_FILE:-../../.env}
     environment:
       GATEWAY_PROFILE: vm
+      GATEWAY_DEPLOYMENT_MODE: container-socket
       GATEWAY_DOCKER_ENABLED: "true"
       GATEWAY_DOCKER_ENDPOINT: http://docker-socket-proxy:2375
     ports:

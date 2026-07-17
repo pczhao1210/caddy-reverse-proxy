@@ -260,3 +260,100 @@ func TestReplaceRejectsDuplicateHostAndPath(t *testing.T) {
 		t.Fatal("Replace() error = nil, want duplicate host and path error")
 	}
 }
+
+func TestLoadMigratesLegacyRouteIntoRoutingResources(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	data := []byte(`{"routes":[{"id":"legacy","host":"app.example.com","pathPrefix":"/api","exposure":"protected","enabled":true,"https":true,"upstreams":[{"name":"app","url":"http://10.0.0.4:8080","healthPath":"/healthz"}]}]}`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	store := NewStore(path)
+	if err := store.Load(); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	listeners := store.Listeners()
+	pools := store.BackendPools()
+	rules := store.RoutingRules()
+	if len(listeners) != 1 || len(pools) != 1 || len(rules) != 1 {
+		t.Fatalf("resources = listeners:%d pools:%d rules:%d, want 1 each", len(listeners), len(pools), len(rules))
+	}
+	if listeners[0].Hostname != "app.example.com" || listeners[0].Protocol != "https" || listeners[0].Port != 443 {
+		t.Fatalf("listener = %#v", listeners[0])
+	}
+	if len(pools[0].Targets) != 1 || pools[0].Targets[0].Address != "10.0.0.4" {
+		t.Fatalf("backend pool = %#v", pools[0])
+	}
+	if rules[0].BackendPort != 8080 || rules[0].BackendProtocol != "http" || rules[0].HealthPath != "/healthz" {
+		t.Fatalf("routing rule = %#v", rules[0])
+	}
+	compiled := store.List()
+	if len(compiled) != 1 || compiled[0].ID != "legacy" || compiled[0].Upstreams[0].URL != "http://10.0.0.4:8080" {
+		t.Fatalf("compiled routes = %#v", compiled)
+	}
+}
+
+func TestRoutingResourcesCompilePersistAndProtectReferences(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := NewStore(path)
+	listener, err := store.AddListener(model.Listener{Name: "Public HTTPS", Hostname: "app.example.com", Port: 443, Protocol: "https"})
+	if err != nil {
+		t.Fatalf("AddListener() error = %v", err)
+	}
+	pool, err := store.AddBackendPool(model.BackendPool{Name: "Application", Targets: []model.BackendTarget{{Address: "10.0.0.4"}, {Address: "app.internal"}}})
+	if err != nil {
+		t.Fatalf("AddBackendPool() error = %v", err)
+	}
+	rule, err := store.AddRoutingRule(model.RoutingRule{
+		Name: "API", ListenerID: listener.ID, BackendPoolID: pool.ID, BackendPort: 8443,
+		BackendProtocol: "https", PathPrefix: "/api", Exposure: "public", Enabled: true,
+	})
+	if err != nil {
+		t.Fatalf("AddRoutingRule() error = %v", err)
+	}
+	compiled := store.List()
+	if len(compiled) != 1 || compiled[0].ListenerPort != 443 || compiled[0].ListenerProtocol != "https" {
+		t.Fatalf("compiled route = %#v", compiled)
+	}
+	if len(compiled[0].Upstreams) != 2 || compiled[0].Upstreams[1].URL != "https://app.internal:8443" {
+		t.Fatalf("compiled upstreams = %#v", compiled[0].Upstreams)
+	}
+	if err := store.DeleteListener(listener.ID); err == nil {
+		t.Fatal("DeleteListener() error = nil, want reference error")
+	}
+	if err := store.DeleteBackendPool(pool.ID); err == nil {
+		t.Fatal("DeleteBackendPool() error = nil, want reference error")
+	}
+
+	reloaded := NewStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load() error = %v", err)
+	}
+	if len(reloaded.Listeners()) != 1 || len(reloaded.BackendPools()) != 1 || len(reloaded.RoutingRules()) != 1 {
+		t.Fatalf("reloaded resources are incomplete")
+	}
+	if reloaded.RoutingRules()[0].ID != rule.ID || reloaded.List()[0].ID != rule.ID {
+		t.Fatalf("reloaded rule id mismatch")
+	}
+	persisted, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(persisted), `"version": 2`) || strings.Contains(string(persisted), `"routes"`) {
+		t.Fatalf("persisted v2 payload = %s", persisted)
+	}
+}
+
+func TestCompatibilityRouteMigrationFailureRollsBackResources(t *testing.T) {
+	store := NewStore("")
+	_, err := store.Add(model.RouteConfig{
+		ID: "mixed", Host: "mixed.example.com", Enabled: true, Exposure: "public",
+		Upstreams: []model.UpstreamTarget{{URL: "http://app:80"}, {URL: "https://app:443"}},
+	})
+	if err == nil {
+		t.Fatal("Add() error = nil, want mixed-scheme migration error")
+	}
+	if len(store.Listeners()) != 0 || len(store.BackendPools()) != 0 || len(store.RoutingRules()) != 0 || len(store.List()) != 0 {
+		t.Fatalf("failed migration left resources: listeners=%#v pools=%#v rules=%#v routes=%#v", store.Listeners(), store.BackendPools(), store.RoutingRules(), store.List())
+	}
+}

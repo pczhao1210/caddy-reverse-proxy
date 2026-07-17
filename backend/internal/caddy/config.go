@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -25,6 +26,12 @@ func (r *Renderer) UpdateCertificate(cert model.CertificateConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.cfg.Gateway.Certificate = cert
+}
+
+func (r *Renderer) UpdateConfig(cfg model.AppConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.cfg = cfg
 }
 
 func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
@@ -62,12 +69,28 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 		return len(strings.TrimRight(routeList[left].PathPrefix, "/")) > len(strings.TrimRight(routeList[right].PathPrefix, "/"))
 	})
 
-	listen := make([]string, 0, 2)
+	listen := make([]string, 0, 2+len(routeList))
+	listenSet := make(map[string]struct{}, 2+len(routeList))
+	appendListen := func(address string) {
+		if address == "" {
+			return
+		}
+		if _, exists := listenSet[address]; exists {
+			return
+		}
+		listenSet[address] = struct{}{}
+		listen = append(listen, address)
+	}
 	if cfg.Gateway.HTTPListen != "" {
-		listen = append(listen, cfg.Gateway.HTTPListen)
+		appendListen(cfg.Gateway.HTTPListen)
 	}
 	if cfg.Gateway.HTTPSListen != "" {
-		listen = append(listen, cfg.Gateway.HTTPSListen)
+		appendListen(cfg.Gateway.HTTPSListen)
+	}
+	for _, route := range routeList {
+		if route.ListenerPort > 0 {
+			appendListen(listenerAddress(cfg.Gateway, route.ListenerProtocol, route.ListenerPort))
+		}
 	}
 	if len(listen) == 0 {
 		return nil, fmt.Errorf("at least one gateway listener is required")
@@ -75,12 +98,25 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 
 	caddyRoutes := make([]any, 0, len(routeList))
 	skipAutoHTTPS := make([]string, 0)
+	httpsHosts := make(map[string]struct{}, len(routeList))
+	for _, route := range routeList {
+		if route.Enabled && route.HTTPS {
+			httpsHosts[strings.ToLower(route.Host)] = struct{}{}
+		}
+	}
+	skippedHosts := make(map[string]struct{}, len(routeList))
 	for _, route := range routeList {
 		if !route.Enabled {
 			continue
 		}
 		if !route.HTTPS {
-			skipAutoHTTPS = append(skipAutoHTTPS, route.Host)
+			host := strings.ToLower(route.Host)
+			_, hasHTTPS := httpsHosts[host]
+			_, alreadySkipped := skippedHosts[host]
+			if !hasHTTPS && !alreadySkipped {
+				skipAutoHTTPS = append(skipAutoHTTPS, route.Host)
+				skippedHosts[host] = struct{}{}
+			}
 		}
 		entries, err := renderRoute(route, cfg.Auth, cfg.Security, cfg.Gateway.InternalSourceRanges)
 		if err != nil {
@@ -124,6 +160,12 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 
 func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.SecurityConfig, internalSourceRanges []string) ([]map[string]any, error) {
 	match := map[string]any{"host": []string{route.Host}}
+	if route.ListenerPort > 0 {
+		match["local_port"] = []int{route.ListenerPort}
+	}
+	if route.ListenerProtocol != "" {
+		match["protocol"] = route.ListenerProtocol
+	}
 	if route.PathPrefix != "" {
 		match["path"] = routePathMatchers(route.PathPrefix)
 	}
@@ -155,7 +197,7 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.
 	}
 
 	if !route.Protected {
-		handler := reverseProxyHandler(upstreams, useTLS, nil)
+		handler := reverseProxyHandler(upstreams, useTLS, nil, route.Headers)
 		entry := map[string]any{"match": []any{match}, "handle": proxyHandlers(maxRequestBodyBytes, handler), "terminal": true}
 		return append(securityEntries, entry), nil
 	}
@@ -182,7 +224,7 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.
 	for _, header := range policies {
 		headerMatch := cloneMatch(match)
 		headerMatch["header"] = map[string]any{header.name: []string{header.value}}
-		handler := reverseProxyHandler(upstreams, useTLS, stripHeaders)
+		handler := reverseProxyHandler(upstreams, useTLS, stripHeaders, route.Headers)
 		entries = append(entries, map[string]any{"match": []any{headerMatch}, "handle": proxyHandlers(maxRequestBodyBytes, handler), "terminal": true})
 	}
 	entries = append(entries, fallback)
@@ -202,6 +244,12 @@ func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfi
 	}
 
 	baseMatch := map[string]any{"host": []string{route.Host}}
+	if route.ListenerPort > 0 {
+		baseMatch["local_port"] = []int{route.ListenerPort}
+	}
+	if route.ListenerProtocol != "" {
+		baseMatch["protocol"] = route.ListenerProtocol
+	}
 	if route.PathPrefix != "" {
 		baseMatch["path"] = routePathMatchers(route.PathPrefix)
 	}
@@ -228,7 +276,8 @@ func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfi
 	}
 	deniedPaths := appendUnique(security.DeniedPathPrefixes, route.Security.AdditionalDeniedPathPrefixes...)
 	if paths := restrictedPathMatchers(route.PathPrefix, deniedPaths); len(paths) > 0 {
-		match := map[string]any{"host": []string{route.Host}, "path": paths}
+		match := cloneMatch(baseMatch)
+		match["path"] = paths
 		entries = append(entries, securityRejection(match, 403))
 	}
 	return entries, maxRequestBodyBytes, nil
@@ -300,15 +349,39 @@ func routePathMatchers(pathPrefix string) []string {
 	return []string{prefix, prefix + "/*"}
 }
 
-func reverseProxyHandler(upstreams []any, useTLS bool, stripHeaders []string) map[string]any {
+func reverseProxyHandler(upstreams []any, useTLS bool, stripHeaders []string, setHeaders map[string]string) map[string]any {
 	handler := map[string]any{"handler": "reverse_proxy", "upstreams": upstreams}
 	if useTLS {
 		handler["transport"] = map[string]any{"protocol": "http", "tls": map[string]any{}}
 	}
+	requestHeaders := make(map[string]any, 2)
 	if len(stripHeaders) > 0 {
-		handler["headers"] = map[string]any{"request": map[string]any{"delete": stripHeaders}}
+		requestHeaders["delete"] = stripHeaders
+	}
+	set := make(map[string][]string, len(setHeaders))
+	for name, value := range setHeaders {
+		name = strings.TrimSpace(name)
+		if name == "" || headerNameIn(name, stripHeaders) {
+			continue
+		}
+		set[name] = []string{value}
+	}
+	if len(set) > 0 {
+		requestHeaders["set"] = set
+	}
+	if len(requestHeaders) > 0 {
+		handler["headers"] = map[string]any{"request": requestHeaders}
 	}
 	return handler
+}
+
+func headerNameIn(name string, names []string) bool {
+	for _, candidate := range names {
+		if strings.EqualFold(name, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func proxyHandlers(maxRequestBodyBytes int64, proxy map[string]any) []any {
@@ -487,6 +560,18 @@ func loopbackTarget(listen string) string {
 		return listen
 	}
 	return net.JoinHostPort("127.0.0.1", port)
+}
+
+func listenerAddress(cfg model.GatewayConfig, protocol string, port int) string {
+	base := cfg.HTTPListen
+	if strings.EqualFold(protocol, "https") {
+		base = cfg.HTTPSListen
+	}
+	host, _, err := net.SplitHostPort(base)
+	if err != nil {
+		return ":" + strconv.Itoa(port)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(port))
 }
 
 func adminListenFromEndpoint(endpoint string) string {

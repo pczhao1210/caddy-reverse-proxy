@@ -8,7 +8,7 @@
 
 - 单一容器镜像，同时包含 Go 控制平面与内嵌 Caddy 运行时。
 - 管理 API 与内嵌 Alpine.js UI。
-- 支持 JSON 文件持久化的显式路由 CRUD。
+- 支持 Listener、Backend Pool 和 Routing Rule CRUD，使用版本化 JSON 持久化并自动迁移旧路由。
 - Caddy JSON 配置渲染与 Admin API 重载。
 - `vm` 配置档下通过 Docker socket 进行容器发现。
 - 支持 `caddy.enable`、`caddy.host`、`caddy.port`、`caddy.websocket` 和 `exposure.mode` 的 Docker 标签路由提示。
@@ -16,7 +16,7 @@
 - 在 Caddy 路由层支持 `public`、`internal` 与 `protected` 暴露模式。
 - 通过 `DefaultAzureCredential` 协调 Azure DNS A 记录。
 - 清理陈旧的、由网关管理的 Azure DNS A 记录。
-- 通过 `DefaultAzureCredential` 协调 VM NSG 的 80/443 入站规则。
+- 通过 `DefaultAzureCredential` 协调公网 Listener 端口的 VM NSG 规则，并保留 80/443 用于 ACME 和默认入口。
 - 当不再存在公网路由时，清理由网关管理的 VM NSG 入站规则。
 - 交互式独立 Azure VM 部署，支持 VNet/子网选择、静态公网 IP、受限 NSG、托管身份、Docker 安装和网关状态持久化。
 - 通过管理员令牌保护管理 API。
@@ -40,6 +40,18 @@
 - 当前健康检查是简单 HTTP 状态探针；后续可增加按路由配置的间隔、阈值和主动/被动策略。
 - 当前 E2E 测试是本地 Docker 脚本；当 CI runner 能暴露 80 和 8080 端口后，应提升为 CI 检查。
 - 双活实例需要具备并发控制的外部路由存储；多个写入实例不能安全共享 `routes.json`。
+
+## 路由资源模型
+
+持久化 v2 模型和“路由”UI 现已使用三类可复用资源：
+
+- 监听器（Listener）：前端主机名、端口和 HTTP/HTTPS 协议。
+- 后端池（Backend Pool）：一组命名的 IP 地址或 DNS 名称。
+- 路由规则（Routing Rule）：选择一个监听器和后端池，并设置后端协议/端口、路径、健康检查路径、暴露方式和 WebSocket 行为。
+
+Store 会把这三类资源编译为现有 Reconciler、健康检查、Azure 和 Caddy 使用的运行时路由模型。旧版 `routes` 文件会在加载成功后原子迁移为 v2；旧 Route API 暂时保留为 Docker bind 和现有客户端的兼容适配层。
+
+证书策略目前仍按全局 subject 管理，尚未成为按 Listener 绑定的独立资源。Docker 发现的服务身份也仍是运行时输入，而不是持久化的一等资源。
 
 ## 当前 UI 状态含义
 

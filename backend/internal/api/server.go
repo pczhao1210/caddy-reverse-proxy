@@ -38,31 +38,48 @@ type certificateUpdater interface {
 	UpdateCertificate(model.CertificateConfig)
 }
 
+type runtimeConfigUpdater interface {
+	UpdateConfig(model.AppConfig)
+}
+
 type CertificateStore interface {
 	Save(model.CertificateConfig) error
 }
 
+type SettingsStore interface {
+	Load() (appconfig.Settings, bool, error)
+	Save(appconfig.Settings) error
+}
+
+type AzurePermissionChecker interface {
+	Check(context.Context, model.AzureConfig) (azure.PermissionCheckResult, error)
+}
+
 type Options struct {
-	Config           model.AppConfig
-	Store            *routes.Store
-	Discoverer       Discoverer
-	Reconciler       Reconciler
-	Runtime          RuntimeStatus
-	AuditLog         AuditLog
-	CertificateStore CertificateStore
-	Logger           *slog.Logger
+	Config                 model.AppConfig
+	Store                  *routes.Store
+	Discoverer             Discoverer
+	Reconciler             Reconciler
+	Runtime                RuntimeStatus
+	AuditLog               AuditLog
+	CertificateStore       CertificateStore
+	SettingsStore          SettingsStore
+	AzurePermissionChecker AzurePermissionChecker
+	Logger                 *slog.Logger
 }
 
 type Server struct {
-	mu               sync.RWMutex
-	cfg              model.AppConfig
-	store            *routes.Store
-	discoverer       Discoverer
-	reconciler       Reconciler
-	runtime          RuntimeStatus
-	auditLog         AuditLog
-	certificateStore CertificateStore
-	logger           *slog.Logger
+	mu                     sync.RWMutex
+	cfg                    model.AppConfig
+	store                  *routes.Store
+	discoverer             Discoverer
+	reconciler             Reconciler
+	runtime                RuntimeStatus
+	auditLog               AuditLog
+	certificateStore       CertificateStore
+	settingsStore          SettingsStore
+	azurePermissionChecker AzurePermissionChecker
+	logger                 *slog.Logger
 }
 
 type AuditLog interface {
@@ -91,7 +108,7 @@ type bindContainerRequest struct {
 }
 
 func NewServer(options Options) *Server {
-	return &Server{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, reconciler: options.Reconciler, runtime: options.Runtime, auditLog: options.AuditLog, certificateStore: options.CertificateStore, logger: options.Logger}
+	return &Server{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, reconciler: options.Reconciler, runtime: options.Runtime, auditLog: options.AuditLog, certificateStore: options.CertificateStore, settingsStore: options.SettingsStore, azurePermissionChecker: options.AzurePermissionChecker, logger: options.Logger}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -102,6 +119,12 @@ func (s *Server) Handler() http.Handler {
 
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/api/status", s.handleStatus)
+	apiMux.HandleFunc("/api/listeners", s.handleListeners)
+	apiMux.HandleFunc("/api/listeners/", s.handleListenerByID)
+	apiMux.HandleFunc("/api/backend-pools", s.handleBackendPools)
+	apiMux.HandleFunc("/api/backend-pools/", s.handleBackendPoolByID)
+	apiMux.HandleFunc("/api/routing-rules", s.handleRoutingRules)
+	apiMux.HandleFunc("/api/routing-rules/", s.handleRoutingRuleByID)
 	apiMux.HandleFunc("/api/routes", s.handleRoutes)
 	apiMux.HandleFunc("/api/routes/", s.handleRouteByID)
 	apiMux.HandleFunc("/api/discovery/bind", s.handleBindContainer)
@@ -110,8 +133,14 @@ func (s *Server) Handler() http.Handler {
 	apiMux.HandleFunc("/api/certificate", s.handleCertificate)
 	apiMux.HandleFunc("/api/certificate/refresh", s.handleCertificateRefresh)
 	apiMux.HandleFunc("/api/config", s.handleConfig)
+	apiMux.HandleFunc("/api/settings", s.handleSettings)
+	apiMux.HandleFunc("/api/settings/security", s.handleSecuritySettings)
+	apiMux.HandleFunc("/api/settings/system", s.handleSystemSettings)
+	apiMux.HandleFunc("/api/settings/azure/permissions", s.handleAzurePermissions)
 	apiMux.HandleFunc("/api/audit", s.handleAudit)
-	root.Handle("/api/", auth.Middleware(s.configSnapshot().Auth, apiMux))
+	root.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth.Middleware(s.configSnapshot().Auth, apiMux).ServeHTTP(w, r)
+	}))
 
 	root.Handle("/", uiassets.Handler())
 	return root
@@ -155,15 +184,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg := s.configSnapshot()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"profile":       cfg.Profile,
-		"routes":        s.store.List(),
-		"lastReconcile": s.reconciler.Last(),
-		"azure":         azure.StatusForConfig(cfg),
-		"docker":        s.dockerStatus(),
-		"certificate":   certificateStatus(cfg),
-		"security":      cfg.Security,
-		"health":        cfg.Health,
-		"audit":         map[string]any{"enabled": cfg.Audit.Enabled, "file": cfg.Audit.File},
+		"profile":        cfg.Profile,
+		"deploymentMode": cfg.DeploymentMode,
+		"listeners":      s.store.Listeners(),
+		"backendPools":   s.store.BackendPools(),
+		"routingRules":   s.store.RoutingRules(),
+		"routes":         s.store.List(),
+		"lastReconcile":  s.reconciler.Last(),
+		"azure":          azure.StatusForConfig(cfg),
+		"docker":         s.dockerStatus(),
+		"certificate":    certificateStatus(cfg),
+		"security":       cfg.Security,
+		"health":         cfg.Health,
+		"audit":          map[string]any{"enabled": cfg.Audit.Enabled, "file": cfg.Audit.File},
 	})
 }
 

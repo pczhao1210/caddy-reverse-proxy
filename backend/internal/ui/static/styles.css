@@ -98,11 +98,13 @@ h2 { font-size: 16px; font-weight: 760; }
 .settings-layout { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
 .configuration-transfer-panel { grid-column: 1 / -1; }
 .configuration-transfer-panel .panel-header > div { display: grid; gap: 4px; }
-.configuration-transfer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.configuration-transfer-action { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; min-width: 0; padding: 16px 0; }
-.configuration-transfer-action + .configuration-transfer-action { margin-left: 16px; padding-left: 16px; border-left: 1px solid var(--line); }
-.configuration-transfer-action > div { display: grid; gap: 5px; }
-.configuration-file-input { grid-column: 1 / -1; display: grid; gap: 6px; }
+.configuration-transfer-grid { position: relative; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 32px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.configuration-transfer-grid::after { content: ""; position: absolute; top: 0; bottom: 0; left: 50%; border-left: 1px solid var(--line); }
+.configuration-transfer-action { display: flex; flex-direction: column; align-items: stretch; gap: 12px; min-width: 0; padding: 16px 0; }
+.configuration-transfer-action + .configuration-transfer-action { margin: 0; padding-left: 0; border-left: 0; }
+.configuration-transfer-action > div { display: grid; flex: 1 1 auto; align-content: start; gap: 5px; }
+.configuration-transfer-action > .primary-button, .configuration-transfer-action > .secondary-button { width: 100%; }
+.configuration-file-input { display: grid; gap: 6px; }
 .configuration-file-input input { padding: 7px 8px; }
 .configuration-file-input span { color: var(--text); font-size: 12px; overflow-wrap: anywhere; }
 .configuration-import-summary { display: grid; gap: 10px; padding: 14px 0; border-bottom: 1px solid var(--line); }
@@ -236,10 +238,9 @@ input:focus, select:focus, textarea:focus { outline: 2px solid rgba(0, 122, 120,
   .metric-grid, .metric-grid.three-columns { grid-template-columns: 1fr; }
   .details { grid-template-columns: 1fr; }
   .routing-rule-form { grid-template-columns: 1fr; }
-  .configuration-transfer-grid { grid-template-columns: 1fr; }
-  .configuration-transfer-action { grid-template-columns: 1fr; }
+  .configuration-transfer-grid { grid-template-columns: 1fr; gap: 0; }
+  .configuration-transfer-grid::after { display: none; }
   .configuration-transfer-action + .configuration-transfer-action { margin: 0; padding-left: 0; border-top: 1px solid var(--line); border-left: 0; }
-  .configuration-transfer-action .primary-button, .configuration-transfer-action .secondary-button { width: 100%; }
   .configuration-import-summary dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .logs-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .logs-toolbar .secondary-button { grid-column: 1 / -1; }

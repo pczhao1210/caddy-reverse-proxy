@@ -357,3 +357,101 @@ func TestCompatibilityRouteMigrationFailureRollsBackResources(t *testing.T) {
 		t.Fatalf("failed migration left resources: listeners=%#v pools=%#v rules=%#v routes=%#v", store.Listeners(), store.BackendPools(), store.RoutingRules(), store.List())
 	}
 }
+
+func TestReplaceResourcesValidatesBeforeAtomicPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := NewStore(path)
+	listener, err := store.AddListener(model.Listener{Name: "Current", Hostname: "current.example.com", Port: 443, Protocol: "https"})
+	if err != nil {
+		t.Fatalf("AddListener() error = %v", err)
+	}
+	pool, err := store.AddBackendPool(model.BackendPool{Name: "Current", Targets: []model.BackendTarget{{Address: "10.0.0.4"}}})
+	if err != nil {
+		t.Fatalf("AddBackendPool() error = %v", err)
+	}
+	if _, err := store.AddRoutingRule(model.RoutingRule{Name: "Current", ListenerID: listener.ID, BackendPoolID: pool.ID, BackendPort: 8080, BackendProtocol: "http", Exposure: "public", Enabled: true}); err != nil {
+		t.Fatalf("AddRoutingRule() error = %v", err)
+	}
+
+	invalid := ResourceSet{
+		Version:   ResourceSetVersion,
+		Listeners: []model.Listener{{ID: "listener-imported", Name: "Imported", Hostname: "imported.example.com", Port: 443, Protocol: "https"}},
+		RoutingRules: []model.RoutingRule{{
+			ID: "rule-imported", Name: "Imported", ListenerID: "listener-imported", BackendPoolID: "missing", BackendPort: 8080, BackendProtocol: "http", Exposure: "public", Enabled: true,
+		}},
+	}
+	if err := store.ReplaceResources(invalid); err == nil {
+		t.Fatal("ReplaceResources() error = nil, want missing backend pool error")
+	}
+	if got := store.List(); len(got) != 1 || got[0].Host != "current.example.com" {
+		t.Fatalf("failed replacement changed routes = %#v", got)
+	}
+
+	valid := ResourceSet{
+		Version:      ResourceSetVersion,
+		Listeners:    invalid.Listeners,
+		BackendPools: []model.BackendPool{{ID: "pool-imported", Name: "Imported", Targets: []model.BackendTarget{{Address: "10.0.0.8"}}}},
+		RoutingRules: []model.RoutingRule{{
+			ID: "rule-imported", Name: "Imported", ListenerID: "listener-imported", BackendPoolID: "pool-imported", BackendPort: 9090, BackendProtocol: "http", Exposure: "public", Enabled: true, LastError: "stale runtime error",
+		}},
+	}
+	if err := store.ReplaceResources(valid); err != nil {
+		t.Fatalf("ReplaceResources() error = %v", err)
+	}
+	if got := store.List(); len(got) != 1 || got[0].Host != "imported.example.com" || got[0].LastError != "" {
+		t.Fatalf("replacement routes = %#v", got)
+	}
+	reloaded := NewStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load() error = %v", err)
+	}
+	if got := reloaded.List(); len(got) != 1 || got[0].Host != "imported.example.com" {
+		t.Fatalf("persisted replacement routes = %#v", got)
+	}
+}
+
+func TestStageResourcesWaitsForExplicitPersistence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := NewStore(path)
+	listener, err := store.AddListener(model.Listener{Name: "Current", Hostname: "current.example.com", Port: 443, Protocol: "https"})
+	if err != nil {
+		t.Fatalf("AddListener() error = %v", err)
+	}
+	pool, err := store.AddBackendPool(model.BackendPool{Name: "Current", Targets: []model.BackendTarget{{Address: "10.0.0.4"}}})
+	if err != nil {
+		t.Fatalf("AddBackendPool() error = %v", err)
+	}
+	if _, err := store.AddRoutingRule(model.RoutingRule{Name: "Current", ListenerID: listener.ID, BackendPoolID: pool.ID, BackendPort: 8080, BackendProtocol: "http", Exposure: "public", Enabled: true}); err != nil {
+		t.Fatalf("AddRoutingRule() error = %v", err)
+	}
+	staged := ResourceSet{
+		Version:      ResourceSetVersion,
+		Listeners:    []model.Listener{{ID: "listener-staged", Name: "Staged", Hostname: "staged.example.com", Port: 443, Protocol: "https"}},
+		BackendPools: []model.BackendPool{{ID: "pool-staged", Name: "Staged", Targets: []model.BackendTarget{{Address: "10.0.0.8"}}}},
+		RoutingRules: []model.RoutingRule{{ID: "rule-staged", Name: "Staged", ListenerID: "listener-staged", BackendPoolID: "pool-staged", BackendPort: 9090, BackendProtocol: "http", Exposure: "public", Enabled: true}},
+	}
+	if err := store.StageResources(staged); err != nil {
+		t.Fatalf("StageResources() error = %v", err)
+	}
+	if got := store.List(); len(got) != 1 || got[0].Host != "staged.example.com" {
+		t.Fatalf("in-memory staged routes = %#v", got)
+	}
+
+	beforeApply := NewStore(path)
+	if err := beforeApply.Load(); err != nil {
+		t.Fatalf("before-apply Load() error = %v", err)
+	}
+	if got := beforeApply.List(); len(got) != 1 || got[0].Host != "current.example.com" {
+		t.Fatalf("routes persisted before Apply = %#v", got)
+	}
+	if err := store.PersistStaged(); err != nil {
+		t.Fatalf("PersistStaged() error = %v", err)
+	}
+	afterApply := NewStore(path)
+	if err := afterApply.Load(); err != nil {
+		t.Fatalf("after-apply Load() error = %v", err)
+	}
+	if got := afterApply.List(); len(got) != 1 || got[0].Host != "staged.example.com" {
+		t.Fatalf("routes persisted after Apply = %#v", got)
+	}
+}

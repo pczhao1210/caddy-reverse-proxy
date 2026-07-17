@@ -7,17 +7,33 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	gatewayazure "github.com/aidockerfarm/gateway/internal/azure"
+	"github.com/aidockerfarm/gateway/internal/certificate"
 	appconfig "github.com/aidockerfarm/gateway/internal/config"
+	"github.com/aidockerfarm/gateway/internal/logs"
 	"github.com/aidockerfarm/gateway/internal/model"
 	"github.com/aidockerfarm/gateway/internal/routes"
 )
 
 type testCertificateStore struct {
 	certificate model.CertificateConfig
+	err         error
+}
+
+type testCertificateInspector struct {
+	ratio    float64
+	snapshot certificate.Snapshot
+	err      error
+}
+
+func (i *testCertificateInspector) Inspect(ratio float64) (certificate.Snapshot, error) {
+	i.ratio = ratio
+	return i.snapshot, i.err
 }
 
 type testSettingsStore struct {
@@ -56,16 +72,28 @@ func (d *testDiscoverer) Discover(context.Context) ([]model.ContainerService, []
 }
 
 func (s *testCertificateStore) Save(certificate model.CertificateConfig) error {
+	if s.err != nil {
+		return s.err
+	}
 	s.certificate = certificate
 	return nil
 }
 
 type testCertificateReconciler struct {
-	certificate model.CertificateConfig
-	config      model.AppConfig
+	certificate        model.CertificateConfig
+	config             model.AppConfig
+	syncCalls          int
+	preservedSyncCalls int
+	routingPending     bool
 }
 
 func (r *testCertificateReconciler) Sync(context.Context) model.ReconcileResult {
+	r.syncCalls++
+	return model.ReconcileResult{CaddyLoaded: true}
+}
+
+func (r *testCertificateReconciler) SyncWithoutPendingRoutingChanges(context.Context) model.ReconcileResult {
+	r.preservedSyncCalls++
 	return model.ReconcileResult{CaddyLoaded: true}
 }
 
@@ -79,6 +107,18 @@ func (r *testCertificateReconciler) UpdateCertificate(certificate model.Certific
 
 func (r *testCertificateReconciler) UpdateConfig(config model.AppConfig) {
 	r.config = config
+}
+
+func (r *testCertificateReconciler) MarkRoutingChangesPending() {
+	r.routingPending = true
+}
+
+func (r *testCertificateReconciler) ClearRoutingChangesPending() {
+	r.routingPending = false
+}
+
+func (r *testCertificateReconciler) RoutingChangesPending() bool {
+	return r.routingPending
 }
 
 type testRuntimeStatus struct {
@@ -117,6 +157,214 @@ func TestHealthEndpointsReflectRuntimeReadiness(t *testing.T) {
 	assertStatus("/readyz", http.StatusOK)
 }
 
+func TestLogsEndpointReturnsNewestRuntimeEntries(t *testing.T) {
+	store := logs.NewStore(10)
+	store.Add(logs.Entry{Source: "gateway/reconcile", Level: "warn", Message: "first"})
+	store.Add(logs.Entry{Source: "caddy/tls", Level: "error", Message: "second"})
+	handler := NewServer(Options{RuntimeLogs: store}).Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/logs?limit=1", nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/logs status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"source":"caddy/tls"`) || strings.Contains(response.Body.String(), `"message":"first"`) {
+		t.Fatalf("GET /api/logs body = %s", response.Body.String())
+	}
+}
+
+func TestConfigurationBundleExportUsesDatedFilenameAndExcludesSecrets(t *testing.T) {
+	config := settingsTestConfig()
+	config.Gateway.Certificate = model.CertificateConfig{
+		Issuer:   "letsencrypt",
+		Subjects: []string{"export.example.com"},
+		DNSChallenge: model.DNSChallengeConfig{Azure: model.AzureDNSChallengeConfig{
+			ClientSecret: "certificate-secret",
+		}},
+	}
+	settings := appconfig.SettingsFromConfig(config)
+	settings.Auth.AdditionalHeaderName = "X-Proxy-Token"
+	settings.Auth.AdditionalHeaderValue = "protected-route-secret"
+	store := routes.NewStore("")
+	if err := store.ReplaceResources(configurationTestResources("export.example.com", "10.0.0.4")); err != nil {
+		t.Fatalf("ReplaceResources() error = %v", err)
+	}
+	handler := NewServer(Options{
+		Config:        config,
+		Store:         store,
+		Reconciler:    &testCertificateReconciler{},
+		SettingsStore: &testSettingsStore{settings: settings, found: true},
+	}).Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, authenticatedRequest(http.MethodGet, "/api/settings/configuration", "", "old-token"))
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET configuration bundle status = %d, body = %s", response.Code, response.Body.String())
+	}
+	disposition := response.Header().Get("Content-Disposition")
+	if !strings.HasPrefix(disposition, `attachment; filename="caddyproxy_config_`) || !strings.HasSuffix(disposition, `.zip"`) {
+		t.Fatalf("Content-Disposition = %q", disposition)
+	}
+	bundle, err := appconfig.ParseConfigurationBundle(response.Body.Bytes())
+	if err != nil {
+		t.Fatalf("ParseConfigurationBundle() error = %v", err)
+	}
+	if len(bundle.Routes.RoutingRules) != 1 || bundle.Routes.Listeners[0].Hostname != "export.example.com" {
+		t.Fatalf("exported routes = %#v", bundle.Routes)
+	}
+	if bundle.Settings.Auth.AdminToken != "" || bundle.Settings.Auth.AdditionalHeaderValue != "" || bundle.CertificatePolicy.DNSChallenge.Azure.ClientSecret != "" {
+		t.Fatalf("exported bundle contains secrets: settings=%#v certificate=%#v", bundle.Settings.Auth, bundle.CertificatePolicy.DNSChallenge.Azure)
+	}
+}
+
+func TestConfigurationBundleImportPersistsOnlyAfterManualApply(t *testing.T) {
+	config := settingsTestConfig()
+	config.Gateway.Certificate = model.CertificateConfig{
+		Issuer: "letsencrypt",
+		DNSChallenge: model.DNSChallengeConfig{Azure: model.AzureDNSChallengeConfig{
+			ClientSecret: "target-certificate-secret",
+		}},
+	}
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := routes.NewStore(path)
+	if err := store.ReplaceResources(configurationTestResources("current.example.com", "10.0.0.4")); err != nil {
+		t.Fatalf("ReplaceResources() error = %v", err)
+	}
+	currentSettings := appconfig.SettingsFromConfig(config)
+	settingsStore := &testSettingsStore{settings: currentSettings, found: true}
+	certificateStore := &testCertificateStore{certificate: config.Gateway.Certificate}
+	reconciler := &testCertificateReconciler{}
+	handler := NewServer(Options{
+		Config:           config,
+		Store:            store,
+		Reconciler:       reconciler,
+		SettingsStore:    settingsStore,
+		CertificateStore: certificateStore,
+	}).Handler()
+
+	importedSettings := currentSettings
+	importedSettings.Security.MaxRequestBodyBytes = 3 * 1024 * 1024
+	importedCertificate := model.CertificateConfig{Issuer: "letsencrypt", Email: "imported@example.com", Subjects: []string{"imported.example.com"}}
+	data, err := appconfig.ExportConfigurationBundle(
+		configurationTestResources("imported.example.com", "10.0.0.8"),
+		importedSettings,
+		importedCertificate,
+		time.Date(2026, time.July, 17, 9, 0, 0, 0, time.UTC),
+	)
+	if err != nil {
+		t.Fatalf("ExportConfigurationBundle() error = %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/settings/configuration", bytes.NewReader(data))
+	request.Header.Set("Authorization", "Bearer old-token")
+	request.Header.Set("Content-Type", "application/zip")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"pendingApply":true`) {
+		t.Fatalf("POST configuration bundle status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if reconciler.syncCalls != 0 || !reconciler.routingPending {
+		t.Fatalf("import syncCalls = %d, pending = %t", reconciler.syncCalls, reconciler.routingPending)
+	}
+	if got := store.List(); len(got) != 1 || got[0].Host != "imported.example.com" {
+		t.Fatalf("staged routes = %#v", got)
+	}
+	beforeApply := routes.NewStore(path)
+	if err := beforeApply.Load(); err != nil {
+		t.Fatalf("before-apply Load() error = %v", err)
+	}
+	if got := beforeApply.List(); len(got) != 1 || got[0].Host != "current.example.com" {
+		t.Fatalf("routes persisted before Apply = %#v", got)
+	}
+	if settingsStore.settings.Security.MaxRequestBodyBytes == importedSettings.Security.MaxRequestBodyBytes || certificateStore.certificate.Email == importedCertificate.Email {
+		t.Fatalf("configuration stores changed before Apply")
+	}
+	statusResponse := httptest.NewRecorder()
+	handler.ServeHTTP(statusResponse, authenticatedRequest(http.MethodGet, "/api/status", "", "old-token"))
+	if !strings.Contains(statusResponse.Body.String(), `"configurationImportPending":true`) || !strings.Contains(statusResponse.Body.String(), `"imported.example.com"`) {
+		t.Fatalf("staged status = %s", statusResponse.Body.String())
+	}
+
+	applyResponse := httptest.NewRecorder()
+	handler.ServeHTTP(applyResponse, authenticatedRequest(http.MethodPost, "/api/reconcile", "", "old-token"))
+	if applyResponse.Code != http.StatusOK || strings.Contains(applyResponse.Body.String(), `"error":`) {
+		t.Fatalf("POST reconcile status = %d, body = %s", applyResponse.Code, applyResponse.Body.String())
+	}
+	if reconciler.syncCalls != 1 || reconciler.routingPending {
+		t.Fatalf("apply syncCalls = %d, pending = %t", reconciler.syncCalls, reconciler.routingPending)
+	}
+	afterApply := routes.NewStore(path)
+	if err := afterApply.Load(); err != nil {
+		t.Fatalf("after-apply Load() error = %v", err)
+	}
+	if got := afterApply.List(); len(got) != 1 || got[0].Host != "imported.example.com" {
+		t.Fatalf("routes persisted after Apply = %#v", got)
+	}
+	if settingsStore.settings.Security.MaxRequestBodyBytes != importedSettings.Security.MaxRequestBodyBytes || settingsStore.settings.Auth.AdminToken != "old-token" {
+		t.Fatalf("persisted settings = %#v", settingsStore.settings)
+	}
+	if certificateStore.certificate.Email != importedCertificate.Email || certificateStore.certificate.DNSChallenge.Azure.ClientSecret != "target-certificate-secret" {
+		t.Fatalf("persisted certificate policy = %#v", certificateStore.certificate)
+	}
+}
+
+func TestConfigurationBundleApplyPersistenceFailureKeepsDraftAndRollsBack(t *testing.T) {
+	config := settingsTestConfig()
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := routes.NewStore(path)
+	currentResources := configurationTestResources("current.example.com", "10.0.0.4")
+	if err := store.ReplaceResources(currentResources); err != nil {
+		t.Fatalf("ReplaceResources() error = %v", err)
+	}
+	if err := store.StageResources(configurationTestResources("staged.example.com", "10.0.0.8")); err != nil {
+		t.Fatalf("StageResources() error = %v", err)
+	}
+	currentSettings := appconfig.SettingsFromConfig(config)
+	importedSettings := currentSettings
+	importedSettings.Security.MaxRequestBodyBytes = 5 * 1024 * 1024
+	settingsStore := &testSettingsStore{settings: currentSettings, found: true}
+	certificateStore := &testCertificateStore{certificate: config.Gateway.Certificate, err: errors.New("certificate disk full")}
+	reconciler := &testCertificateReconciler{routingPending: true}
+	server := NewServer(Options{
+		Config:           config,
+		Store:            store,
+		Reconciler:       reconciler,
+		SettingsStore:    settingsStore,
+		CertificateStore: certificateStore,
+	})
+	server.setConfigurationImportDraft(&configurationImportDraft{
+		Settings:                  importedSettings,
+		CertificatePolicy:         model.CertificateConfig{Issuer: "letsencrypt", Email: "staged@example.com"},
+		LiveConfig:                config,
+		PreviousSettings:          currentSettings,
+		PreviousCertificatePolicy: config.Gateway.Certificate,
+	})
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, authenticatedRequest(http.MethodPost, "/api/reconcile", "", "old-token"))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "persist imported configuration") {
+		t.Fatalf("POST reconcile status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !reconciler.routingPending || !server.configurationImportPending() {
+		t.Fatalf("failed persistence cleared pending state")
+	}
+	if settingsStore.settings.Security.MaxRequestBodyBytes != currentSettings.Security.MaxRequestBodyBytes {
+		t.Fatalf("settings rollback = %#v", settingsStore.settings)
+	}
+	reloaded := routes.NewStore(path)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("reloaded Load() error = %v", err)
+	}
+	if got := reloaded.List(); len(got) != 1 || got[0].Host != "current.example.com" {
+		t.Fatalf("routes persisted after failed Apply = %#v", got)
+	}
+}
+
+func configurationTestResources(host, address string) routes.ResourceSet {
+	return routes.ResourceSet{
+		Version:      routes.ResourceSetVersion,
+		Listeners:    []model.Listener{{ID: "listener-test", Name: "Test", Hostname: host, Port: 443, Protocol: "https"}},
+		BackendPools: []model.BackendPool{{ID: "pool-test", Name: "Test", Targets: []model.BackendTarget{{Address: address}}}},
+		RoutingRules: []model.RoutingRule{{ID: "rule-test", Name: "Test", ListenerID: "listener-test", BackendPoolID: "pool-test", BackendPort: 8080, BackendProtocol: "http", Exposure: "public", Enabled: true}},
+	}
+}
+
 func TestStatusIncludesDeploymentMode(t *testing.T) {
 	handler := NewServer(Options{
 		Config:     model.AppConfig{DeploymentMode: model.ModeAzureVM},
@@ -137,7 +385,8 @@ func TestStatusIncludesDeploymentMode(t *testing.T) {
 
 func TestRoutingResourceAPILifecycle(t *testing.T) {
 	store := routes.NewStore("")
-	handler := NewServer(Options{Store: store, Reconciler: &testCertificateReconciler{}}).Handler()
+	reconciler := &testCertificateReconciler{}
+	handler := NewServer(Options{Store: store, Reconciler: reconciler}).Handler()
 	request := func(method, path, body string) *httptest.ResponseRecorder {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -156,6 +405,9 @@ func TestRoutingResourceAPILifecycle(t *testing.T) {
 	response = request(http.MethodPost, "/api/routing-rules", `{"id":"rule-api","name":"API","listenerId":"listener-public","backendPoolId":"pool-app","backendPort":8080,"backendProtocol":"http","pathPrefix":"/api","enabled":true}`)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("POST /api/routing-rules status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"pendingApply":true`) || reconciler.syncCalls != 0 || !reconciler.routingPending {
+		t.Fatalf("route create response = %s, syncCalls = %d, pending = %t", response.Body.String(), reconciler.syncCalls, reconciler.routingPending)
 	}
 	compiled := store.List()
 	if len(compiled) != 1 || compiled[0].Host != "app.example.com" || compiled[0].Upstreams[0].URL != "http://10.0.0.4:8080" {
@@ -179,12 +431,35 @@ func TestRoutingResourceAPILifecycle(t *testing.T) {
 	if response = request(http.MethodDelete, "/api/backend-pools/pool-app", ""); response.Code != http.StatusOK {
 		t.Fatalf("DELETE backend pool status = %d, body = %s", response.Code, response.Body.String())
 	}
+	if reconciler.syncCalls != 0 {
+		t.Fatalf("routing resource mutations called Sync %d times, want 0", reconciler.syncCalls)
+	}
+	if response = request(http.MethodPost, "/api/reconcile", ""); response.Code != http.StatusOK {
+		t.Fatalf("POST /api/reconcile status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if reconciler.syncCalls != 1 || reconciler.routingPending {
+		t.Fatalf("manual reconcile calls = %d, pending = %t", reconciler.syncCalls, reconciler.routingPending)
+	}
+}
+
+func TestLegacyRouteMutationStagesWithoutSync(t *testing.T) {
+	store := routes.NewStore("")
+	reconciler := &testCertificateReconciler{}
+	handler := NewServer(Options{Store: store, Reconciler: reconciler}).Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/routes", strings.NewReader(`{"host":"legacy.localhost","upstreams":[{"name":"app","url":"http://app:8080"}]}`)))
+	if response.Code != http.StatusCreated {
+		t.Fatalf("POST /api/routes status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), `"pendingApply":true`) || reconciler.syncCalls != 0 || !reconciler.routingPending {
+		t.Fatalf("legacy route response = %s, syncCalls = %d, pending = %t", response.Body.String(), reconciler.syncCalls, reconciler.routingPending)
+	}
 }
 
 func TestSecuritySettingsPersistAndUpdateRuntimeConfig(t *testing.T) {
 	config := settingsTestConfig()
 	settingsStore := &testSettingsStore{settings: appconfig.SettingsFromConfig(config), found: true}
-	reconciler := &testCertificateReconciler{}
+	reconciler := &testCertificateReconciler{routingPending: true}
 	handler := NewServer(Options{Config: config, Reconciler: reconciler, SettingsStore: settingsStore}).Handler()
 	body := `{"security":{"enabled":true,"maxRequestBodyBytes":2097152,"deniedMethods":["TRACE"],"deniedPathPrefixes":["/.git"],"allowedCidrs":[],"blockedCidrs":["203.0.113.0/24"]},"internalSourceRanges":["10.0.0.0/8"],"protectedRoutes":{"allowBearerToken":true,"allowAdminTokenHeader":false}}`
 	request := authenticatedRequest(http.MethodPut, "/api/settings/security", body, "old-token")
@@ -198,6 +473,9 @@ func TestSecuritySettingsPersistAndUpdateRuntimeConfig(t *testing.T) {
 	}
 	if reconciler.config.Security.MaxRequestBodyBytes != 2*1024*1024 || reconciler.config.Auth.ProtectedRoutes.AllowAdminTokenHeader {
 		t.Fatalf("runtime config = %#v", reconciler.config)
+	}
+	if reconciler.preservedSyncCalls != 1 || reconciler.syncCalls != 0 || !reconciler.routingPending {
+		t.Fatalf("security sync calls = preserved %d manual %d, pending = %t", reconciler.preservedSyncCalls, reconciler.syncCalls, reconciler.routingPending)
 	}
 }
 
@@ -230,14 +508,14 @@ func TestAzurePermissionCheckUsesSubmittedSettings(t *testing.T) {
 		},
 	}}
 	handler := NewServer(Options{AzurePermissionChecker: checker}).Handler()
-	body := `{"azure":{"enabled":true,"manageDNS":true,"subscriptionId":"new-subscription","resourceGroup":"default-rg","dnsZones":[{"name":"new.example.com","resourceGroup":"dns-rg"}]}}`
+	body := `{"azure":{"enabled":true,"manageDNS":true,"manageNSG":true,"subscriptionId":"new-subscription","resourceGroup":"default-rg","dnsZones":[{"name":"new.example.com","resourceGroup":"dns-rg"}],"networkSecurityGroupResourceGroup":"network-rg","networkSecurityGroupName":"edge-nsg"}}`
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/settings/azure/permissions", strings.NewReader(body)))
 
 	if response.Code != http.StatusOK {
 		t.Fatalf("POST /api/settings/azure/permissions status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if checker.config.SubscriptionID != "new-subscription" || len(checker.config.DNSZones) != 1 || checker.config.DNSZones[0].ResourceGroup != "dns-rg" {
+	if checker.config.SubscriptionID != "new-subscription" || len(checker.config.DNSZones) != 1 || checker.config.DNSZones[0].ResourceGroup != "dns-rg" || checker.config.NetworkSecurityGroupResourceGroup != "network-rg" {
 		t.Fatalf("checker config = %#v", checker.config)
 	}
 	if !strings.Contains(response.Body.String(), `"granted":true`) {
@@ -497,5 +775,72 @@ func TestCertificateUpdatePreservesAndDoesNotReturnClientSecret(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"clientSecretConfigured":true`) {
 		t.Fatalf("response did not report configured secret: %s", response.Body.String())
+	}
+}
+
+func TestCertificateResponseUsesAzureDNSDefaultsAndIncludesRuntimeStatus(t *testing.T) {
+	inspector := &testCertificateInspector{snapshot: certificate.Snapshot{
+		StorageDirectory: "/data/caddy",
+		ScannedAt:        time.Date(2026, time.July, 17, 10, 0, 0, 0, time.UTC),
+		Certificates: []certificate.Status{{
+			ID: "fingerprint", State: "valid", Subjects: []string{"*.thingsbud.com"},
+			CertificateFile: "/data/caddy/certificates/acme/wildcard_.thingsbud.com/wildcard_.thingsbud.com.crt",
+		}},
+	}}
+	config := model.AppConfig{
+		Gateway: model.GatewayConfig{Certificate: model.CertificateConfig{
+			Issuer: "letsencrypt", Subjects: []string{"*.thingsbud.com"}, RenewalWindowRatio: 0.5,
+			DNSChallenge: model.DNSChallengeConfig{Provider: "azure"},
+		}},
+		Azure: model.AzureConfig{
+			Enabled: true, ManageDNS: true, SubscriptionID: "subscription", ResourceGroup: "default-rg",
+			DNSZones: []model.AzureDNSZoneConfig{{Name: "thingsbud.com", ResourceGroup: "dns-rg"}},
+		},
+	}
+	handler := NewServer(Options{Config: config, CertificateInspector: inspector}).Handler()
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/certificate", nil))
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("GET /api/certificate status = %d, body = %s", response.Code, response.Body.String())
+	}
+	body := response.Body.String()
+	for _, expected := range []string{`"provider":"azure"`, `"subscriptionId":"subscription"`, `"resourceGroup":"dns-rg"`, `"authentication":"managedidentity"`, `"certificateFile":"/data/caddy/certificates/acme/wildcard_.thingsbud.com/wildcard_.thingsbud.com.crt"`} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("response missing %s: %s", expected, body)
+		}
+	}
+	if inspector.ratio != 0.5 {
+		t.Fatalf("inspector ratio = %v, want 0.5", inspector.ratio)
+	}
+}
+
+func TestCertificateAzureDefaultsDoNotSelectProvider(t *testing.T) {
+	cert := model.CertificateConfig{Issuer: "letsencrypt", Subjects: []string{"api.example.com"}}
+	azure := model.AzureConfig{
+		Enabled: true, ManageDNS: true, SubscriptionID: "platform-subscription",
+		DNSZones: []model.AzureDNSZoneConfig{{Name: "example.com", ResourceGroup: "dns-rg"}},
+	}
+	got := certificateWithAzureDefaults(cert, azure)
+	if got.DNSChallenge.Provider != "" || got.DNSChallenge.Azure.ResourceGroup != "" {
+		t.Fatalf("Azure defaults selected an unrequested DNS provider: %#v", got.DNSChallenge)
+	}
+}
+
+func TestCertificateAzureDefaultsDoNotOverrideDedicatedValues(t *testing.T) {
+	cert := model.CertificateConfig{
+		Issuer:   "letsencrypt",
+		Subjects: []string{"api.example.com"},
+		DNSChallenge: model.DNSChallengeConfig{Provider: "azure", Azure: model.AzureDNSChallengeConfig{
+			SubscriptionID: "certificate-subscription", ResourceGroup: "certificate-rg", Authentication: "appregistration",
+		}},
+	}
+	azure := model.AzureConfig{
+		Enabled: true, ManageDNS: true, SubscriptionID: "platform-subscription", ResourceGroup: "platform-rg",
+		DNSZones: []model.AzureDNSZoneConfig{{Name: "example.com", ResourceGroup: "dns-rg"}},
+	}
+	got := certificateWithAzureDefaults(cert, azure)
+	if got.DNSChallenge.Azure.SubscriptionID != "certificate-subscription" || got.DNSChallenge.Azure.ResourceGroup != "certificate-rg" || got.DNSChallenge.Azure.Authentication != "appregistration" {
+		t.Fatalf("certificate defaults overwrote dedicated values: %#v", got.DNSChallenge.Azure)
 	}
 }

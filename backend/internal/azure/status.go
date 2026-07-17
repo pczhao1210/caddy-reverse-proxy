@@ -39,8 +39,8 @@ func StatusForConfig(cfg model.AppConfig) Status {
 	if cfg.Azure.Enabled && cfg.Azure.ManageNSG && cfg.Azure.NetworkSecurityGroupName == "" {
 		status.MissingSettings = append(status.MissingSettings, "networkSecurityGroupName")
 	}
-	if cfg.Azure.Enabled && cfg.Azure.ManageNSG && cfg.Azure.ResourceGroup == "" {
-		status.MissingSettings = append(status.MissingSettings, "resourceGroup")
+	if cfg.Azure.Enabled && cfg.Azure.ManageNSG && nsgResourceGroup(cfg.Azure) == "" {
+		status.MissingSettings = append(status.MissingSettings, "networkSecurityGroupResourceGroup")
 	}
 	status.Configured = cfg.Azure.Enabled && len(status.MissingSettings) == 0
 	if !cfg.Azure.Enabled {

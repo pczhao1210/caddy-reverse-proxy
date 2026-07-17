@@ -35,8 +35,8 @@
           <div class="topbar-copy"><h1 x-text="viewTitle()"></h1><p x-text="viewDescription()"></p></div>
           <div class="topbar-actions">
             <span id="subtitle" class="update-meta" x-text="subtitle()"></span>
-            <button type="button" class="secondary-button" :disabled="busy()" :title="t('actions.refreshTitle')" @click="refreshAll()" x-text="t('actions.refresh')"></button>
-            <button type="button" class="primary-button" :disabled="busy()" :title="t('actions.applyTitle')" @click="reconcile()" x-text="t('actions.apply')"></button>
+            <button type="button" class="secondary-button" :disabled="busy()" :title="t('actions.refreshTitle')" @click="refreshCurrentView()" x-text="t('actions.refresh')"></button>
+            <button type="button" class="primary-button" :class="{ pending: routingChangesPending() }" :disabled="busy()" :title="t('actions.applyTitle')" @click="reconcile()" x-text="applyButtonText()"></button>
           </div>
         </header>
 
@@ -58,6 +58,10 @@
         </section>
 
         <section id="routes" class="view" x-show="activeView === 'routes'">
+          <div class="resource-prerequisite route-pending" x-show="routingChangesPending()" x-cloak>
+            <p x-text="t('routes.pendingApply')"></p>
+            <span class="pill warn" x-text="t('status.pendingApply')"></span>
+          </div>
           <nav class="resource-tabs" :aria-label="t('routes.resourceNavigation')" role="tablist">
             <button type="button" role="tab" :aria-selected="routeSection === 'listeners'" :class="{ active: routeSection === 'listeners' }" @click="setRouteSection('listeners')"><span x-text="t('routes.listeners')"></span><span class="tab-count" x-text="listeners().length"></span></button>
             <button type="button" role="tab" :aria-selected="routeSection === 'backendPools'" :class="{ active: routeSection === 'backendPools' }" @click="setRouteSection('backendPools')"><span x-text="t('routes.backendPools')"></span><span class="tab-count" x-text="backendPools().length"></span></button>
@@ -130,8 +134,10 @@
                 <label><span x-text="t('forms.pathPrefix')"></span><input x-model.trim="routingRuleForm.pathPrefix" placeholder="/api"><small class="field-note" x-text="t('forms.pathPrefixHint')"></small></label>
                 <label><span x-text="t('forms.healthPath')"></span><input x-model.trim="routingRuleForm.healthPath" placeholder="/healthz"><small class="field-note" x-text="healthPathHint()"></small></label>
                 <label><span x-text="t('forms.exposure')"></span><select x-model="routingRuleForm.exposure"><option value="public" x-text="t('exposure.public')"></option><option value="protected" x-text="t('exposure.protected')"></option><option value="internal" x-text="t('exposure.internal')"></option></select><small class="field-note" x-text="exposureHint()"></small></label>
-                <label class="check"><input type="checkbox" x-model="routingRuleForm.enabled"> <span x-text="t('forms.enabled')"></span></label>
-                <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || !canSaveRoutingRule()" x-text="editingRoutingRuleId ? t('actions.saveChanges') : t('actions.add')"></button><button class="secondary-button" x-show="editingRoutingRuleId" type="button" :disabled="busy()" @click="resetRoutingRuleForm()" x-text="t('actions.cancelEdit')"></button></div>
+                <div class="routing-rule-footer">
+                  <label class="check"><input type="checkbox" x-model="routingRuleForm.enabled"> <span x-text="t('forms.enabled')"></span></label>
+                  <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || !canSaveRoutingRule()" x-text="editingRoutingRuleId ? t('actions.saveChanges') : t('actions.add')"></button><button class="secondary-button" x-show="editingRoutingRuleId" type="button" :disabled="busy()" @click="resetRoutingRuleForm()" x-text="t('actions.cancelEdit')"></button></div>
+                </div>
               </form>
             </div>
           </div>
@@ -174,7 +180,7 @@
               <label class="check"><input type="checkbox" x-model="securityForm.allowBearerToken"> <span x-text="t('forms.allowBearerToken')"></span></label>
               <label class="check"><input type="checkbox" x-model="securityForm.allowAdminTokenHeader"> <span x-text="t('forms.allowAdminTokenHeader')"></span></label>
               <p class="form-note warn-text" x-show="!securityForm.allowBearerToken && !securityForm.allowAdminTokenHeader" x-text="t('msg.protectedPolicyRequired')"></p>
-              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || !settings?.persistenceAvailable || (!securityForm.allowBearerToken && !securityForm.allowAdminTokenHeader)" x-text="t('actions.saveSecurity')"></button></div>
+              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || !settings?.persistenceAvailable || configurationImportPending() || (!securityForm.allowBearerToken && !securityForm.allowAdminTokenHeader)" x-text="t('actions.saveSecurity')"></button></div>
               <p class="form-note warn-text" x-show="settings && !settings.persistenceAvailable" x-text="t('msg.settingsUnavailable')"></p>
             </div>
           </form>
@@ -196,9 +202,10 @@
                 <label class="check"><input type="checkbox" x-model="systemForm.azureManageDNS"> <span x-text="t('forms.azureManageDns')"></span></label>
                 <label class="check"><input type="checkbox" x-model="systemForm.azureManageNSG"> <span x-text="t('forms.azureManageNsg')"></span></label>
                 <label><span x-text="t('forms.azureSubscriptionId')"></span><input :required="systemForm.azureEnabled" x-model.trim="systemForm.azureSubscriptionId" autocomplete="off"></label>
-                <label><span x-text="t('forms.azureResourceGroup')"></span><input :required="systemForm.azureEnabled && (systemForm.azureManageDNS || systemForm.azureManageNSG)" x-model.trim="systemForm.azureResourceGroup" autocomplete="off"></label>
+                <label x-show="systemForm.azureManageDNS"><span x-text="t('forms.azureResourceGroup')"></span><input :required="systemForm.azureEnabled && systemForm.azureManageDNS" x-model.trim="systemForm.azureResourceGroup" autocomplete="off"></label>
                 <label x-show="systemForm.azureManageDNS"><span x-text="t('forms.azureDnsZones')"></span><textarea rows="3" :required="systemForm.azureEnabled && systemForm.azureManageDNS" x-model="systemForm.azureDNSZonesText" placeholder="example.com | dns-rg"></textarea><small class="field-note" x-text="t('forms.azureDnsZonesHint')"></small></label>
                 <label x-show="systemForm.azureManageDNS"><span x-text="t('forms.azurePublicIp')"></span><input inputmode="decimal" :required="systemForm.azureEnabled && systemForm.azureManageDNS" x-model.trim="systemForm.azurePublicIP" placeholder="203.0.113.10"></label>
+                <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgResourceGroup')"></span><input :required="systemForm.azureEnabled && systemForm.azureManageNSG" x-model.trim="systemForm.azureNSGResourceGroup" autocomplete="off"></label>
                 <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgName')"></span><input :required="systemForm.azureEnabled && systemForm.azureManageNSG" x-model.trim="systemForm.azureNSGName"></label>
                 <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgPriority')"></span><input type="number" min="100" max="4096" :required="systemForm.azureEnabled && systemForm.azureManageNSG" x-model.number="systemForm.azureNSGPriority"></label>
                 <label x-show="systemForm.azureManageNSG"><span x-text="t('forms.azureNsgSources')"></span><textarea rows="3" x-model="systemForm.azureNSGSourcesText" placeholder="*"></textarea><small class="field-note" x-text="t('forms.azureNsgSourcesHint')"></small></label>
@@ -225,8 +232,32 @@
                   </div>
                 </template>
               </div>
-              <div class="form-actions"><button class="secondary-button" type="button" :disabled="busy() || !systemForm.azureEnabled" @click="checkAzurePermissions()" x-text="t('actions.checkAzurePermissions')"></button><button class="primary-button" type="submit" :disabled="busy() || !settings?.persistenceAvailable" x-text="t('actions.saveSettings')"></button></div>
+              <div class="form-actions"><button class="secondary-button" type="button" :disabled="busy() || !systemForm.azureEnabled" @click="checkAzurePermissions()" x-text="t('actions.checkAzurePermissions')"></button><button class="primary-button" type="submit" :disabled="busy() || !settings?.persistenceAvailable || configurationImportPending()" x-text="t('actions.saveSettings')"></button></div>
               <p class="form-note warn-text" x-show="settings && !settings.persistenceAvailable" x-text="t('msg.settingsUnavailable')"></p>
+            </div>
+            <div class="panel form-panel configuration-transfer-panel">
+              <div class="panel-header"><div><h2 x-text="t('sections.configurationFiles')"></h2><p class="form-note" x-text="t('settings.configurationDescription')"></p></div><span class="pill warn" x-show="configurationImportPending()" x-cloak x-text="t('status.pendingApply')"></span></div>
+              <div class="configuration-transfer-grid">
+                <section class="configuration-transfer-action">
+                  <div><strong x-text="t('settings.configurationExportTitle')"></strong><p class="form-note" x-text="t('settings.configurationExportNote')"></p></div>
+                  <button class="secondary-button" type="button" :disabled="busy()" @click="exportConfiguration()" x-text="t('actions.exportConfiguration')"></button>
+                </section>
+                <section class="configuration-transfer-action">
+                  <div><strong x-text="t('settings.configurationImportTitle')"></strong><p class="form-note" x-text="t('settings.configurationImportNote')"></p></div>
+                  <label class="configuration-file-input"><input x-ref="configurationImportInput" type="file" accept=".zip,application/zip" :disabled="busy()" @change="selectConfigurationArchive($event)"><span x-show="configurationFileName" x-text="configurationFileName"></span></label>
+                  <button class="primary-button" type="button" :disabled="busy() || !configurationFileName || !settings?.persistenceAvailable" @click="importConfiguration()" x-text="t('actions.importConfiguration')"></button>
+                </section>
+              </div>
+              <section class="configuration-import-summary" x-show="configurationImportResult" x-cloak>
+                <strong x-text="t('settings.configurationValidatedTitle')"></strong>
+                <dl>
+                  <div><dt x-text="t('sections.listeners')"></dt><dd x-text="configurationImportResult?.listeners ?? 0"></dd></div>
+                  <div><dt x-text="t('sections.backendPools')"></dt><dd x-text="configurationImportResult?.backendPools ?? 0"></dd></div>
+                  <div><dt x-text="t('sections.routingRules')"></dt><dd x-text="configurationImportResult?.routingRules ?? 0"></dd></div>
+                  <div><dt x-text="t('forms.certificateSubjects')"></dt><dd x-text="configurationImportResult?.certificateSubjects ?? 0"></dd></div>
+                </dl>
+              </section>
+              <div class="resource-prerequisite configuration-import-pending" x-show="configurationImportPending()" x-cloak><p x-text="t('settings.configurationPending')"></p><span class="pill warn" x-text="t('status.pendingApply')"></span></div>
             </div>
           </form>
         </section>
@@ -234,12 +265,13 @@
         <section id="certificates" class="view" x-show="activeView === 'certificates'">
           <div class="certificate-layout">
             <form class="panel form-panel certificate-panel" @submit.prevent="saveCertificate()" @input="markCertificateDirty()" @change="markCertificateDirty()">
-              <div class="panel-header"><h2 x-text="t('sections.certificates')"></h2><span class="pill" x-text="certificateForm.runtimeOnly ? t('status.runtimeOnly') : t('status.persisted')"></span></div>
+              <div class="panel-header"><h2 x-text="t('sections.certificatePolicy')"></h2><span class="pill" x-text="certificateForm.runtimeOnly ? t('status.runtimeOnly') : t('status.persisted')"></span></div>
               <label><span x-text="t('forms.certificateIssuer')"></span><select x-model="certificateForm.issuer" @change="normalizeCertificateIssuerForm()"><option value="letsencrypt" x-text="t('certificate.letsencrypt')"></option><option value="zerossl" x-text="t('certificate.zerossl')"></option><option value="custom" x-text="t('certificate.custom')"></option></select></label>
               <label><span x-text="t('forms.certificateEmail')"></span><input type="email" x-model.trim="certificateForm.email" placeholder="ops@example.com"></label>
               <label x-show="certificateForm.issuer === 'custom'" x-cloak><span x-text="t('forms.caDirectory')"></span><input x-model.trim="certificateForm.caDirectory" placeholder="https://acme.example.com/directory"></label>
               <label class="check" x-show="certificateForm.issuer === 'letsencrypt'"><input type="checkbox" x-model="certificateForm.staging"> <span x-text="t('forms.certificateStaging')"></span></label>
               <label><span x-text="t('forms.certificateSubjects')"></span><textarea x-model="certificateForm.subjectsText" rows="3" placeholder="*.example.com&#10;example.com"></textarea></label>
+              <label><span x-text="t('forms.renewalWindowRatio')"></span><select x-model.number="certificateForm.renewalWindowRatio"><option :value="1 / 3" x-text="t('certificate.renewalDefault')"></option><option :value="0.5" x-text="t('certificate.renewalEarlier')"></option><option :value="2 / 3" x-text="t('certificate.renewalEarliest')"></option></select><span class="field-note" x-text="t('forms.renewalWindowRatioHint')"></span></label>
               <label><span x-text="t('forms.dnsProvider')"></span><select x-model="certificateForm.dnsProvider"><option value="" x-text="t('certificate.dnsNone')"></option><option value="azure" :disabled="certificateForm.issuer === 'zerossl'" x-text="t('certificate.dnsAzure')"></option></select></label>
               <template x-if="certificateForm.dnsProvider === 'azure'"><div class="nested-fields">
                 <label><span x-text="t('forms.azureSubscriptionId')"></span><input x-model.trim="certificateForm.azureSubscriptionId" autocomplete="off" required></label>
@@ -251,9 +283,79 @@
                   <label><span class="field-heading"><span x-text="t('forms.azureClientSecret')"></span><span class="pill ok" x-show="certificateForm.clientSecretConfigured" x-text="t('certificate.secretConfigured')"></span></span><input type="password" x-model="certificateForm.azureClientSecret" autocomplete="new-password" :required="!certificateForm.clientSecretConfigured"></label>
                 </div></template>
               </div></template>
-              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy()" x-text="t('actions.saveAndApply')"></button><button class="secondary-button" type="button" :disabled="busy()" @click="refreshCertificate()" x-text="t('actions.requestRefresh')"></button></div>
-              <p class="form-note" x-text="t('certificate.persistedNote')"></p>
+              <div class="form-actions"><button class="primary-button" type="submit" :disabled="busy() || configurationImportPending()" x-text="t('actions.saveAndApply')"></button></div>
+              <p class="form-note" x-text="t('certificates.policyNote')"></p>
             </form>
+
+            <aside class="panel certificate-status-panel">
+              <div class="panel-header"><h2 x-text="t('sections.issuedCertificates')"></h2><span class="pill" x-text="certificateRuntime.certificates.length"></span></div>
+              <div class="certificate-toolbar">
+                <button class="secondary-button small" type="button" :disabled="busy()" @click="refreshCertificateStatus()" x-text="t('actions.refreshCertificateStatus')"></button>
+                <button class="secondary-button small" type="button" :disabled="busy() || configurationImportPending() || Number(certificateForm.renewalWindowRatio) >= 0.5" :title="t('certificates.earlyRenewalTitle')" @click="enableEarlyRenewal()" x-text="t('actions.enableEarlyRenewal')"></button>
+                <button class="secondary-button small" type="button" :disabled="busy() || configurationImportPending()" @click="refreshCertificate()" x-text="t('actions.requestRefresh')"></button>
+              </div>
+
+              <dl class="certificate-runtime-meta" x-show="certificateRuntime.available" x-cloak>
+                <div><dt x-text="t('certificates.storage')"></dt><dd><code x-text="certificateRuntime.storageDirectory || '-'"></code></dd></div>
+                <div><dt x-text="t('certificates.scannedAt')"></dt><dd x-text="formatDate(certificateRuntime.scannedAt)"></dd></div>
+              </dl>
+              <p class="certificate-message error-text" x-show="!certificateRuntime.available" x-text="certificateRuntime.error || t('certificates.runtimeUnavailable')"></p>
+              <p class="certificate-message muted" x-show="certificateRuntime.available && certificateRuntime.certificates.length === 0" x-text="t('certificates.noCertificates')"></p>
+
+              <div class="certificate-warnings" x-show="certificateRuntime.warnings.length > 0">
+                <template x-for="warning in certificateRuntime.warnings" :key="warning"><p class="certificate-message warn-text" x-text="warning"></p></template>
+              </div>
+
+              <div class="certificate-list" x-show="certificateRuntime.certificates.length > 0">
+                <template x-for="certificate in certificateRuntime.certificates" :key="certificate.id">
+                  <details class="certificate-entry">
+                    <summary class="certificate-entry-header">
+                      <strong x-text="certificateName(certificate)"></strong>
+                      <span class="pill" :class="certificateState(certificate).className" x-text="certificateState(certificate).text"></span>
+                    </summary>
+                    <dl class="certificate-details">
+                      <div><dt x-text="t('certificates.subjects')"></dt><dd x-text="(certificate.subjects || []).join(', ') || '-'"></dd></div>
+                      <div><dt x-text="t('certificates.issuer')"></dt><dd x-text="certificate.issuer || '-'"></dd></div>
+                      <div><dt x-text="t('certificates.expires')"></dt><dd><span x-text="formatDate(certificate.notAfter)"></span><small x-text="formatCertificateRemaining(certificate.remainingSeconds)"></small></dd></div>
+                      <div><dt x-text="t('certificates.renewalStarts')"></dt><dd x-text="formatDate(certificate.renewalWindowStart)"></dd></div>
+                      <div><dt x-text="t('certificates.certificateFile')"></dt><dd><code class="certificate-path" x-text="certificate.certificateFile || '-'"></code></dd></div>
+                      <div x-show="certificate.privateKeyFile"><dt x-text="t('certificates.privateKeyFile')"></dt><dd><code class="certificate-path" x-text="certificate.privateKeyFile"></code></dd></div>
+                      <div x-show="certificate.metadataFile"><dt x-text="t('certificates.metadataFile')"></dt><dd><code class="certificate-path" x-text="certificate.metadataFile"></code></dd></div>
+                      <div><dt x-text="t('certificates.fingerprint')"></dt><dd><code class="certificate-path" x-text="shortFingerprint(certificate.fingerprintSha256)"></code></dd></div>
+                    </dl>
+                  </details>
+                </template>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="logs" class="view" x-show="activeView === 'logs'">
+          <div class="panel logs-panel">
+            <div class="panel-header"><h2 x-text="t('sections.runtimeLogs')"></h2><span class="pill" x-text="filteredLogEntries().length"></span></div>
+            <div class="logs-toolbar">
+              <label><span x-text="t('forms.logLevel')"></span><select x-model="logLevel"><option value="all" x-text="t('logs.allLevels')"></option><option value="error">ERROR</option><option value="warn">WARN</option><option value="info">INFO</option><option value="debug">DEBUG</option></select></label>
+              <label><span x-text="t('forms.logSource')"></span><select x-model="logSource"><option value="all" x-text="t('logs.allSources')"></option><template x-for="source in logSources()" :key="source"><option :value="source" x-text="source"></option></template></select></label>
+              <label><span x-text="t('forms.logSearch')"></span><input type="search" x-model.debounce.150ms="logQuery" :placeholder="t('logs.searchPlaceholder')"></label>
+              <button class="secondary-button" type="button" :disabled="busy()" @click="refreshLogs()" x-text="t('actions.refreshLogs')"></button>
+            </div>
+            <p class="certificate-message muted" x-show="logsLoaded && filteredLogEntries().length === 0" x-text="t('empty.noLogs')"></p>
+            <div class="log-list" x-show="filteredLogEntries().length > 0">
+              <template x-for="(entry, index) in filteredLogEntries()" :key="entry.time + entry.source + entry.message + index">
+                <article class="log-entry">
+                  <header class="log-entry-header">
+                    <time x-text="formatDate(entry.time)"></time>
+                    <code x-text="entry.source || '-'"></code>
+                    <span class="pill" :class="logLevelClass(entry.level)" x-text="String(entry.level || 'info').toUpperCase()"></span>
+                  </header>
+                  <p x-text="entry.message || '-'"></p>
+                  <details class="log-fields" x-show="logFields(entry.fields)">
+                    <summary x-text="t('logs.fields')"></summary>
+                    <pre x-text="logFields(entry.fields)"></pre>
+                  </details>
+                </article>
+              </template>
+            </div>
           </div>
         </section>
       </main>

@@ -57,24 +57,22 @@ func NormalizeAndValidate(cfg *model.AppConfig) error {
 }
 
 func normalizeConfig(cfg *model.AppConfig) {
-	cfg.Gateway.Certificate = NormalizeCertificateConfig(cfg.Gateway.Certificate)
-	if cfg.Gateway.Certificate.DNSChallenge.Provider == "azure" {
-		azure := &cfg.Gateway.Certificate.DNSChallenge.Azure
-		if azure.SubscriptionID == "" {
-			azure.SubscriptionID = strings.TrimSpace(cfg.Azure.SubscriptionID)
-		}
-		if azure.ResourceGroup == "" {
-			azure.ResourceGroup = strings.TrimSpace(cfg.Azure.ResourceGroup)
-		}
+	cfg.Azure.SubscriptionID = strings.TrimSpace(cfg.Azure.SubscriptionID)
+	cfg.Azure.ResourceGroup = strings.TrimSpace(cfg.Azure.ResourceGroup)
+	cfg.Azure.NetworkSecurityGroupResourceGroup = strings.TrimSpace(cfg.Azure.NetworkSecurityGroupResourceGroup)
+	if cfg.Azure.NetworkSecurityGroupResourceGroup == "" {
+		cfg.Azure.NetworkSecurityGroupResourceGroup = cfg.Azure.ResourceGroup
 	}
+	cfg.Azure.NetworkSecurityGroupName = strings.TrimSpace(cfg.Azure.NetworkSecurityGroupName)
+	cfg.Azure.NSGSourceAddressPrefixes = compactStrings(cfg.Azure.NSGSourceAddressPrefixes)
+	cfg.Azure.DNSZones = normalizeDNSZones(cfg.Azure)
+	cfg.Gateway.Certificate = ApplyAzureCertificateDefaults(cfg.Gateway.Certificate, cfg.Azure)
 	cfg.Gateway.InternalSourceRanges = compactStrings(cfg.Gateway.InternalSourceRanges)
 	cfg.Auth.AdminTokens = compactStrings(cfg.Auth.AdminTokens)
 	cfg.Security.DeniedMethods = normalizeMethods(cfg.Security.DeniedMethods)
 	cfg.Security.DeniedPathPrefixes = normalizePathPrefixes(cfg.Security.DeniedPathPrefixes)
 	cfg.Security.AllowedCIDRs = compactStrings(cfg.Security.AllowedCIDRs)
 	cfg.Security.BlockedCIDRs = compactStrings(cfg.Security.BlockedCIDRs)
-	cfg.Azure.NSGSourceAddressPrefixes = compactStrings(cfg.Azure.NSGSourceAddressPrefixes)
-	cfg.Azure.DNSZones = normalizeDNSZones(cfg.Azure)
 }
 
 func validateConfig(cfg model.AppConfig) error {
@@ -205,8 +203,53 @@ func NormalizeCertificateConfig(cert model.CertificateConfig) model.CertificateC
 	return cert
 }
 
+func ApplyAzureCertificateDefaults(cert model.CertificateConfig, azure model.AzureConfig) model.CertificateConfig {
+	cert = NormalizeCertificateConfig(cert)
+	if cert.DNSChallenge.Provider != "azure" {
+		return cert
+	}
+	if cert.DNSChallenge.Azure.SubscriptionID == "" {
+		cert.DNSChallenge.Azure.SubscriptionID = strings.TrimSpace(azure.SubscriptionID)
+	}
+	if cert.DNSChallenge.Azure.ResourceGroup == "" {
+		cert.DNSChallenge.Azure.ResourceGroup = certificateAzureDNSResourceGroup(cert.Subjects, azure)
+	}
+	return cert
+}
+
+func certificateAzureDNSResourceGroup(subjects []string, azure model.AzureConfig) string {
+	bestZoneLength := -1
+	resourceGroup := ""
+	for _, zone := range azure.DNSZones {
+		zoneName := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone.Name)), ".")
+		if zoneName == "" {
+			continue
+		}
+		for _, subject := range subjects {
+			subject = strings.TrimPrefix(strings.TrimSuffix(strings.ToLower(strings.TrimSpace(subject)), "."), "*.")
+			if (subject == zoneName || strings.HasSuffix(subject, "."+zoneName)) && len(zoneName) > bestZoneLength {
+				bestZoneLength = len(zoneName)
+				resourceGroup = strings.TrimSpace(zone.ResourceGroup)
+			}
+		}
+	}
+	if resourceGroup != "" {
+		return resourceGroup
+	}
+	if len(azure.DNSZones) == 1 {
+		return strings.TrimSpace(azure.DNSZones[0].ResourceGroup)
+	}
+	if len(azure.DNSZones) == 0 {
+		return strings.TrimSpace(azure.ResourceGroup)
+	}
+	return ""
+}
+
 func ValidateCertificateConfig(cert model.CertificateConfig) error {
 	cert = NormalizeCertificateConfig(cert)
+	if cert.RenewalWindowRatio < 0 || cert.RenewalWindowRatio >= 1 {
+		return fmt.Errorf("gateway.certificate.renewalWindowRatio must be 0 or between 0 and 1")
+	}
 	switch cert.Issuer {
 	case "default", "letsencrypt", "zerossl":
 	case "custom":
@@ -398,6 +441,13 @@ func applyEnv(cfg *model.AppConfig) error {
 	if value := os.Getenv("GATEWAY_CERTIFICATE_SUBJECTS"); value != "" {
 		cfg.Gateway.Certificate.Subjects = splitCSV(value)
 	}
+	if value := os.Getenv("GATEWAY_CERTIFICATE_RENEWAL_WINDOW_RATIO"); value != "" {
+		ratio, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+		if err != nil {
+			return fmt.Errorf("parse GATEWAY_CERTIFICATE_RENEWAL_WINDOW_RATIO: %w", err)
+		}
+		cfg.Gateway.Certificate.RenewalWindowRatio = ratio
+	}
 	if value := os.Getenv("GATEWAY_CERTIFICATE_DNS_PROVIDER"); value != "" {
 		cfg.Gateway.Certificate.DNSChallenge.Provider = value
 	}
@@ -473,6 +523,9 @@ func applyEnv(cfg *model.AppConfig) error {
 			return fmt.Errorf("parse GATEWAY_AZURE_DNS_ZONES: %w", err)
 		}
 		cfg.Azure.DNSZones = zones
+	}
+	if value := os.Getenv("GATEWAY_AZURE_NSG_RESOURCE_GROUP"); value != "" {
+		cfg.Azure.NetworkSecurityGroupResourceGroup = value
 	}
 	if value := os.Getenv("GATEWAY_AZURE_NSG_NAME"); value != "" {
 		cfg.Azure.NetworkSecurityGroupName = value

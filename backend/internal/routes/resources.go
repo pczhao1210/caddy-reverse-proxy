@@ -12,10 +12,20 @@ import (
 )
 
 type storeSnapshot struct {
+	staged       bool
 	listeners    []model.Listener
 	backendPools []model.BackendPool
 	routingRules []model.RoutingRule
 	routes       []model.RouteConfig
+}
+
+const ResourceSetVersion = 2
+
+type ResourceSet struct {
+	Version      int                 `json:"version"`
+	Listeners    []model.Listener    `json:"listeners"`
+	BackendPools []model.BackendPool `json:"backendPools"`
+	RoutingRules []model.RoutingRule `json:"routingRules"`
 }
 
 func (s *Store) Listeners() []model.Listener {
@@ -34,6 +44,67 @@ func (s *Store) RoutingRules() []model.RoutingRule {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return cloneRoutingRules(s.routingRules)
+}
+
+func (s *Store) Resources() ResourceSet {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	rules := cloneRoutingRules(s.routingRules)
+	for index := range rules {
+		rules[index].LastError = ""
+	}
+	return ResourceSet{
+		Version:      ResourceSetVersion,
+		Listeners:    append([]model.Listener(nil), s.listeners...),
+		BackendPools: cloneBackendPools(s.backendPools),
+		RoutingRules: rules,
+	}
+}
+
+func (s *Store) ReplaceResources(resources ResourceSet) error {
+	if resources.Version != ResourceSetVersion {
+		return fmt.Errorf("routes file version %d is not supported", resources.Version)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.snapshotLocked()
+	s.staged = false
+	s.listeners = append([]model.Listener(nil), resources.Listeners...)
+	s.backendPools = cloneBackendPools(resources.BackendPools)
+	s.routingRules = cloneRoutingRules(resources.RoutingRules)
+	for index := range s.routingRules {
+		s.routingRules[index].LastError = ""
+	}
+	if err := s.normalizeResourcesLocked(); err != nil {
+		s.restoreLocked(snapshot)
+		return err
+	}
+	return s.commitLocked(snapshot)
+}
+
+func (s *Store) StageResources(resources ResourceSet) error {
+	if resources.Version != ResourceSetVersion {
+		return fmt.Errorf("routes file version %d is not supported", resources.Version)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snapshot := s.snapshotLocked()
+	s.staged = true
+	s.listeners = append([]model.Listener(nil), resources.Listeners...)
+	s.backendPools = cloneBackendPools(resources.BackendPools)
+	s.routingRules = cloneRoutingRules(resources.RoutingRules)
+	for index := range s.routingRules {
+		s.routingRules[index].LastError = ""
+	}
+	if err := s.normalizeResourcesLocked(); err != nil {
+		s.restoreLocked(snapshot)
+		return err
+	}
+	if err := s.rebuildRoutesLocked(); err != nil {
+		s.restoreLocked(snapshot)
+		return err
+	}
+	return nil
 }
 
 func (s *Store) AddListener(listener model.Listener) (model.Listener, error) {
@@ -629,6 +700,9 @@ func (s *Store) commitLocked(snapshot storeSnapshot) error {
 		s.restoreLocked(snapshot)
 		return err
 	}
+	if s.staged {
+		return nil
+	}
 	if err := s.saveLocked(); err != nil {
 		s.restoreLocked(snapshot)
 		return err
@@ -638,6 +712,7 @@ func (s *Store) commitLocked(snapshot storeSnapshot) error {
 
 func (s *Store) snapshotLocked() storeSnapshot {
 	return storeSnapshot{
+		staged:       s.staged,
 		listeners:    append([]model.Listener(nil), s.listeners...),
 		backendPools: cloneBackendPools(s.backendPools),
 		routingRules: cloneRoutingRules(s.routingRules),
@@ -646,6 +721,7 @@ func (s *Store) snapshotLocked() storeSnapshot {
 }
 
 func (s *Store) restoreLocked(snapshot storeSnapshot) {
+	s.staged = snapshot.staged
 	s.listeners = snapshot.listeners
 	s.backendPools = snapshot.backendPools
 	s.routingRules = snapshot.routingRules

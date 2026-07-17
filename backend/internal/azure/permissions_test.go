@@ -111,3 +111,30 @@ func TestPermissionCheckerReadsResourcePermissionsAcrossPages(t *testing.T) {
 		t.Fatalf("DNS permission result = %#v", result.DNS.Targets)
 	}
 }
+
+func TestPermissionCheckerUsesNSGResourceGroup(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		wantPath := "/subscriptions/sub-id/resourceGroups/Personal_Tools/providers/Microsoft.Network/networkSecurityGroups/farm-gateway-nsg/providers/Microsoft.Authorization/permissions"
+		if r.URL.Path != wantPath {
+			t.Errorf("request path = %q, want %q", r.URL.Path, wantPath)
+		}
+		io.WriteString(w, `{"value":[{"actions":["Microsoft.Network/networkSecurityGroups/securityRules/*"]}]}`)
+	}))
+	defer server.Close()
+
+	checker := &PermissionChecker{credential: testTokenCredential{}, httpClient: server.Client(), endpoint: server.URL}
+	result, err := checker.Check(context.Background(), model.AzureConfig{
+		Enabled:                           true,
+		ManageNSG:                         true,
+		SubscriptionID:                    "sub-id",
+		ResourceGroup:                     "thingsbud.com",
+		NetworkSecurityGroupResourceGroup: "Personal_Tools",
+		NetworkSecurityGroupName:          "farm-gateway-nsg",
+	})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if len(result.Network.Targets) != 1 || !result.Network.Targets[0].Granted {
+		t.Fatalf("network permission result = %#v", result.Network.Targets)
+	}
+}

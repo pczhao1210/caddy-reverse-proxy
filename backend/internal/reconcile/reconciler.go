@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aidockerfarm/gateway/internal/model"
@@ -55,19 +56,21 @@ type Options struct {
 }
 
 type Reconciler struct {
-	cfg            model.AppConfig
-	store          *routes.Store
-	discoverer     Discoverer
-	azureManager   AzureManager
-	healthChecker  HealthChecker
-	auditLogger    AuditLogger
-	renderer       Renderer
-	loader         Loader
-	logger         *slog.Logger
-	syncMu         sync.Mutex
-	lastDiscovered []model.RouteConfig
-	mu             sync.RWMutex
-	last           model.ReconcileResult
+	cfg                       model.AppConfig
+	store                     *routes.Store
+	discoverer                Discoverer
+	azureManager              AzureManager
+	healthChecker             HealthChecker
+	auditLogger               AuditLogger
+	renderer                  Renderer
+	loader                    Loader
+	logger                    *slog.Logger
+	syncMu                    sync.Mutex
+	lastDiscovered            []model.RouteConfig
+	lastAppliedExplicitRoutes []model.RouteConfig
+	mu                        sync.RWMutex
+	last                      model.ReconcileResult
+	routingPending            atomic.Bool
 }
 
 func New(options Options) *Reconciler {
@@ -75,7 +78,11 @@ func New(options Options) *Reconciler {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Reconciler{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, azureManager: options.AzureManager, healthChecker: options.HealthChecker, auditLogger: options.AuditLogger, renderer: options.Renderer, loader: options.Loader, logger: logger}
+	reconciler := &Reconciler{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, azureManager: options.AzureManager, healthChecker: options.HealthChecker, auditLogger: options.AuditLogger, renderer: options.Renderer, loader: options.Loader, logger: logger}
+	if options.Store != nil {
+		reconciler.lastAppliedExplicitRoutes = options.Store.List()
+	}
+	return reconciler
 }
 
 func (r *Reconciler) Run(ctx context.Context) {
@@ -91,18 +98,43 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_ = r.Sync(ctx)
+			if !r.RoutingChangesPending() {
+				_ = r.Sync(ctx)
+			}
 		}
 	}
 }
 
+func (r *Reconciler) MarkRoutingChangesPending() {
+	r.routingPending.Store(true)
+}
+
+func (r *Reconciler) ClearRoutingChangesPending() {
+	r.routingPending.Store(false)
+}
+
+func (r *Reconciler) RoutingChangesPending() bool {
+	return r.routingPending.Load()
+}
+
 func (r *Reconciler) Sync(ctx context.Context) model.ReconcileResult {
+	return r.sync(ctx, false)
+}
+
+func (r *Reconciler) SyncWithoutPendingRoutingChanges(ctx context.Context) model.ReconcileResult {
+	return r.sync(ctx, true)
+}
+
+func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool) model.ReconcileResult {
 	r.syncMu.Lock()
 	defer r.syncMu.Unlock()
 
 	started := time.Now().UTC()
 	cfg := r.configSnapshot()
 	explicitRoutes := r.store.List()
+	if preservePendingRoutes && r.RoutingChangesPending() {
+		explicitRoutes = append([]model.RouteConfig{}, r.lastAppliedExplicitRoutes...)
+	}
 	result := model.ReconcileResult{StartedAt: started, Profile: string(cfg.Profile), ExplicitRoutes: len(explicitRoutes)}
 
 	allRoutes := append([]model.RouteConfig{}, explicitRoutes...)
@@ -127,6 +159,7 @@ func (r *Reconciler) Sync(ctx context.Context) model.ReconcileResult {
 		result.Error = err.Error()
 		return r.finish(result)
 	}
+	r.lastAppliedExplicitRoutes = append([]model.RouteConfig{}, explicitRoutes...)
 
 	result.AppliedRoutes = len(allRoutes)
 	result.CaddyLoaded = true

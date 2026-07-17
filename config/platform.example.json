@@ -20,6 +20,7 @@
       "staging": false,
       "caDirectory": "",
       "subjects": [],
+      "renewalWindowRatio": 0.3333333333333333,
       "dnsChallenge": {
         "provider": "",
         "azure": {
@@ -73,6 +74,7 @@
     "resourceGroup": "",
     "dnsZoneName": "",
     "dnsZones": [],
+    "networkSecurityGroupResourceGroup": "",
     "networkSecurityGroupName": "",
     "publicIpAddress": "",
     "nsgPriority": 120,

@@ -78,9 +78,11 @@ func TestRenderUsesListenerPortAndProtocol(t *testing.T) {
 		t.Fatalf("listen = %#v, want :8443", listens)
 	}
 	match := server["routes"].([]any)[0].(map[string]any)["match"].([]any)[0].(map[string]any)
-	ports := match["local_port"].([]any)
-	if len(ports) != 1 || ports[0].(float64) != 8443 || match["protocol"] != "https" {
+	if match["expression"] != "{http.request.local.port} == 8443" || match["protocol"] != "https" {
 		t.Fatalf("listener match = %#v", match)
+	}
+	if _, exists := match["local_port"]; exists {
+		t.Fatalf("listener match contains unsupported local_port matcher: %#v", match)
 	}
 }
 
@@ -106,6 +108,32 @@ func TestRenderHTTPListenerDoesNotDisableHTTPSForSameHost(t *testing.T) {
 	}
 }
 
+func TestRenderSkipsCertificatesCoveredByConfiguredWildcard(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+		Certificate: model.CertificateConfig{Issuer: "letsencrypt", Subjects: []string{"*.example.com"}},
+	}})
+	routes := []model.RouteConfig{
+		{ID: "covered", Host: "a.example.com", Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://a:8080"}}},
+		{ID: "nested", Host: "a.b.example.com", Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://nested:8080"}}},
+		{ID: "other", Host: "other.net", Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://other:8080"}}},
+	}
+	data, err := renderer.Render(routes)
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	automaticHTTPS := server["automatic_https"].(map[string]any)
+	skipped := automaticHTTPS["skip_certificates"].([]any)
+	if len(skipped) != 1 || skipped[0] != "a.example.com" {
+		t.Fatalf("automatic_https.skip_certificates = %#v, want only a.example.com", skipped)
+	}
+}
+
 func TestRenderSecurityEntriesUseListenerMatch(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{
 		Gateway:  model.GatewayConfig{HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy"},
@@ -128,9 +156,11 @@ func TestRenderSecurityEntriesUseListenerMatch(t *testing.T) {
 	}
 	for _, entry := range routes {
 		match := entry.(map[string]any)["match"].([]any)[0].(map[string]any)
-		ports := match["local_port"].([]any)
-		if len(ports) != 1 || ports[0].(float64) != 8443 || match["protocol"] != "https" {
+		if match["expression"] != "{http.request.local.port} == 8443" || match["protocol"] != "https" {
 			t.Fatalf("listener match = %#v", match)
+		}
+		if _, exists := match["local_port"]; exists {
+			t.Fatalf("listener match contains unsupported local_port matcher: %#v", match)
 		}
 	}
 }
@@ -226,7 +256,7 @@ func TestRenderAzureDNSWildcardCertificate(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
 		HTTPListen: ":80", HTTPSListen: ":443", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
 		Certificate: model.CertificateConfig{
-			Issuer: "letsencrypt", Subjects: []string{"*.example.com", "example.com"},
+			Issuer: "letsencrypt", Subjects: []string{"*.example.com", "example.com"}, RenewalWindowRatio: 0.5,
 			DNSChallenge: model.DNSChallengeConfig{Provider: "azure", Azure: model.AzureDNSChallengeConfig{
 				SubscriptionID: "subscription", ResourceGroup: "dns-rg", Authentication: "managedidentity",
 			}},
@@ -250,6 +280,9 @@ func TestRenderAzureDNSWildcardCertificate(t *testing.T) {
 		t.Fatalf("automation policies = %#v, want DNS policy and fallback", policies)
 	}
 	dnsPolicy := policies[0].(map[string]any)
+	if dnsPolicy["renewal_window_ratio"] != 0.5 || policies[1].(map[string]any)["renewal_window_ratio"] != 0.5 {
+		t.Fatalf("renewal window policies = %#v", policies)
+	}
 	issuer := dnsPolicy["issuers"].([]any)[0].(map[string]any)
 	provider := issuer["challenges"].(map[string]any)["dns"].(map[string]any)["provider"].(map[string]any)
 	if provider["name"] != "azure" || provider["subscription_id"] != "subscription" || provider["resource_group_name"] != "dns-rg" {

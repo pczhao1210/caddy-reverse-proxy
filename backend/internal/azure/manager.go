@@ -280,14 +280,15 @@ func (m *Manager) reconcileNSG(ctx context.Context, destinationPorts []int) (int
 	if m.nsgClient == nil {
 		return 0, 0, nil
 	}
-	if m.cfg.Azure.ResourceGroup == "" || m.cfg.Azure.NetworkSecurityGroupName == "" {
-		return 0, 0, fmt.Errorf("resourceGroup and networkSecurityGroupName are required for Azure NSG reconciliation")
+	resourceGroup := nsgResourceGroup(m.cfg.Azure)
+	if resourceGroup == "" || m.cfg.Azure.NetworkSecurityGroupName == "" {
+		return 0, 0, fmt.Errorf("networkSecurityGroupResourceGroup and networkSecurityGroupName are required for Azure NSG reconciliation")
 	}
 	if len(destinationPorts) == 0 {
 		deleted, err := m.deleteNSGRule(ctx)
 		return 0, deleted, err
 	}
-	poller, err := m.nsgClient.BeginCreateOrUpdate(ctx, m.cfg.Azure.ResourceGroup, m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, armnetwork.SecurityRule{
+	poller, err := m.nsgClient.BeginCreateOrUpdate(ctx, resourceGroup, m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, armnetwork.SecurityRule{
 		Properties: nsgRuleProperties(m.cfg.Azure, destinationPorts),
 	}, nil)
 	if err != nil {
@@ -366,7 +367,7 @@ func toPtrs(values []string) []*string {
 }
 
 func (m *Manager) deleteNSGRule(ctx context.Context) (int, error) {
-	poller, err := m.nsgClient.BeginDelete(ctx, m.cfg.Azure.ResourceGroup, m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, nil)
+	poller, err := m.nsgClient.BeginDelete(ctx, nsgResourceGroup(m.cfg.Azure), m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, nil)
 	if err != nil {
 		if isNotFound(err) {
 			return 0, nil

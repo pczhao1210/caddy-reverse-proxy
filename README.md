@@ -18,6 +18,7 @@ Current digest: `sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e0303
 - Managed Identity or App Registration authentication for Azure DNS-01.
 - Built-in request security baseline for body-size limits, denied methods and paths, and IP/CIDR access policy.
 - Console-managed security policy, login-token rotation, desired deployment mode, and Azure DNS/NSG settings.
+- Safe configuration ZIP export/import with review-before-apply staging and no certificate or secret material.
 
 ## Deployment modes
 
@@ -39,7 +40,9 @@ Start the VM profile directly from the repository:
 
 The script pulls `pczhao1210/caddy-reverse-proxy:latest` before every startup and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state. `start.sh` requires Docker to be available; use the interactive local deployment mode below when Docker is not installed yet.
 
-Open `http://127.0.0.1:8080`, sign in with that token, then configure routes, security, settings, and certificates in the Console. Security and token changes apply immediately. Deployment and Azure integration changes are staged for restart because they affect startup-time clients and topology; the launcher must still provide the selected Docker network, socket, and port mappings. To request `*.example.com`, open **Certificates**, add `*.example.com` and `example.com` as subjects, select Azure DNS, and provide the Azure authentication settings. The apex subject is separate because a wildcard does not cover `example.com` itself.
+Open `http://127.0.0.1:8080`, sign in with that token, then configure routes, security, settings, certificates, and inspect recent runtime logs in the Console. Route edits are saved as drafts; use **Apply pending changes** once the batch is ready. Security and token changes apply immediately without activating route drafts. Deployment and Azure integration changes are staged for restart because they affect startup-time clients and topology; the launcher must still provide the selected Docker network, socket, and port mappings. To request `*.example.com`, open **Certificates**, add `*.example.com` and `example.com` as subjects, select Azure DNS, and provide the Azure authentication settings. The apex subject is separate because a wildcard does not cover `example.com` itself; concrete one-label hosts use the configured wildcard instead of requesting duplicate certificates.
+
+**Settings > Configuration files** exports `caddyproxy_config_yyyymmdd.zip` and imports the same fixed-format archive. It contains routes, Console settings, and certificate issuance policy, but never issued certificates, private keys, admin tokens, Azure client secrets, logs, or Caddy runtime data. Import validates and stages an in-memory draft without changing local files or Caddy. Review it, then use **Apply pending changes** to activate and persist it; certificate issuance starts asynchronously after Caddy accepts the configuration. Imported deployment and Azure startup settings are persisted by Apply but require a process restart to construct new clients and topology.
 
 Attach the gateway to existing workload networks when container-name routing is needed:
 

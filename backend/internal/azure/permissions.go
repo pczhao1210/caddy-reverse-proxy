@@ -133,10 +133,10 @@ func (c *PermissionChecker) Check(ctx context.Context, cfg model.AzureConfig) (P
 	}
 
 	if result.Network.Configured {
-		resourceGroup := strings.TrimSpace(cfg.ResourceGroup)
+		resourceGroup := nsgResourceGroup(cfg)
 		name := strings.TrimSpace(cfg.NetworkSecurityGroupName)
 		if resourceGroup == "" || name == "" {
-			return result, fmt.Errorf("Azure resourceGroup and networkSecurityGroupName are required to check network permissions")
+			return result, fmt.Errorf("Azure networkSecurityGroupResourceGroup and networkSecurityGroupName are required to check network permissions")
 		}
 		target := permissionTarget{
 			name:            name,
@@ -149,6 +149,13 @@ func (c *PermissionChecker) Check(ctx context.Context, cfg model.AzureConfig) (P
 	}
 
 	return result, nil
+}
+
+func nsgResourceGroup(cfg model.AzureConfig) string {
+	if resourceGroup := strings.TrimSpace(cfg.NetworkSecurityGroupResourceGroup); resourceGroup != "" {
+		return resourceGroup
+	}
+	return strings.TrimSpace(cfg.ResourceGroup)
 }
 
 func (c *PermissionChecker) checkPermissionTarget(ctx context.Context, subscriptionID string, target permissionTarget) PermissionTargetResult {

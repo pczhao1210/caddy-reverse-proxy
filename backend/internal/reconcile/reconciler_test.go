@@ -207,6 +207,43 @@ func TestSyncKeepsLastSuccessfulDiscoveredRoutes(t *testing.T) {
 	}
 }
 
+func TestSyncWithoutPendingRoutingChangesUsesLastAppliedRoutes(t *testing.T) {
+	store := routes.NewStore("")
+	created, err := store.Add(model.RouteConfig{Host: "live.localhost", Enabled: true, Upstreams: []model.UpstreamTarget{{Name: "app", URL: "http://app:8080"}}})
+	if err != nil {
+		t.Fatalf("Add() error = %v", err)
+	}
+	renderer := &captureRenderer{}
+	reconciler := New(Options{
+		Config:   model.AppConfig{},
+		Store:    store,
+		Renderer: renderer,
+		Loader:   testLoader{},
+	})
+	if result := reconciler.Sync(context.Background()); result.Error != "" {
+		t.Fatalf("initial Sync() error = %q", result.Error)
+	}
+	_, err = store.Replace(model.RouteConfig{ID: created.ID, Host: "draft.localhost", Enabled: true, Upstreams: []model.UpstreamTarget{{Name: "app", URL: "http://app:8080"}}})
+	if err != nil {
+		t.Fatalf("Replace() error = %v", err)
+	}
+	reconciler.MarkRoutingChangesPending()
+
+	if result := reconciler.SyncWithoutPendingRoutingChanges(context.Background()); result.Error != "" {
+		t.Fatalf("SyncWithoutPendingRoutingChanges() error = %q", result.Error)
+	}
+	if len(renderer.routes) != 1 || renderer.routes[0].Host != "live.localhost" {
+		t.Fatalf("routes after preserved sync = %#v, want live.localhost", renderer.routes)
+	}
+
+	if result := reconciler.Sync(context.Background()); result.Error != "" {
+		t.Fatalf("manual Sync() error = %q", result.Error)
+	}
+	if len(renderer.routes) != 1 || renderer.routes[0].Host != "draft.localhost" {
+		t.Fatalf("routes after manual sync = %#v, want draft.localhost", renderer.routes)
+	}
+}
+
 func TestSyncSerializesConcurrentLoads(t *testing.T) {
 	loader := &serialLoader{entered: make(chan struct{}, 2), release: make(chan struct{})}
 	reconciler := New(Options{

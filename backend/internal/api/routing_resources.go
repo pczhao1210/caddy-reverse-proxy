@@ -24,7 +24,8 @@ func (s *Server) handleListeners(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("listener.create", map[string]any{"listenerId": created.ID, "hostname": created.Hostname, "port": created.Port, "protocol": created.Protocol})
-		writeJSON(w, http.StatusCreated, map[string]any{"listener": created})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusCreated, map[string]any{"listener": created, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -50,14 +51,16 @@ func (s *Server) handleListenerByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("listener.update", map[string]any{"listenerId": updated.ID, "hostname": updated.Hostname, "port": updated.Port, "protocol": updated.Protocol})
-		writeJSON(w, http.StatusOK, map[string]any{"listener": updated, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"listener": updated, "pendingApply": true})
 	case http.MethodDelete:
 		if err := s.store.DeleteListener(id); err != nil {
 			writeRoutingResourceError(w, err)
 			return
 		}
 		s.audit("listener.delete", map[string]any{"listenerId": id})
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -79,7 +82,8 @@ func (s *Server) handleBackendPools(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("backend-pool.create", map[string]any{"backendPoolId": created.ID, "name": created.Name, "targets": len(created.Targets)})
-		writeJSON(w, http.StatusCreated, map[string]any{"backendPool": created})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusCreated, map[string]any{"backendPool": created, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -105,14 +109,16 @@ func (s *Server) handleBackendPoolByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("backend-pool.update", map[string]any{"backendPoolId": updated.ID, "name": updated.Name, "targets": len(updated.Targets)})
-		writeJSON(w, http.StatusOK, map[string]any{"backendPool": updated, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"backendPool": updated, "pendingApply": true})
 	case http.MethodDelete:
 		if err := s.store.DeleteBackendPool(id); err != nil {
 			writeRoutingResourceError(w, err)
 			return
 		}
 		s.audit("backend-pool.delete", map[string]any{"backendPoolId": id})
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": id})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -134,7 +140,8 @@ func (s *Server) handleRoutingRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("routing-rule.create", map[string]any{"routingRuleId": created.ID, "listenerId": created.ListenerID, "backendPoolId": created.BackendPoolID})
-		writeJSON(w, http.StatusCreated, map[string]any{"routingRule": created, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusCreated, map[string]any{"routingRule": created, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -160,14 +167,16 @@ func (s *Server) handleRoutingRuleByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("routing-rule.update", map[string]any{"routingRuleId": updated.ID, "listenerId": updated.ListenerID, "backendPoolId": updated.BackendPoolID})
-		writeJSON(w, http.StatusOK, map[string]any{"routingRule": updated, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"routingRule": updated, "pendingApply": true})
 	case http.MethodDelete:
 		if err := s.store.DeleteRoutingRule(id); err != nil {
 			writeRoutingResourceError(w, err)
 			return
 		}
 		s.audit("routing-rule.delete", map[string]any{"routingRuleId": id})
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}

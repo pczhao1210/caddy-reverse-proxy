@@ -14,7 +14,9 @@ import (
 	"github.com/aidockerfarm/gateway/internal/audit"
 	"github.com/aidockerfarm/gateway/internal/auth"
 	"github.com/aidockerfarm/gateway/internal/azure"
+	"github.com/aidockerfarm/gateway/internal/certificate"
 	appconfig "github.com/aidockerfarm/gateway/internal/config"
+	"github.com/aidockerfarm/gateway/internal/logs"
 	"github.com/aidockerfarm/gateway/internal/model"
 	"github.com/aidockerfarm/gateway/internal/routes"
 	uiassets "github.com/aidockerfarm/gateway/internal/ui"
@@ -26,7 +28,14 @@ type Discoverer interface {
 
 type Reconciler interface {
 	Sync(context.Context) model.ReconcileResult
+	SyncWithoutPendingRoutingChanges(context.Context) model.ReconcileResult
 	Last() model.ReconcileResult
+}
+
+type routingChangeController interface {
+	MarkRoutingChangesPending()
+	ClearRoutingChangesPending()
+	RoutingChangesPending() bool
 }
 
 type RuntimeStatus interface {
@@ -46,6 +55,10 @@ type CertificateStore interface {
 	Save(model.CertificateConfig) error
 }
 
+type CertificateInspector interface {
+	Inspect(float64) (certificate.Snapshot, error)
+}
+
 type SettingsStore interface {
 	Load() (appconfig.Settings, bool, error)
 	Save(appconfig.Settings) error
@@ -53,6 +66,10 @@ type SettingsStore interface {
 
 type AzurePermissionChecker interface {
 	Check(context.Context, model.AzureConfig) (azure.PermissionCheckResult, error)
+}
+
+type RuntimeLogStore interface {
+	ReadLast(int) []logs.Entry
 }
 
 type Options struct {
@@ -63,22 +80,28 @@ type Options struct {
 	Runtime                RuntimeStatus
 	AuditLog               AuditLog
 	CertificateStore       CertificateStore
+	CertificateInspector   CertificateInspector
 	SettingsStore          SettingsStore
 	AzurePermissionChecker AzurePermissionChecker
+	RuntimeLogs            RuntimeLogStore
 	Logger                 *slog.Logger
 }
 
 type Server struct {
 	mu                     sync.RWMutex
+	configurationMu        sync.Mutex
 	cfg                    model.AppConfig
+	configurationDraft     *configurationImportDraft
 	store                  *routes.Store
 	discoverer             Discoverer
 	reconciler             Reconciler
 	runtime                RuntimeStatus
 	auditLog               AuditLog
 	certificateStore       CertificateStore
+	certificateInspector   CertificateInspector
 	settingsStore          SettingsStore
 	azurePermissionChecker AzurePermissionChecker
+	runtimeLogs            RuntimeLogStore
 	logger                 *slog.Logger
 }
 
@@ -108,7 +131,7 @@ type bindContainerRequest struct {
 }
 
 func NewServer(options Options) *Server {
-	return &Server{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, reconciler: options.Reconciler, runtime: options.Runtime, auditLog: options.AuditLog, certificateStore: options.CertificateStore, settingsStore: options.SettingsStore, azurePermissionChecker: options.AzurePermissionChecker, logger: options.Logger}
+	return &Server{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, reconciler: options.Reconciler, runtime: options.Runtime, auditLog: options.AuditLog, certificateStore: options.CertificateStore, certificateInspector: options.CertificateInspector, settingsStore: options.SettingsStore, azurePermissionChecker: options.AzurePermissionChecker, runtimeLogs: options.RuntimeLogs, logger: options.Logger}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -134,10 +157,12 @@ func (s *Server) Handler() http.Handler {
 	apiMux.HandleFunc("/api/certificate/refresh", s.handleCertificateRefresh)
 	apiMux.HandleFunc("/api/config", s.handleConfig)
 	apiMux.HandleFunc("/api/settings", s.handleSettings)
+	apiMux.HandleFunc("/api/settings/configuration", s.handleConfigurationBundle)
 	apiMux.HandleFunc("/api/settings/security", s.handleSecuritySettings)
 	apiMux.HandleFunc("/api/settings/system", s.handleSystemSettings)
 	apiMux.HandleFunc("/api/settings/azure/permissions", s.handleAzurePermissions)
 	apiMux.HandleFunc("/api/audit", s.handleAudit)
+	apiMux.HandleFunc("/api/logs", s.handleLogs)
 	root.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		auth.Middleware(s.configSnapshot().Auth, apiMux).ServeHTTP(w, r)
 	}))
@@ -183,20 +208,23 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := s.configSnapshot()
+	certificatePolicy := s.desiredCertificatePolicy(cfg.Gateway.Certificate)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"profile":        cfg.Profile,
-		"deploymentMode": cfg.DeploymentMode,
-		"listeners":      s.store.Listeners(),
-		"backendPools":   s.store.BackendPools(),
-		"routingRules":   s.store.RoutingRules(),
-		"routes":         s.store.List(),
-		"lastReconcile":  s.reconciler.Last(),
-		"azure":          azure.StatusForConfig(cfg),
-		"docker":         s.dockerStatus(),
-		"certificate":    certificateStatus(cfg),
-		"security":       cfg.Security,
-		"health":         cfg.Health,
-		"audit":          map[string]any{"enabled": cfg.Audit.Enabled, "file": cfg.Audit.File},
+		"profile":                    cfg.Profile,
+		"deploymentMode":             cfg.DeploymentMode,
+		"listeners":                  s.store.Listeners(),
+		"backendPools":               s.store.BackendPools(),
+		"routingRules":               s.store.RoutingRules(),
+		"routes":                     s.store.List(),
+		"routingChangesPending":      s.routingChangesPending(),
+		"configurationImportPending": s.configurationImportPending(),
+		"lastReconcile":              s.reconciler.Last(),
+		"azure":                      azure.StatusForConfig(cfg),
+		"docker":                     s.dockerStatus(),
+		"certificate":                certificateStatusWithPolicy(cfg, certificatePolicy),
+		"security":                   cfg.Security,
+		"health":                     cfg.Health,
+		"audit":                      map[string]any{"enabled": cfg.Audit.Enabled, "file": cfg.Audit.File},
 	})
 }
 
@@ -216,7 +244,8 @@ func (s *Server) handleRoutes(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("route.create", map[string]any{"routeId": created.ID, "host": created.Host, "exposure": created.Exposure})
-		writeJSON(w, http.StatusCreated, map[string]any{"route": created, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusCreated, map[string]any{"route": created, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -242,14 +271,16 @@ func (s *Server) handleRouteByID(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.audit("route.update", map[string]any{"routeId": updated.ID, "host": updated.Host, "exposure": updated.Exposure})
-		writeJSON(w, http.StatusOK, map[string]any{"route": updated, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"route": updated, "pendingApply": true})
 	case http.MethodDelete:
 		if err := s.store.Delete(id); err != nil {
 			writeError(w, http.StatusNotFound, err.Error())
 			return
 		}
 		s.audit("route.delete", map[string]any{"routeId": id})
-		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "reconcile": s.reconciler.Sync(r.Context())})
+		s.markRoutingChangesPending()
+		writeJSON(w, http.StatusOK, map[string]any{"deleted": id, "pendingApply": true})
 	default:
 		methodNotAllowed(w)
 	}
@@ -355,7 +386,8 @@ func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit("route.bind", map[string]any{"routeId": created.ID, "containerId": container.ID, "host": created.Host, "port": port, "scheme": scheme, "exposure": created.Exposure})
-	writeJSON(w, http.StatusCreated, map[string]any{"route": created, "reconcile": s.reconciler.Sync(r.Context())})
+	s.markRoutingChangesPending()
+	writeJSON(w, http.StatusCreated, map[string]any{"route": created, "pendingApply": true})
 }
 
 func (s *Server) dockerStatus() dockerStatus {
@@ -633,23 +665,58 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
-	writeJSON(w, http.StatusOK, s.reconciler.Sync(r.Context()))
+	result := s.reconciler.Sync(r.Context())
+	if result.CaddyLoaded {
+		if err := s.persistConfigurationImport(); err != nil {
+			if result.Error != "" {
+				result.Error += "; "
+			}
+			result.Error += "persist imported configuration: " + err.Error()
+		} else {
+			s.clearRoutingChangesPending()
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) markRoutingChangesPending() {
+	if controller, ok := s.reconciler.(routingChangeController); ok {
+		controller.MarkRoutingChangesPending()
+	}
+}
+
+func (s *Server) clearRoutingChangesPending() {
+	if controller, ok := s.reconciler.(routingChangeController); ok {
+		controller.ClearRoutingChangesPending()
+	}
+}
+
+func (s *Server) routingChangesPending() bool {
+	controller, ok := s.reconciler.(routingChangeController)
+	return ok && controller.RoutingChangesPending()
 }
 
 func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, certificateConfigResponse(s.configSnapshot().Gateway.Certificate))
+		cfg := s.configSnapshot()
+		certificatePolicy := s.desiredCertificatePolicy(cfg.Gateway.Certificate)
+		writeJSON(w, http.StatusOK, s.certificateResponse(certificateWithAzureDefaults(certificatePolicy, cfg.Azure)))
 	case http.MethodPut:
+		if s.rejectWhileConfigurationImportPending(w) {
+			return
+		}
 		var cert model.CertificateConfig
 		if err := json.NewDecoder(r.Body).Decode(&cert); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		current := s.configSnapshot().Gateway.Certificate
+		cfg := s.configSnapshot()
+		current := cfg.Gateway.Certificate
 		if cert.DNSChallenge.Provider == "azure" && strings.EqualFold(cert.DNSChallenge.Azure.Authentication, "appRegistration") && cert.DNSChallenge.Azure.ClientSecret == "" {
 			cert.DNSChallenge.Azure.ClientSecret = current.DNSChallenge.Azure.ClientSecret
 		}
+		cert = certificateWithAzureDefaults(cert, cfg.Azure)
 		cert = appconfig.NormalizeCertificateConfig(cert)
 		if err := appconfig.ValidateCertificateConfig(cert); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
@@ -665,7 +732,8 @@ func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
 		}
 		s.updateCertificate(cert)
 		s.audit("certificate.update", map[string]any{"issuer": cert.Issuer, "emailConfigured": cert.Email != "", "staging": cert.Staging, "customCA": cert.CADirectory != "", "subjects": len(cert.Subjects), "dnsProvider": cert.DNSChallenge.Provider})
-		writeJSON(w, http.StatusOK, map[string]any{"certificate": certificateConfigResponse(cert), "reconcile": s.reconciler.Sync(r.Context())})
+		reconcile := s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
+		writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(cert), "reconcile": reconcile})
 	default:
 		methodNotAllowed(w)
 	}
@@ -676,9 +744,13 @@ func (s *Server) handleCertificateRefresh(w http.ResponseWriter, r *http.Request
 		methodNotAllowed(w)
 		return
 	}
+	if s.rejectWhileConfigurationImportPending(w) {
+		return
+	}
 	cert := s.configSnapshot().Gateway.Certificate
 	s.audit("certificate.refresh", map[string]any{"issuer": certificateIssuerName(cert), "emailConfigured": cert.Email != "", "staging": cert.Staging})
-	writeJSON(w, http.StatusOK, map[string]any{"certificate": certificateConfigResponse(cert), "reconcile": s.reconciler.Sync(r.Context())})
+	reconcile := s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
+	writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(cert), "reconcile": reconcile})
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -717,6 +789,24 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
 }
 
+func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		methodNotAllowed(w)
+		return
+	}
+	limit := 200
+	if value := r.URL.Query().Get("limit"); value != "" {
+		if parsed, err := strconv.Atoi(value); err == nil && parsed > 0 && parsed <= 1000 {
+			limit = parsed
+		}
+	}
+	entries := []logs.Entry{}
+	if s.runtimeLogs != nil {
+		entries = s.runtimeLogs.ReadLast(limit)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
+}
+
 func (s *Server) audit(event string, fields map[string]any) {
 	if s.auditLog == nil {
 		return
@@ -742,15 +832,19 @@ func (s *Server) configSnapshot() model.AppConfig {
 }
 
 func certificateStatus(cfg model.AppConfig) map[string]any {
-	cert := cfg.Gateway.Certificate
+	return certificateStatusWithPolicy(cfg, cfg.Gateway.Certificate)
+}
+
+func certificateStatusWithPolicy(cfg model.AppConfig, cert model.CertificateConfig) map[string]any {
 	return map[string]any{
-		"issuer":          certificateIssuerName(cert),
-		"emailConfigured": cert.Email != "",
-		"staging":         cert.Staging,
-		"caDirectory":     cert.CADirectory,
-		"subjects":        cert.Subjects,
-		"dnsProvider":     cert.DNSChallenge.Provider,
-		"persisted":       cfg.Gateway.CertificateFile != "",
+		"issuer":             certificateIssuerName(cert),
+		"emailConfigured":    cert.Email != "",
+		"staging":            cert.Staging,
+		"caDirectory":        cert.CADirectory,
+		"subjects":           cert.Subjects,
+		"renewalWindowRatio": cert.RenewalWindowRatio,
+		"dnsProvider":        cert.DNSChallenge.Provider,
+		"persisted":          cfg.Gateway.CertificateFile != "",
 	}
 }
 
@@ -758,12 +852,13 @@ func certificateConfigResponse(cert model.CertificateConfig) map[string]any {
 	cert = appconfig.NormalizeCertificateConfig(cert)
 	azure := cert.DNSChallenge.Azure
 	return map[string]any{
-		"issuer":          cert.Issuer,
-		"email":           cert.Email,
-		"emailConfigured": cert.Email != "",
-		"staging":         cert.Staging,
-		"caDirectory":     cert.CADirectory,
-		"subjects":        cert.Subjects,
+		"issuer":             cert.Issuer,
+		"email":              cert.Email,
+		"emailConfigured":    cert.Email != "",
+		"staging":            cert.Staging,
+		"caDirectory":        cert.CADirectory,
+		"subjects":           cert.Subjects,
+		"renewalWindowRatio": cert.RenewalWindowRatio,
 		"dnsChallenge": map[string]any{
 			"provider": cert.DNSChallenge.Provider,
 			"azure": map[string]any{
@@ -778,6 +873,35 @@ func certificateConfigResponse(cert model.CertificateConfig) map[string]any {
 		"runtimeOnly": false,
 		"persisted":   true,
 	}
+}
+
+func (s *Server) certificateResponse(cert model.CertificateConfig) map[string]any {
+	response := certificateConfigResponse(cert)
+	runtime := map[string]any{
+		"available":    s.certificateInspector != nil,
+		"certificates": []certificate.Status{},
+	}
+	if s.certificateInspector != nil {
+		snapshot, err := s.certificateInspector.Inspect(cert.RenewalWindowRatio)
+		if err != nil {
+			runtime["available"] = false
+			runtime["error"] = err.Error()
+		} else {
+			runtime["storageDirectory"] = snapshot.StorageDirectory
+			runtime["scannedAt"] = snapshot.ScannedAt
+			runtime["certificates"] = snapshot.Certificates
+			runtime["warnings"] = snapshot.Warnings
+		}
+	}
+	response["runtime"] = runtime
+	return response
+}
+
+func certificateWithAzureDefaults(cert model.CertificateConfig, azure model.AzureConfig) model.CertificateConfig {
+	if !azure.Enabled || !azure.ManageDNS {
+		return cert
+	}
+	return appconfig.ApplyAzureCertificateDefaults(cert, azure)
 }
 
 func certificateIssuerName(cert model.CertificateConfig) string {

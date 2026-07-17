@@ -140,7 +140,7 @@ Override `IMAGE` when publishing another repository or immutable tag.
 | `GATEWAY_ADMIN_TOKEN` | `change-me` | Admin token for the management API and protected routes. Replace this before real deployment. |
 | `GATEWAY_ADMIN_TOKENS` | empty | Optional comma-separated token allowlist for multiple operators. |
 | `GATEWAY_AUTH_REQUIRED` | `true` | Enables token authentication for `/api/*`. |
-| `GATEWAY_RECONCILE_SECONDS` | `30` | Periodic reconcile interval in seconds. Route changes and manual Apply also reconcile. |
+| `GATEWAY_RECONCILE_SECONDS` | `30` | Periodic reconcile interval in seconds. Periodic runs pause while route drafts are pending; manual Apply activates the drafts. |
 | `GATEWAY_CONFIG_FILE` | `/config/platform.example.json` | JSON platform config inside the container. Environment variables override it. |
 | `GATEWAY_ROUTES_FILE` | `/data/platform/routes.json` | Writable v2 listener, backend-pool, and routing-rule store. Legacy routes and Docker binds are migrated through the compatibility adapter. |
 | `GATEWAY_STATE_DIR` | `/data/platform` | Platform state directory. |
@@ -172,6 +172,12 @@ The Console composes a route from a Listener, Backend Pool, and Routing Rule:
 - `public` permits any client that can reach the listener, subject to the global security baseline. `protected` additionally requires an enabled gateway token header. `internal` accepts only direct client IPs in `gateway.internalSourceRanges` and does not participate in managed public DNS/NSG reconciliation.
 - Caddy's HTTP reverse proxy automatically handles WebSocket Upgrade requests over HTTP or HTTPS. No routing-rule WebSocket switch is required.
 
+Listener, backend-pool, routing-rule, legacy-route, and Docker-bind mutations are persisted as drafts. They do not reload Caddy, run health probes, or reconcile Azure until **Apply pending changes** is selected in the top-right corner. Multiple edits can therefore be prepared as one batch. `/api/status` exposes `routingChangesPending`; a successful manual `POST /api/reconcile` clears it. Periodic reconciliation pauses while drafts are pending. Certificate, security-policy, and token reloads continue to use the last successfully applied route snapshot, so they cannot activate a draft as a side effect.
+
+## Runtime Logs
+
+The **Logs** page combines recent gateway/Caddy runtime entries from `GET /api/logs` with persisted configuration audit events from `GET /api/audit`. Entries can be filtered by level or source and searched by message or structured fields. Runtime entries are held in a bounded in-memory buffer and are cleared whenever the gateway process restarts; they are intended for recent diagnosis, not durable log retention. Audit persistence follows the configured audit file. The API returns structured runtime messages only and does not provide arbitrary file access.
+
 ## Console-Managed Settings
 
 The **Security** page edits the global request baseline, internal route source ranges, and protected-route token header policy. It persists and reloads Caddy immediately. The **Settings** page edits the desired deployment mode, Azure integration values, and admin login token.
@@ -179,6 +185,25 @@ The **Security** page edits the global request baseline, internal route source r
 Console-managed settings are atomically stored in `/data/platform/settings.json` with mode `0600` on POSIX filesystems. They are loaded after the JSON config and environment variables for the fields the Console owns. Protect this file because it contains the admin token in the form required for authentication. Delete it while the gateway is stopped to return those fields to file/environment control.
 
 Security policy changes are applied immediately. A new admin token takes effect immediately and invalidates the old token. Deployment-mode and Azure changes are saved for the next process start because Docker discovery, credentials, and Azure SDK clients are constructed at startup. Changing deployment mode in the Console does not change Docker network mode, mounts, host port publication, or VM infrastructure; the launcher must also satisfy the selected topology.
+
+### Configuration archive transfer
+
+**Settings > Configuration files** exports a dated `caddyproxy_config_yyyymmdd.zip`. The archive has exactly four JSON files:
+
+| File | Contents |
+|---|---|
+| `manifest.json` | Format version, export time, fixed file list, and explicit no-secrets/no-certificate-material flags. |
+| `routes.json` | Listeners, backend pools, and routing rules. |
+| `settings.json` | Console-managed deployment, Azure, security, and related settings with authentication secrets removed. |
+| `certificate-policy.json` | Issuer, subjects, renewal, and DNS challenge policy with the Azure client secret removed. |
+
+The archive never contains issued certificates, private keys, Caddy data, admin tokens, additional authentication-header values, Azure client secrets, runtime logs, or audit logs. Import preserves those secret values from the target instance instead of overwriting them with empty source values.
+
+Import accepts only the fixed file set and rejects duplicate, nested, unknown, symlink, oversized, malformed, or unknown-field entries. It validates routes and settings and renders a complete candidate Caddy configuration before staging anything. A successful import only replaces the editable in-memory draft: it does not write route, settings, or certificate files and does not reload Caddy. The status API reports `configurationImportPending`, and conflicting settings, security, and certificate mutations are blocked while that draft is pending.
+
+Review the imported routes, settings, and certificate policy, then select **Apply pending changes**. Only after Caddy accepts the candidate does the gateway atomically persist the imported files and clear the pending state. Persistence failure keeps the draft available for retry and attempts to restore the previous local files. Certificate issuance is asynchronous and begins after the accepted Caddy reload; it is not complete when Apply returns. Deployment mode and Azure settings are persisted by Apply but still require a gateway process restart because their clients and topology are initialized at startup.
+
+The authenticated API equivalents are `GET /api/settings/configuration` for export and `POST /api/settings/configuration` with an `application/zip` body for import. Uploads are limited to 8 MiB compressed and 4 MiB total uncompressed JSON, with a 1 MiB limit per entry.
 
 ## Request Security Baseline
 
@@ -220,6 +245,7 @@ A positive route body limit replaces the global value. Omitted or `0` inherits i
 | `GATEWAY_CERTIFICATE_STAGING` | `false` | Uses Let's Encrypt staging when issuer is `letsencrypt`. |
 | `GATEWAY_CERTIFICATE_CA_DIRECTORY` | empty | Custom ACME CA directory URL. Required when issuer is `custom`. |
 | `GATEWAY_CERTIFICATE_SUBJECTS` | empty | Comma-separated names to request explicitly, including `*.example.com`. |
+| `GATEWAY_CERTIFICATE_RENEWAL_WINDOW_RATIO` | `0.3333333333333333` | Fraction of certificate lifetime remaining when the renewal window starts. Must be greater than `0` and less than `1`; `0.5` starts renewal earlier than the default. |
 | `GATEWAY_CERTIFICATE_DNS_PROVIDER` | empty | DNS challenge provider. Currently `azure` is supported. |
 | `GATEWAY_CERTIFICATE_AZURE_SUBSCRIPTION_ID` | empty | Subscription containing the authoritative Azure DNS zone. |
 | `GATEWAY_CERTIFICATE_AZURE_RESOURCE_GROUP` | empty | Resource group containing the authoritative Azure DNS zone. |
@@ -228,11 +254,13 @@ A positive route body limit replaces the global value. Omitted or `0` inherits i
 | `GATEWAY_CERTIFICATE_AZURE_CLIENT_ID` | empty | Client ID required for App Registration authentication. |
 | `GATEWAY_CERTIFICATE_AZURE_CLIENT_SECRET` | empty | Client secret required for App Registration authentication. Prefer Console entry to shell history. |
 
-The Certificates page is backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE` and then reconciled immediately; the Console reports persistence and Caddy reload failures separately. Saved settings are restored after restart. Client secrets are persisted but never returned by the API.
+The Certificates page is backed by `GET/PUT /api/certificate` and `POST /api/certificate/refresh`. Changes are atomically saved to `GATEWAY_CERTIFICATE_FILE` and then reconciled immediately; the Console reports persistence and Caddy reload failures separately. Saved settings are restored after restart. Client secrets are persisted but never returned by the API. When Azure DNS reconciliation is enabled, blank certificate subscription, DNS zone resource group, and authentication fields are derived from the matching configured DNS zone. Explicit certificate values are preserved, and an NSG resource group is never used as a DNS zone resource group.
 
-Caddy automatically renews managed certificates before expiry. Renewal requires the gateway and Caddy runtime to remain operational, `/data/caddy` to stay persistent, and the configured HTTP-01, TLS-ALPN-01, or DNS-01 challenge to remain usable. The refresh endpoint only reloads the current TLS policy through reconciliation; it does not force renewal. The Console does not currently expose individual certificate expiry timestamps or renewal-attempt history.
+Caddy automatically renews managed certificates before expiry. Renewal requires the gateway and Caddy runtime to remain operational, `/data/caddy` to stay persistent, and the configured HTTP-01, TLS-ALPN-01, or DNS-01 challenge to remain usable. The Console's **Enable earlier renewal** action sets the renewal window ratio to `0.5` and reapplies the policy. The CA's ACME Renewal Information (ARI) and Caddy/CertMagic scheduling can still affect the actual renewal time. Reloading TLS only reapplies the current policy; it does not force renewal.
 
-Wildcard names require DNS-01. Add both `*.example.com` and `example.com` when the apex is needed, select Azure DNS, and use Let's Encrypt or a custom ACME issuer. Caddy's ZeroSSL issuer does not accept configurable DNS challenges. The Azure identity needs `DNS Zone Contributor` on the authoritative zone. Wildcard certificate subjects and wildcard route hosts are independent; exact route hosts are evaluated before `*.example.com` routes.
+The right side of the Certificates page scans `GATEWAY_CADDY_DATA_DIR/certificates/**/*.crt` and parses the X.509 certificates read-only. Each certificate name is collapsed by default and expands to show subjects, issuer, validity state, expiry, calculated renewal-window start, SHA-256 fingerprint, and the certificate/key/metadata file paths. It never returns private-key contents. **Refresh status** rescans storage without changing Caddy configuration. This view does not report individual ACME renewal-attempt history.
+
+Wildcard names require DNS-01. Add both `*.example.com` and `example.com` when the apex is needed, select Azure DNS, and use Let's Encrypt or a custom ACME issuer. Caddy's ZeroSSL issuer does not accept configurable DNS challenges. The Azure identity needs `DNS Zone Contributor` on the authoritative zone. When `*.example.com` is an explicit certificate subject, concrete HTTPS route hosts such as `a.example.com` are added to Caddy's `automatic_https.skip_certificates` list so they use the wildcard instead of triggering separate certificate orders. Wildcards cover exactly one label: they do not cover `example.com` or `a.b.example.com`. Wildcard certificate subjects and wildcard route hosts remain independent; exact route hosts are evaluated before `*.example.com` routes.
 
 ## Docker Discovery Labels
 
@@ -267,9 +295,10 @@ Use `make compose-up-proxy` when you want Docker discovery through a restricted 
 | `GATEWAY_AZURE_MANAGE_DNS` | `true` | Creates, updates, and cleans up gateway-managed Azure DNS A records for public/protected routes. |
 | `GATEWAY_AZURE_MANAGE_NSG` | `true` | Creates, updates, or deletes the gateway-managed VM NSG rule for public listener ports. The rule retains 80/443 for default ingress and ACME. |
 | `GATEWAY_AZURE_SUBSCRIPTION_ID` | empty | Azure subscription ID. `AZURE_SUBSCRIPTION_ID` is also accepted. |
-| `GATEWAY_AZURE_RESOURCE_GROUP` | empty | Resource group containing the DNS zone and NSG. |
+| `GATEWAY_AZURE_RESOURCE_GROUP` | empty | Default resource group for DNS zones. |
 | `GATEWAY_AZURE_DNS_ZONE` | empty | Legacy single Azure DNS zone name. |
 | `GATEWAY_AZURE_DNS_ZONES` | empty | JSON array of `{name,resourceGroup}` entries. Hostnames use the longest matching zone suffix. |
+| `GATEWAY_AZURE_NSG_RESOURCE_GROUP` | `GATEWAY_AZURE_RESOURCE_GROUP` | Resource group containing the Network Security Group. |
 | `GATEWAY_AZURE_NSG_NAME` | empty | Network Security Group name for VM public-listener inbound rule reconciliation. |
 | `GATEWAY_AZURE_NSG_PRIORITY` | `120` | Priority for the managed VM NSG allow rule. |
 | `GATEWAY_AZURE_NSG_SOURCE_PREFIXES` | `*` | Comma-separated source CIDR prefixes for the managed VM NSG allow rule. |

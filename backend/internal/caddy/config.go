@@ -98,6 +98,7 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 
 	caddyRoutes := make([]any, 0, len(routeList))
 	skipAutoHTTPS := make([]string, 0)
+	skipAutoCertificates := make([]string, 0)
 	httpsHosts := make(map[string]struct{}, len(routeList))
 	for _, route := range routeList {
 		if route.Enabled && route.HTTPS {
@@ -105,6 +106,7 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 		}
 	}
 	skippedHosts := make(map[string]struct{}, len(routeList))
+	skippedCertificateHosts := make(map[string]struct{}, len(routeList))
 	for _, route := range routeList {
 		if !route.Enabled {
 			continue
@@ -116,6 +118,12 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 			if !hasHTTPS && !alreadySkipped {
 				skipAutoHTTPS = append(skipAutoHTTPS, route.Host)
 				skippedHosts[host] = struct{}{}
+			}
+		} else if wildcardCertificateCoversHost(cfg.Gateway.Certificate.Subjects, route.Host) {
+			host := strings.ToLower(route.Host)
+			if _, alreadySkipped := skippedCertificateHosts[host]; !alreadySkipped {
+				skipAutoCertificates = append(skipAutoCertificates, route.Host)
+				skippedCertificateHosts[host] = struct{}{}
 			}
 		}
 		entries, err := renderRoute(route, cfg.Auth, cfg.Security, cfg.Gateway.InternalSourceRanges)
@@ -131,8 +139,15 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 		"listen": listen,
 		"routes": caddyRoutes,
 	}
-	if len(skipAutoHTTPS) > 0 {
-		server["automatic_https"] = map[string]any{"skip": skipAutoHTTPS}
+	if len(skipAutoHTTPS) > 0 || len(skipAutoCertificates) > 0 {
+		automaticHTTPS := map[string]any{}
+		if len(skipAutoHTTPS) > 0 {
+			automaticHTTPS["skip"] = skipAutoHTTPS
+		}
+		if len(skipAutoCertificates) > 0 {
+			automaticHTTPS["skip_certificates"] = skipAutoCertificates
+		}
+		server["automatic_https"] = automaticHTTPS
 	}
 
 	config := map[string]any{
@@ -158,17 +173,27 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 	return json.MarshalIndent(config, "", "  ")
 }
 
+func wildcardCertificateCoversHost(subjects []string, host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	if host == "" || strings.HasPrefix(host, "*.") {
+		return false
+	}
+	for _, subject := range subjects {
+		subject = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(subject)), ".")
+		if !strings.HasPrefix(subject, "*.") {
+			continue
+		}
+		suffix := strings.TrimPrefix(subject, "*.")
+		prefix := strings.TrimSuffix(host, "."+suffix)
+		if prefix != host && prefix != "" && !strings.Contains(prefix, ".") {
+			return true
+		}
+	}
+	return false
+}
+
 func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.SecurityConfig, internalSourceRanges []string) ([]map[string]any, error) {
-	match := map[string]any{"host": []string{route.Host}}
-	if route.ListenerPort > 0 {
-		match["local_port"] = []int{route.ListenerPort}
-	}
-	if route.ListenerProtocol != "" {
-		match["protocol"] = route.ListenerProtocol
-	}
-	if route.PathPrefix != "" {
-		match["path"] = routePathMatchers(route.PathPrefix)
-	}
+	match := routeMatch(route)
 	if route.Exposure == "internal" {
 		if len(internalSourceRanges) == 0 {
 			return nil, fmt.Errorf("route %s: internal route requires at least one source range", route.ID)
@@ -243,16 +268,7 @@ func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfi
 		return nil, 0, fmt.Errorf("route %s: security maxRequestBodyBytes must not be negative", route.ID)
 	}
 
-	baseMatch := map[string]any{"host": []string{route.Host}}
-	if route.ListenerPort > 0 {
-		baseMatch["local_port"] = []int{route.ListenerPort}
-	}
-	if route.ListenerProtocol != "" {
-		baseMatch["protocol"] = route.ListenerProtocol
-	}
-	if route.PathPrefix != "" {
-		baseMatch["path"] = routePathMatchers(route.PathPrefix)
-	}
+	baseMatch := routeMatch(route)
 	entries := make([]map[string]any, 0, 5)
 	blockedCIDRs := appendUnique(security.BlockedCIDRs, route.Security.BlockedCIDRs...)
 	if len(blockedCIDRs) > 0 {
@@ -281,6 +297,20 @@ func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfi
 		entries = append(entries, securityRejection(match, 403))
 	}
 	return entries, maxRequestBodyBytes, nil
+}
+
+func routeMatch(route model.RouteConfig) map[string]any {
+	match := map[string]any{"host": []string{route.Host}}
+	if route.ListenerPort > 0 {
+		match["expression"] = fmt.Sprintf("{http.request.local.port} == %d", route.ListenerPort)
+	}
+	if route.ListenerProtocol != "" {
+		match["protocol"] = route.ListenerProtocol
+	}
+	if route.PathPrefix != "" {
+		match["path"] = routePathMatchers(route.PathPrefix)
+	}
+	return match
 }
 
 func securityRejection(match map[string]any, status int) map[string]any {
@@ -458,19 +488,30 @@ func tlsAutomation(cfg model.CertificateConfig) map[string]any {
 	}
 	policies := make([]any, 0, 2)
 	if cfg.DNSChallenge.Provider != "" && len(cfg.Subjects) > 0 {
-		policies = append(policies, map[string]any{
+		dnsPolicy := map[string]any{
 			"subjects": cfg.Subjects,
 			"issuers":  []any{certificateIssuer(cfg, true)},
-		})
-		policies = append(policies, map[string]any{"issuers": []any{certificateIssuer(cfg, false)}})
+		}
+		fallbackPolicy := map[string]any{"issuers": []any{certificateIssuer(cfg, false)}}
+		applyRenewalWindow(dnsPolicy, cfg.RenewalWindowRatio)
+		applyRenewalWindow(fallbackPolicy, cfg.RenewalWindowRatio)
+		policies = append(policies, dnsPolicy, fallbackPolicy)
 	} else {
-		policies = append(policies, map[string]any{"issuers": []any{certificateIssuer(cfg, false)}})
+		policy := map[string]any{"issuers": []any{certificateIssuer(cfg, false)}}
+		applyRenewalWindow(policy, cfg.RenewalWindowRatio)
+		policies = append(policies, policy)
 	}
 	output := map[string]any{"automation": map[string]any{"policies": policies}}
 	if len(cfg.Subjects) > 0 {
 		output["certificates"] = map[string]any{"automate": cfg.Subjects}
 	}
 	return output
+}
+
+func applyRenewalWindow(policy map[string]any, ratio float64) {
+	if ratio > 0 && ratio < 1 {
+		policy["renewal_window_ratio"] = ratio
+	}
 }
 
 func certificateIssuer(cfg model.CertificateConfig, dnsChallenge bool) map[string]any {

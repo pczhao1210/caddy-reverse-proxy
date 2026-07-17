@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -14,15 +15,18 @@ import (
 	"github.com/aidockerfarm/gateway/internal/audit"
 	gatewayazure "github.com/aidockerfarm/gateway/internal/azure"
 	"github.com/aidockerfarm/gateway/internal/caddy"
+	"github.com/aidockerfarm/gateway/internal/certificate"
 	"github.com/aidockerfarm/gateway/internal/config"
 	"github.com/aidockerfarm/gateway/internal/docker"
 	"github.com/aidockerfarm/gateway/internal/health"
+	"github.com/aidockerfarm/gateway/internal/logs"
 	"github.com/aidockerfarm/gateway/internal/reconcile"
 	"github.com/aidockerfarm/gateway/internal/routes"
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	runtimeLogs := logs.NewStore(1000)
+	logger := slog.New(slog.NewJSONHandler(io.MultiWriter(os.Stdout, runtimeLogs.Writer("gateway", "info")), &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -49,6 +53,10 @@ func main() {
 	}
 
 	manager := caddy.NewManager(cfg.Gateway, logger.With("component", "caddy"))
+	manager.SetOutput(
+		io.MultiWriter(os.Stdout, runtimeLogs.Writer("caddy/stdout", "info")),
+		io.MultiWriter(os.Stderr, runtimeLogs.Writer("caddy/stderr", "error")),
+	)
 	if err := manager.Start(ctx, initialConfig); err != nil {
 		logger.Error("caddy runtime did not start", "error", err)
 		os.Exit(1)
@@ -109,8 +117,10 @@ func main() {
 		Runtime:                manager,
 		AuditLog:               auditLogger,
 		CertificateStore:       config.NewCertificateStore(cfg.Gateway.CertificateFile),
+		CertificateInspector:   certificate.NewInspector(cfg.Gateway.CaddyDataDir),
 		SettingsStore:          config.NewSettingsStore(config.SettingsPath(cfg)),
 		AzurePermissionChecker: azurePermissionChecker,
+		RuntimeLogs:            runtimeLogs,
 		Logger:                 logger.With("component", "api"),
 	})
 

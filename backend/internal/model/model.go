@@ -47,12 +47,13 @@ type GatewayConfig struct {
 }
 
 type CertificateConfig struct {
-	Issuer       string             `json:"issuer"`
-	Email        string             `json:"email,omitempty"`
-	Staging      bool               `json:"staging"`
-	CADirectory  string             `json:"caDirectory,omitempty"`
-	Subjects     []string           `json:"subjects,omitempty"`
-	DNSChallenge DNSChallengeConfig `json:"dnsChallenge,omitempty"`
+	Issuer             string             `json:"issuer"`
+	Email              string             `json:"email,omitempty"`
+	Staging            bool               `json:"staging"`
+	CADirectory        string             `json:"caDirectory,omitempty"`
+	Subjects           []string           `json:"subjects,omitempty"`
+	RenewalWindowRatio float64            `json:"renewalWindowRatio,omitempty"`
+	DNSChallenge       DNSChallengeConfig `json:"dnsChallenge,omitempty"`
 }
 
 type DNSChallengeConfig struct {
@@ -76,17 +77,18 @@ type DockerConfig struct {
 }
 
 type AzureConfig struct {
-	Enabled                  bool                 `json:"enabled"`
-	ManageDNS                bool                 `json:"manageDNS"`
-	ManageNSG                bool                 `json:"manageNSG"`
-	SubscriptionID           string               `json:"subscriptionId"`
-	ResourceGroup            string               `json:"resourceGroup"`
-	DNSZoneName              string               `json:"dnsZoneName"`
-	DNSZones                 []AzureDNSZoneConfig `json:"dnsZones,omitempty"`
-	NetworkSecurityGroupName string               `json:"networkSecurityGroupName"`
-	PublicIPAddress          string               `json:"publicIpAddress"`
-	NSGPriority              int32                `json:"nsgPriority"`
-	NSGSourceAddressPrefixes []string             `json:"nsgSourceAddressPrefixes,omitempty"`
+	Enabled                           bool                 `json:"enabled"`
+	ManageDNS                         bool                 `json:"manageDNS"`
+	ManageNSG                         bool                 `json:"manageNSG"`
+	SubscriptionID                    string               `json:"subscriptionId"`
+	ResourceGroup                     string               `json:"resourceGroup"`
+	DNSZoneName                       string               `json:"dnsZoneName"`
+	DNSZones                          []AzureDNSZoneConfig `json:"dnsZones,omitempty"`
+	NetworkSecurityGroupResourceGroup string               `json:"networkSecurityGroupResourceGroup"`
+	NetworkSecurityGroupName          string               `json:"networkSecurityGroupName"`
+	PublicIPAddress                   string               `json:"publicIpAddress"`
+	NSGPriority                       int32                `json:"nsgPriority"`
+	NSGSourceAddressPrefixes          []string             `json:"nsgSourceAddressPrefixes,omitempty"`
 }
 
 type AzureDNSZoneConfig struct {

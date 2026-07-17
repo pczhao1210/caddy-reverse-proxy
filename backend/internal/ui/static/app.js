@@ -1,5 +1,44 @@
 const supportedLocales = ['en', 'zh-CN'];
 const defaultLocale = navigator.language && navigator.language.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en';
+const configurationArchiveFiles = new Set(['manifest.json', 'routes.json', 'settings.json', 'certificate-policy.json']);
+
+function validConfigurationArchive(data) {
+  const bytes = new Uint8Array(data);
+  if (bytes.length < 22) return false;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (view.getUint32(0, true) !== 0x04034b50) return false;
+
+  let endOffset = -1;
+  const earliestEndOffset = Math.max(0, bytes.length - 65557);
+  for (let offset = bytes.length - 22; offset >= earliestEndOffset; offset -= 1) {
+    if (view.getUint32(offset, true) !== 0x06054b50) continue;
+    if (offset + 22 + view.getUint16(offset + 20, true) === bytes.length) {
+      endOffset = offset;
+      break;
+    }
+  }
+  if (endOffset < 0 || view.getUint16(endOffset + 4, true) !== 0 || view.getUint16(endOffset + 6, true) !== 0) return false;
+
+  const diskEntries = view.getUint16(endOffset + 8, true);
+  const totalEntries = view.getUint16(endOffset + 10, true);
+  const directorySize = view.getUint32(endOffset + 12, true);
+  const directoryOffset = view.getUint32(endOffset + 16, true);
+  if (diskEntries !== configurationArchiveFiles.size || totalEntries !== configurationArchiveFiles.size || directoryOffset + directorySize !== endOffset) return false;
+
+  const names = new Set();
+  let entryOffset = directoryOffset;
+  for (let index = 0; index < totalEntries; index += 1) {
+    if (entryOffset + 46 > endOffset || view.getUint32(entryOffset, true) !== 0x02014b50) return false;
+    const nameLength = view.getUint16(entryOffset + 28, true);
+    const extraLength = view.getUint16(entryOffset + 30, true);
+    const commentLength = view.getUint16(entryOffset + 32, true);
+    const nextOffset = entryOffset + 46 + nameLength + extraLength + commentLength;
+    if (nextOffset > endOffset) return false;
+    names.add(new TextDecoder().decode(bytes.subarray(entryOffset + 46, entryOffset + 46 + nameLength)));
+    entryOffset = nextOffset;
+  }
+  return entryOffset === endOffset && names.size === configurationArchiveFiles.size && [...configurationArchiveFiles].every((name) => names.has(name));
+}
 
 const messages = {
   en: {
@@ -12,11 +51,13 @@ const messages = {
     'nav.certificates': 'Certificates',
     'nav.security': 'Security',
     'nav.settings': 'Settings',
+    'nav.logs': 'Logs',
     'language.label': 'Language',
     'actions.refresh': 'Refresh data',
     'actions.refreshTitle': 'Fetch the latest state without changing the active configuration',
     'actions.signOut': 'Sign out',
     'actions.apply': 'Reconcile configuration',
+    'actions.applyPending': 'Apply pending changes',
     'actions.applyTitle': 'Regenerate and apply the complete Caddy configuration',
     'actions.add': 'Add',
     'actions.addRoute': 'Add route',
@@ -35,10 +76,15 @@ const messages = {
     'actions.bind': 'Bind',
     'actions.useSuggestedRoute': 'Use Suggested Route',
     'actions.requestRefresh': 'Reload TLS config',
+    'actions.refreshCertificateStatus': 'Refresh status',
+    'actions.enableEarlyRenewal': 'Enable earlier renewal',
     'actions.saveAndApply': 'Save and apply',
     'actions.saveSecurity': 'Save security policy',
     'actions.saveSettings': 'Save settings',
     'actions.checkAzurePermissions': 'Check permissions',
+    'actions.refreshLogs': 'Refresh logs',
+    'actions.exportConfiguration': 'Export configuration',
+    'actions.importConfiguration': 'Validate and import',
     'app.heading': 'Gateway Control Plane',
     'app.productType': 'Reverse Proxy Console',
     'app.loading': 'Loading current state',
@@ -50,6 +96,7 @@ const messages = {
     'views.certificatesDescription': 'Manage ACME issuance and automatic certificate renewal.',
     'views.securityDescription': 'Configure gateway-wide request controls and protected-route access.',
     'views.settingsDescription': 'Manage the next deployment mode, Azure integration, and the console login token.',
+    'views.logsDescription': 'Inspect recent gateway, Caddy, and configuration audit events.',
     'metrics.profile': 'Deployment',
     'metrics.routes': 'Saved routes',
     'metrics.docker': 'Docker',
@@ -71,10 +118,14 @@ const messages = {
     'sections.azureNetwork': 'Azure & Network',
     'sections.runtimeSecurity': 'Runtime & Security',
     'sections.certificates': 'Certificates',
+    'sections.certificatePolicy': 'Issuance policy',
+    'sections.issuedCertificates': 'Issued certificates',
     'sections.securityBaseline': 'Request Security Baseline',
     'sections.accessPolicy': 'Access Policy',
     'sections.systemSettings': 'System Settings',
     'sections.azureSettings': 'Azure Integration',
+    'sections.runtimeLogs': 'Runtime logs',
+    'sections.configurationFiles': 'Configuration files',
     'tables.host': 'Frontend hostname',
     'tables.name': 'Name',
     'tables.hostname': 'Hostname',
@@ -131,6 +182,8 @@ const messages = {
     'forms.certificateStaging': 'Use staging CA',
     'forms.caDirectory': 'CA directory URL',
     'forms.certificateSubjects': 'Managed frontend hostnames',
+    'forms.renewalWindowRatio': 'Automatic renewal window',
+    'forms.renewalWindowRatioHint': 'Start renewal when this share of the certificate lifetime remains. 50% renews earlier than Caddy’s 33% default.',
     'forms.dnsProvider': 'DNS challenge provider',
     'forms.azureSubscriptionId': 'Azure subscription ID',
     'forms.azureResourceGroup': 'DNS zone resource group',
@@ -138,6 +191,9 @@ const messages = {
     'forms.azureTenantId': 'Tenant ID',
     'forms.azureClientId': 'Client ID',
     'forms.azureClientSecret': 'Client secret',
+    'forms.logLevel': 'Level',
+    'forms.logSource': 'Source',
+    'forms.logSearch': 'Search',
     'forms.securityEnabled': 'Enable request security baseline',
     'forms.maxRequestBodyMiB': 'Maximum request body (MiB)',
     'forms.deniedMethods': 'Denied HTTP methods',
@@ -159,6 +215,7 @@ const messages = {
     'forms.azureManageNsg': 'Manage the NSG listener rule',
     'forms.azureDnsZones': 'DNS zones',
     'forms.azureDnsZonesHint': 'One per line as zone | resource group. The default resource group is used when the second value is omitted.',
+    'forms.azureNsgResourceGroup': 'NSG resource group',
     'forms.azureNsgName': 'Network security group name',
     'forms.azurePublicIp': 'Ingress public IPv4 address',
     'forms.azureNsgPriority': 'Managed NSG rule priority',
@@ -194,6 +251,11 @@ const messages = {
     'status.missingPermissions': 'Missing permissions',
     'status.unableToVerify': 'Unable to verify',
     'status.notConfigured': 'Not configured',
+    'status.pendingApply': 'Pending apply',
+    'status.valid': 'Valid',
+    'status.renewalDue': 'Renewal due',
+    'status.expired': 'Expired',
+    'status.notYetValid': 'Not yet valid',
     'status.running': 'Running',
     'status.paused': 'Paused',
     'status.restarting': 'Restarting',
@@ -205,6 +267,7 @@ const messages = {
     'empty.noBackendPools': 'No backend pools',
     'empty.noRoutingRules': 'No routing rules',
     'empty.noContainers': 'No workload containers discovered',
+    'empty.noLogs': 'No logs match the current filters.',
     'exposure.public': 'Public',
     'exposure.protected': 'Protected',
     'exposure.internal': 'Internal',
@@ -217,6 +280,9 @@ const messages = {
     'certificate.managedIdentity': 'Managed Identity',
     'certificate.appRegistration': 'App Registration',
     'certificate.secretConfigured': 'Configured',
+    'certificate.renewalDefault': 'Standard · 33% remaining',
+    'certificate.renewalEarlier': 'Earlier · 50% remaining',
+    'certificate.renewalEarliest': 'Earliest · 67% remaining',
     'certificate.persistedNote': 'Caddy renews managed certificates automatically before expiry. Keep /data/caddy persistent and challenge access available. Reload TLS config reapplies the policy; it does not force renewal.',
     'deployment.containerSocket': 'Container + Socket',
     'deployment.azureVM': 'Azure VM',
@@ -284,6 +350,8 @@ const messages = {
     'msg.certificateSaveFailed': 'Certificate policy was saved, but Caddy reload failed: {error}',
     'msg.certificateRefreshed': 'TLS configuration reloaded',
     'msg.certificateRefreshFailed': 'TLS configuration reload failed: {error}',
+    'msg.certificateStatusRefreshed': 'Certificate status refreshed',
+    'msg.earlyRenewalEnabled': 'Earlier renewal enabled and Caddy reloaded',
     'msg.unsavedCertificate': 'Save or discard certificate changes before reloading TLS configuration',
     'msg.routeSaved': 'Route saved and applied',
     'msg.routeSaveFailed': 'Route was saved, but reconcile failed: {error}',
@@ -299,6 +367,8 @@ const messages = {
     'msg.backendPoolUpdated': 'Backend pool updated and applied',
     'msg.backendPoolUpdateFailed': 'Backend pool was updated, but reconcile failed: {error}',
     'msg.backendPoolDeleted': 'Backend pool deleted',
+    'msg.routingChangeSaved': 'Saved. Use Apply pending changes when the route configuration is ready.',
+    'msg.logsRefreshed': 'Logs refreshed',
     'msg.confirmDeleteResource': 'Delete {type} “{name}”?',
     'msg.noBackendTargets': 'Add at least one backend address',
     'msg.routeBound': 'Container route bound and applied',
@@ -345,6 +415,11 @@ const messages = {
     'msg.settingsSaved': 'Settings saved',
     'msg.settingsSavedRestart': 'Settings saved. Restart Caddy Proxy to activate Deployment or Azure changes.',
     'msg.settingsUnavailable': 'Settings persistence is unavailable in this runtime.',
+    'msg.configurationExported': 'Configuration archive downloaded',
+    'msg.configurationExportInvalid': 'The server returned an invalid configuration archive. Refresh the page and try again.',
+    'msg.configurationImported': 'Validated {listeners} listeners, {pools} backend pools, {rules} routing rules, and {subjects} certificate subjects. Nothing has been persisted yet; click Apply pending changes.',
+    'msg.selectConfigurationArchive': 'Select a configuration ZIP archive first.',
+    'msg.applyImportedFirst': 'Apply the imported configuration before changing settings or certificate policy.',
     'settings.deploymentNote': 'Deployment changes affect Docker discovery and Azure clients. They are persisted for the next process start; network mode, socket mounts, and published ports must also match the selected deployment.',
     'settings.azureIdentityNote': 'Azure uses DefaultAzureCredential. On an Azure VM, assign a managed identity with DNS Zone Contributor for managed zones and Network Contributor for the target NSG; no client secret is stored here.',
     'settings.azureStatusNote': 'Apply upserts desired A records, lists managed A records for cleanup, and waits for the NSG rule operation. Platform shows the latest counts, warnings, and Azure API error; Configured validates inputs, not identity permissions.',
@@ -356,11 +431,41 @@ const messages = {
     'settings.azurePermissionNotConfigured': 'This capability is not enabled in the current form.',
     'settings.azurePermissionResourceGroup': 'Resource group: {resourceGroup}',
     'settings.azurePermissionMissing': 'Missing actions: {actions}',
+    'settings.configurationDescription': 'Move routing, Console settings, and certificate issuance policy between Caddy Proxy instances.',
+    'settings.configurationExportTitle': 'Export',
+    'settings.configurationExportNote': 'Downloads caddyproxy_config_yyyymmdd.zip. Issued certificates, private keys, runtime logs, audit logs, and secrets are excluded.',
+    'settings.configurationImportTitle': 'Import',
+    'settings.configurationImportNote': 'The ZIP is fully parsed, normalized, and rendered before it becomes an in-memory draft. Apply writes it locally and activates routes and certificate policy; deployment and Azure startup settings require a restart.',
+    'settings.configurationValidatedTitle': 'Validated import',
+    'settings.configurationPending': 'An imported configuration is validated and waiting for Apply. Settings and certificate policy changes cannot be saved until then.',
     'msg.protectedPolicyRequired': 'Keep at least one protected-route token header enabled.',
     'dashboard.reconcileIssue': 'The last reconcile did not fully apply the generated configuration.',
     'dashboard.noRoutes': 'No saved routes are configured. Add a route to publish a service.',
     'dashboard.dockerIssue': 'Docker discovery needs attention: {details}',
-    'dashboard.azureIssue': 'Azure integration is enabled but incomplete: {details}'
+    'dashboard.azureIssue': 'Azure integration is enabled but incomplete: {details}',
+    'routes.pendingApply': 'Route changes are saved but not active. Finish editing, then use Apply pending changes in the top-right corner.',
+    'logs.allLevels': 'All levels',
+    'logs.allSources': 'All sources',
+    'logs.time': 'Time',
+    'logs.level': 'Level',
+    'logs.source': 'Source',
+    'logs.message': 'Message',
+    'logs.fields': 'Details',
+    'logs.searchPlaceholder': 'Message, source, or details',
+    'certificates.storage': 'Caddy storage',
+    'certificates.scannedAt': 'Scanned',
+    'certificates.expires': 'Expires',
+    'certificates.renewalStarts': 'Renewal window starts',
+    'certificates.issuer': 'Issuer',
+    'certificates.certificateFile': 'Certificate file',
+    'certificates.privateKeyFile': 'Private key file',
+    'certificates.metadataFile': 'Metadata file',
+    'certificates.fingerprint': 'SHA-256 fingerprint',
+    'certificates.subjects': 'Certificate names',
+    'certificates.noCertificates': 'No issued certificate files were found in Caddy storage.',
+    'certificates.runtimeUnavailable': 'Certificate storage inspection is unavailable.',
+    'certificates.policyNote': 'Saving updates Caddy’s automation policy. Reloading TLS applies the current policy; it does not force an ACME renewal.',
+    'certificates.earlyRenewalTitle': 'Set the renewal window to 50% of certificate lifetime and apply the policy.'
   },
   'zh-CN': {
     title: 'Caddy Proxy',
@@ -372,11 +477,13 @@ const messages = {
     'nav.certificates': '证书',
     'nav.security': '安全',
     'nav.settings': '设置',
+    'nav.logs': '日志',
     'language.label': '语言',
     'actions.refresh': '刷新数据',
     'actions.refreshTitle': '只获取最新状态，不修改当前生效配置',
     'actions.signOut': '退出登录',
     'actions.apply': '协调并应用配置',
+    'actions.applyPending': '应用待处理更改',
     'actions.applyTitle': '重新生成并应用完整的 Caddy 配置',
     'actions.add': '添加',
     'actions.addRoute': '添加路由',
@@ -395,10 +502,15 @@ const messages = {
     'actions.bind': '绑定',
     'actions.useSuggestedRoute': '使用建议路由',
     'actions.requestRefresh': '重新加载 TLS 配置',
+    'actions.refreshCertificateStatus': '刷新状态',
+    'actions.enableEarlyRenewal': '启用提前续期',
     'actions.saveAndApply': '保存并应用',
     'actions.saveSecurity': '保存安全策略',
     'actions.saveSettings': '保存设置',
     'actions.checkAzurePermissions': '检查权限',
+    'actions.refreshLogs': '刷新日志',
+    'actions.exportConfiguration': '导出配置',
+    'actions.importConfiguration': '校验并导入',
     'app.heading': '网关控制平面',
     'app.productType': '反向代理控制台',
     'app.loading': '正在加载当前状态',
@@ -410,6 +522,7 @@ const messages = {
     'views.certificatesDescription': '管理 ACME 签发和证书自动续期。',
     'views.securityDescription': '配置网关全局请求防护与受保护路由的访问策略。',
     'views.settingsDescription': '管理下次启动的部署方式、Azure 集成和控制台登录令牌。',
+    'views.logsDescription': '查看最近的网关、Caddy 运行日志和配置审计事件。',
     'metrics.profile': '部署方式',
     'metrics.routes': '已保存路由',
     'metrics.docker': 'Docker',
@@ -431,10 +544,14 @@ const messages = {
     'sections.azureNetwork': 'Azure 与网络',
     'sections.runtimeSecurity': '运行与安全',
     'sections.certificates': '证书',
+    'sections.certificatePolicy': '签发策略',
+    'sections.issuedCertificates': '已签发证书',
     'sections.securityBaseline': '请求安全基线',
     'sections.accessPolicy': '访问策略',
     'sections.systemSettings': '系统设置',
     'sections.azureSettings': 'Azure 集成',
+    'sections.runtimeLogs': '运行日志',
+    'sections.configurationFiles': '配置文件',
     'tables.host': '前端主机名',
     'tables.name': '名称',
     'tables.hostname': '主机名',
@@ -491,6 +608,8 @@ const messages = {
     'forms.certificateStaging': '使用测试 CA',
     'forms.caDirectory': 'CA Directory URL',
     'forms.certificateSubjects': '托管前端域名',
+    'forms.renewalWindowRatio': '自动续期窗口',
+    'forms.renewalWindowRatioHint': '当证书剩余此比例的有效期时开始续期；50% 会早于 Caddy 默认的 33%。',
     'forms.dnsProvider': 'DNS Challenge 提供商',
     'forms.azureSubscriptionId': 'Azure 订阅 ID',
     'forms.azureResourceGroup': 'DNS Zone 资源组',
@@ -498,6 +617,9 @@ const messages = {
     'forms.azureTenantId': '租户 ID',
     'forms.azureClientId': '客户端 ID',
     'forms.azureClientSecret': '客户端密钥',
+    'forms.logLevel': '级别',
+    'forms.logSource': '来源',
+    'forms.logSearch': '搜索',
     'forms.securityEnabled': '启用请求安全基线',
     'forms.maxRequestBodyMiB': '最大请求体（MiB）',
     'forms.deniedMethods': '拒绝的 HTTP 方法',
@@ -519,6 +641,7 @@ const messages = {
     'forms.azureManageNsg': '管理 NSG 监听规则',
     'forms.azureDnsZones': 'DNS Zone',
     'forms.azureDnsZonesHint': '每行格式为 zone | 资源组；省略第二项时使用默认资源组。',
+    'forms.azureNsgResourceGroup': 'NSG 资源组',
     'forms.azureNsgName': '网络安全组名称',
     'forms.azurePublicIp': '入口公网 IPv4 地址',
     'forms.azureNsgPriority': '托管 NSG 规则优先级',
@@ -554,6 +677,11 @@ const messages = {
     'status.missingPermissions': '缺少权限',
     'status.unableToVerify': '无法验证',
     'status.notConfigured': '未配置',
+    'status.pendingApply': '等待应用',
+    'status.valid': '有效',
+    'status.renewalDue': '需要续期',
+    'status.expired': '已过期',
+    'status.notYetValid': '尚未生效',
     'status.running': '运行中',
     'status.paused': '已暂停',
     'status.restarting': '正在重启',
@@ -565,6 +693,7 @@ const messages = {
     'empty.noBackendPools': '没有后端池',
     'empty.noRoutingRules': '没有路由规则',
     'empty.noContainers': '未发现工作负载容器',
+    'empty.noLogs': '当前筛选条件下没有日志。',
     'exposure.public': '公开',
     'exposure.protected': '受保护',
     'exposure.internal': '内部',
@@ -577,6 +706,9 @@ const messages = {
     'certificate.managedIdentity': '托管身份',
     'certificate.appRegistration': 'App Registration',
     'certificate.secretConfigured': '已配置',
+    'certificate.renewalDefault': '标准 · 剩余 33% 时续期',
+    'certificate.renewalEarlier': '较早 · 剩余 50% 时续期',
+    'certificate.renewalEarliest': '最早 · 剩余 67% 时续期',
     'certificate.persistedNote': 'Caddy 会在到期前自动续签托管证书。请持久化 /data/caddy，并确保签发验证仍可用。“重新加载 TLS 配置”只会重新应用策略，不会强制续期。',
     'deployment.containerSocket': '容器 + Docker Socket',
     'deployment.azureVM': 'Azure VM',
@@ -644,6 +776,8 @@ const messages = {
     'msg.certificateSaveFailed': '证书策略已保存，但 Caddy 重新加载失败：{error}',
     'msg.certificateRefreshed': 'TLS 配置已重新加载',
     'msg.certificateRefreshFailed': 'TLS 配置重新加载失败：{error}',
+    'msg.certificateStatusRefreshed': '证书状态已刷新',
+    'msg.earlyRenewalEnabled': '提前续期已启用，Caddy 已重新加载',
     'msg.unsavedCertificate': '请先保存或放弃证书改动，再重新加载 TLS 配置',
     'msg.routeSaved': '路由已保存并应用',
     'msg.routeSaveFailed': '路由已保存，但协调失败：{error}',
@@ -659,6 +793,8 @@ const messages = {
     'msg.backendPoolUpdated': '后端池已更新并应用',
     'msg.backendPoolUpdateFailed': '后端池已更新，但协调失败：{error}',
     'msg.backendPoolDeleted': '后端池已删除',
+    'msg.routingChangeSaved': '已保存。完成路由编辑后，请点击右上角“应用待处理更改”。',
+    'msg.logsRefreshed': '日志已刷新',
     'msg.confirmDeleteResource': '确定删除{type}“{name}”吗？',
     'msg.noBackendTargets': '请至少添加一个后端地址',
     'msg.routeBound': '容器路由已绑定并应用',
@@ -705,6 +841,11 @@ const messages = {
     'msg.settingsSaved': '设置已保存',
     'msg.settingsSavedRestart': '设置已保存。请重启 Caddy Proxy 以启用 Deployment 或 Azure 改动。',
     'msg.settingsUnavailable': '当前运行环境不支持设置持久化。',
+    'msg.configurationExported': '配置压缩包已下载',
+    'msg.configurationExportInvalid': '服务器返回的配置压缩包无效。请刷新页面后重试。',
+    'msg.configurationImported': '已校验 {listeners} 个监听器、{pools} 个后端池、{rules} 条路由规则和 {subjects} 个证书域名。当前尚未持久化，请点击右上角“应用待处理更改”。',
+    'msg.selectConfigurationArchive': '请先选择配置 ZIP 压缩包。',
+    'msg.applyImportedFirst': '请先应用已导入的配置，再修改设置或证书策略。',
     'settings.deploymentNote': 'Deployment 会影响 Docker 发现和 Azure 客户端。此处保存为进程下次启动配置；网络模式、Socket 挂载和端口发布也必须符合所选部署方式。',
     'settings.azureIdentityNote': 'Azure 使用 DefaultAzureCredential。在 Azure VM 上，请为托管身份授予托管 Zone 的 DNS Zone Contributor，以及目标 NSG 的 Network Contributor；此处不保存客户端密钥。',
     'settings.azureStatusNote': '“协调并应用”会写入期望 A 记录、列出托管 A 记录用于清理，并等待 NSG 规则操作完成；平台页显示最近一次数量、警告和 Azure API 错误。“配置完整”只校验输入，不代表身份权限已经验证。',
@@ -716,11 +857,41 @@ const messages = {
     'settings.azurePermissionNotConfigured': '当前表单未启用此项能力。',
     'settings.azurePermissionResourceGroup': '资源组：{resourceGroup}',
     'settings.azurePermissionMissing': '缺少操作：{actions}',
+    'settings.configurationDescription': '在 Caddy Proxy 实例之间迁移路由、Console 设置和证书申请策略。',
+    'settings.configurationExportTitle': '导出',
+    'settings.configurationExportNote': '下载 caddyproxy_config_yyyymmdd.zip；不包含已签发证书、私钥、运行日志、审计日志及任何秘密字段。',
+    'settings.configurationImportTitle': '导入',
+    'settings.configurationImportNote': 'ZIP 会先完成解压、规范化和 Caddy 渲染检查，再载入内存草稿。应用后才写入本地并启用路由与证书策略；Deployment 和 Azure 启动期设置需重启生效。',
+    'settings.configurationValidatedTitle': '已校验的导入内容',
+    'settings.configurationPending': '已导入的配置通过校验，正在等待应用。在此之前不能保存设置或证书策略变更。',
     'msg.protectedPolicyRequired': '请至少保留一种受保护路由令牌 Header。',
     'dashboard.reconcileIssue': '最近一次协调未能完整应用生成的配置。',
     'dashboard.noRoutes': '当前没有已保存路由。添加路由后即可发布服务。',
     'dashboard.dockerIssue': 'Docker 发现需要处理：{details}',
-    'dashboard.azureIssue': 'Azure 集成已启用但配置不完整：{details}'
+    'dashboard.azureIssue': 'Azure 集成已启用但配置不完整：{details}',
+    'routes.pendingApply': '路由更改已保存但尚未生效。完成编辑后，请点击右上角“应用待处理更改”。',
+    'logs.allLevels': '全部级别',
+    'logs.allSources': '全部来源',
+    'logs.time': '时间',
+    'logs.level': '级别',
+    'logs.source': '来源',
+    'logs.message': '消息',
+    'logs.fields': '详情',
+    'logs.searchPlaceholder': '消息、来源或详情',
+    'certificates.storage': 'Caddy 存储目录',
+    'certificates.scannedAt': '扫描时间',
+    'certificates.expires': '过期时间',
+    'certificates.renewalStarts': '续期窗口开始',
+    'certificates.issuer': '签发者',
+    'certificates.certificateFile': '证书文件',
+    'certificates.privateKeyFile': '私钥文件',
+    'certificates.metadataFile': '元数据文件',
+    'certificates.fingerprint': 'SHA-256 指纹',
+    'certificates.subjects': '证书名称',
+    'certificates.noCertificates': 'Caddy 存储中尚未找到已签发的证书文件。',
+    'certificates.runtimeUnavailable': '当前无法检查证书存储。',
+    'certificates.policyNote': '保存会更新 Caddy 自动化策略；重新加载 TLS 只应用当前策略，不会强制发起 ACME 续期。',
+    'certificates.earlyRenewalTitle': '将续期窗口设为证书有效期的 50%，并应用该策略。'
   }
 };
 
@@ -750,7 +921,8 @@ const backendMessageKeys = new Map([
   ['NSG priority and source-prefix policy', 'msg.nsgSourcePolicy'],
   ['the gateway container cannot be bound as an upstream', 'msg.gatewayCannotBind'],
   ['upstream scheme must be http or https', 'msg.invalidUpstreamScheme'],
-  ['protected routes require at least one token header policy', 'msg.protectedPolicyRequired']
+  ['protected routes require at least one token header policy', 'msg.protectedPolicyRequired'],
+  ['apply the imported configuration before changing settings or certificate policy', 'msg.applyImportedFirst']
 ]);
 
 document.addEventListener('alpine:init', () => {
@@ -780,6 +952,14 @@ document.addEventListener('alpine:init', () => {
     discoveryWarning: '',
     bindForms: {},
     certificateForm: emptyCertificateForm(),
+    certificateRuntime: emptyCertificateRuntime(),
+    logEntries: [],
+    logsLoaded: false,
+    logLevel: 'all',
+    logSource: 'all',
+    logQuery: '',
+    configurationFileName: '',
+    configurationImportResult: null,
     listenerForm: emptyListenerForm(),
     backendPoolForm: emptyBackendPoolForm(),
     routingRuleForm: emptyRoutingRuleForm(),
@@ -790,7 +970,8 @@ document.addEventListener('alpine:init', () => {
       { view: 'platform', label: 'nav.platform' },
       { view: 'certificates', label: 'nav.certificates' },
       { view: 'security', label: 'nav.security' },
-      { view: 'settings', label: 'nav.settings' }
+      { view: 'settings', label: 'nav.settings' },
+      { view: 'logs', label: 'nav.logs' }
     ],
 
     init() {
@@ -840,6 +1021,11 @@ document.addEventListener('alpine:init', () => {
       this.discoveryWarning = '';
       this.bindForms = {};
       this.certificateForm = emptyCertificateForm();
+      this.certificateRuntime = emptyCertificateRuntime();
+      this.logEntries = [];
+      this.logsLoaded = false;
+      this.configurationFileName = '';
+      this.configurationImportResult = null;
       this.settings = null;
       this.securityForm = emptySecurityForm();
       this.systemForm = emptySystemForm();
@@ -872,6 +1058,7 @@ document.addEventListener('alpine:init', () => {
         const errors = [];
         if (statusResult.status === 'fulfilled') {
           this.status = statusResult.value;
+          if (!this.configurationImportPending()) this.configurationImportResult = null;
           if (!this.discoveryVisible() && this.activeView === 'discovery') {
             this.activeView = 'dashboard';
             this.updateDocumentTitle();
@@ -889,6 +1076,7 @@ document.addEventListener('alpine:init', () => {
         }
         if (certificateResult.status === 'fulfilled') {
           if (!this.certificateDirty || options.forceCertificate) this.setCertificateForm(certificateResult.value);
+          else this.setCertificateRuntime(certificateResult.value.runtime);
         } else {
           errors.push(certificateResult.reason);
         }
@@ -922,6 +1110,14 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    routingChangesPending() {
+      return Boolean(this.status?.routingChangesPending);
+    },
+
+    applyButtonText() {
+      return this.t(this.routingChangesPending() ? 'actions.applyPending' : 'actions.apply');
+    },
+
     async saveListener() {
       const editingID = this.editingListenerId;
       const existing = editingID ? this.listeners().find((listener) => listener.id === editingID) : null;
@@ -941,8 +1137,7 @@ document.addEventListener('alpine:init', () => {
         this.resetListenerForm();
         await this.refreshAll();
         if (!this.routingRuleForm.listenerId) this.routingRuleForm.listenerId = listenerID;
-        if (editingID) this.showReconcileOutcome(result.reconcile, 'msg.listenerUpdated', 'msg.listenerUpdateFailed');
-        else this.showNotice(this.t('msg.listenerSaved'));
+        this.showNotice(this.t('msg.routingChangeSaved'));
       });
     },
 
@@ -991,8 +1186,7 @@ document.addEventListener('alpine:init', () => {
         this.resetBackendPoolForm();
         await this.refreshAll();
         if (!this.routingRuleForm.backendPoolId) this.routingRuleForm.backendPoolId = backendPoolID;
-        if (editingID) this.showReconcileOutcome(result.reconcile, 'msg.backendPoolUpdated', 'msg.backendPoolUpdateFailed');
-        else this.showNotice(this.t('msg.backendPoolSaved'));
+        this.showNotice(this.t('msg.routingChangeSaved'));
       });
     },
 
@@ -1037,11 +1231,7 @@ document.addEventListener('alpine:init', () => {
         });
         this.resetRoutingRuleForm();
         await this.refreshAll();
-        this.showReconcileOutcome(
-          result.reconcile,
-          editingID ? 'msg.routeUpdated' : 'msg.routeSaved',
-          editingID ? 'msg.routeUpdateFailed' : 'msg.routeSaveFailed'
-        );
+        this.showNotice(this.t('msg.routingChangeSaved'));
       });
     },
 
@@ -1109,11 +1299,10 @@ document.addEventListener('alpine:init', () => {
       }[target.kind];
       if (!settings) return;
       await this.runAction(async () => {
-        const result = await this.api(settings.endpoint + encodeURIComponent(target.resource.id), { method: 'DELETE' });
+        await this.api(settings.endpoint + encodeURIComponent(target.resource.id), { method: 'DELETE' });
         if (settings.editingID === target.resource.id) settings.reset();
         await this.refreshAll();
-        if (target.kind === 'routingRule') this.showReconcileOutcome(result.reconcile, settings.success, settings.failure);
-        else this.showNotice(this.t(settings.success));
+        this.showNotice(this.t('msg.routingChangeSaved'));
       });
     },
 
@@ -1142,13 +1331,13 @@ document.addEventListener('alpine:init', () => {
         https: form.https
       };
       await this.runAction(async () => {
-        const result = await this.api('/api/discovery/bind', { method: 'POST', body: JSON.stringify(payload) });
+        await this.api('/api/discovery/bind', { method: 'POST', body: JSON.stringify(payload) });
         await this.refreshAll();
-        this.showReconcileOutcome(result.reconcile, 'msg.routeBound', 'msg.routeBindFailed');
+        this.showNotice(this.t('msg.routingChangeSaved'));
       });
     },
 
-    async saveCertificate() {
+    async saveCertificate(successKey = 'msg.certificateSaved') {
       if (this.certificateForm.issuer === 'custom' && !this.certificateForm.caDirectory) {
         this.showAlert(this.t('msg.customCARequired'));
         return;
@@ -1164,6 +1353,7 @@ document.addEventListener('alpine:init', () => {
         staging: this.certificateForm.staging,
         caDirectory: this.certificateForm.caDirectory,
         subjects,
+        renewalWindowRatio: Number(this.certificateForm.renewalWindowRatio),
         dnsChallenge: {
           provider: this.certificateForm.dnsProvider,
           azure: {
@@ -1180,8 +1370,27 @@ document.addEventListener('alpine:init', () => {
         const result = await this.api('/api/certificate', { method: 'PUT', body: JSON.stringify(payload) });
         this.setCertificateForm(result.certificate);
         await this.refreshAll({ forceCertificate: true });
-        this.showReconcileOutcome(result.reconcile, 'msg.certificateSaved', 'msg.certificateSaveFailed');
+        this.showReconcileOutcome(result.reconcile, successKey, 'msg.certificateSaveFailed');
       });
+    },
+
+    async refreshCertificateStatus() {
+      await this.runAction(async () => {
+        const certificate = await this.api('/api/certificate');
+        if (this.certificateDirty) this.setCertificateRuntime(certificate.runtime);
+        else this.setCertificateForm(certificate);
+        this.lastUpdated = new Date();
+        this.showNotice(this.t('msg.certificateStatusRefreshed'));
+      });
+    },
+
+    async enableEarlyRenewal() {
+      if (this.certificateDirty) {
+        this.showAlert(this.t('msg.unsavedCertificate'));
+        return;
+      }
+      this.certificateForm.renewalWindowRatio = 0.5;
+      await this.saveCertificate('msg.earlyRenewalEnabled');
     },
 
     async refreshCertificate() {
@@ -1230,6 +1439,7 @@ document.addEventListener('alpine:init', () => {
         resourceGroup: this.systemForm.azureResourceGroup,
         dnsZoneName: '',
         dnsZones: parseAzureDNSZones(this.systemForm.azureDNSZonesText, this.systemForm.azureResourceGroup),
+        networkSecurityGroupResourceGroup: this.systemForm.azureNSGResourceGroup,
         networkSecurityGroupName: this.systemForm.azureNSGName,
         publicIpAddress: this.systemForm.azurePublicIP,
         nsgPriority: Number(this.systemForm.azureNSGPriority) || 120,
@@ -1272,6 +1482,64 @@ document.addEventListener('alpine:init', () => {
       });
     },
 
+    configurationImportPending() {
+      return Boolean(this.status?.configurationImportPending);
+    },
+
+    selectConfigurationArchive(event) {
+      this.configurationFileName = event.target.files?.[0]?.name || '';
+      this.configurationImportResult = null;
+    },
+
+    async exportConfiguration() {
+      await this.runAction(async () => {
+        const response = await fetch('/api/settings/configuration', {
+          headers: { 'Authorization': 'Bearer ' + this.token }
+        });
+        if (!response.ok) throw await this.responseError(response);
+        const data = await response.arrayBuffer();
+        if (!validConfigurationArchive(data)) throw new Error(this.t('msg.configurationExportInvalid'));
+        const disposition = response.headers.get('Content-Disposition') || '';
+        const filenameMatch = disposition.match(/filename="?([^";]+)"?/i);
+        const fallbackDate = new Date().toISOString().slice(0, 10).replaceAll('-', '');
+        const download = document.createElement('a');
+        const blob = new Blob([data], { type: 'application/zip' });
+        const objectURL = URL.createObjectURL(blob);
+        download.href = objectURL;
+        download.download = filenameMatch?.[1] || `caddyproxy_config_${fallbackDate}.zip`;
+        document.body.appendChild(download);
+        download.click();
+        download.remove();
+        setTimeout(() => URL.revokeObjectURL(objectURL), 60000);
+        this.showNotice(this.t('msg.configurationExported'));
+      });
+    },
+
+    async importConfiguration() {
+      const archive = this.$refs.configurationImportInput?.files?.[0];
+      if (!archive) {
+        this.showAlert(this.t('msg.selectConfigurationArchive'));
+        return;
+      }
+      await this.runAction(async () => {
+        const result = await this.api('/api/settings/configuration', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/zip' },
+          body: archive
+        });
+        this.configurationImportResult = result;
+        this.configurationFileName = '';
+        this.$refs.configurationImportInput.value = '';
+        await this.refreshAll({ forceCertificate: true });
+        this.showNotice(this.format('msg.configurationImported', {
+          listeners: result.listeners,
+          pools: result.backendPools,
+          rules: result.routingRules,
+          subjects: result.certificateSubjects
+        }));
+      });
+    },
+
     setSettingsForms(settings) {
       const source = settings || {};
       const security = source.security || {};
@@ -1299,6 +1567,7 @@ document.addEventListener('alpine:init', () => {
         azureSubscriptionId: azure.subscriptionId || '',
         azureResourceGroup: azure.resourceGroup || '',
         azureDNSZonesText: formatAzureDNSZones(azure.dnsZones || [], azure.dnsZoneName, azure.resourceGroup),
+        azureNSGResourceGroup: azure.networkSecurityGroupResourceGroup || azure.resourceGroup || '',
         azureNSGName: azure.networkSecurityGroupName || '',
         azurePublicIP: azure.publicIpAddress || '',
         azureNSGPriority: Number(azure.nsgPriority) || 120,
@@ -1380,6 +1649,21 @@ document.addEventListener('alpine:init', () => {
       return payload;
     },
 
+    async responseError(response) {
+      const text = await response.text();
+      let message = response.statusText;
+      if (text) {
+        try {
+          message = JSON.parse(text)?.error || message;
+        } catch {
+          message = text;
+        }
+      }
+      const error = new Error(message);
+      error.status = response.status;
+      return error;
+    },
+
     showReconcileOutcome(result, successKey, failureKey) {
       const error = this.reconcileError(result);
       if (error) {
@@ -1406,6 +1690,7 @@ document.addEventListener('alpine:init', () => {
         staging: Boolean(source.staging),
         caDirectory: source.caDirectory || '',
         subjectsText: (source.subjects || []).join('\n'),
+        renewalWindowRatio: Number(source.renewalWindowRatio) || (1 / 3),
         dnsProvider: dns.provider || '',
         azureSubscriptionId: azure.subscriptionId || '',
         azureResourceGroup: azure.resourceGroup || '',
@@ -1417,7 +1702,20 @@ document.addEventListener('alpine:init', () => {
         runtimeOnly: Boolean(source.runtimeOnly),
         persisted: Boolean(source.persisted)
       };
+      this.setCertificateRuntime(source.runtime);
       this.certificateDirty = false;
+    },
+
+    setCertificateRuntime(runtime) {
+      const source = runtime || {};
+      this.certificateRuntime = {
+        available: Boolean(source.available),
+        storageDirectory: source.storageDirectory || '',
+        scannedAt: source.scannedAt || '',
+        certificates: Array.isArray(source.certificates) ? source.certificates : [],
+        warnings: Array.isArray(source.warnings) ? source.warnings : [],
+        error: source.error || ''
+      };
     },
 
     markCertificateDirty() {
@@ -1529,6 +1827,7 @@ document.addEventListener('alpine:init', () => {
       this.clearMessages();
       this.activeView = view;
       this.updateDocumentTitle();
+      if (view === 'logs') this.refreshLogs(false);
       this.$nextTick(() => {
         window.scrollTo({ top: 0, left: 0, behavior: 'auto' });
         const heading = this.$root.querySelector('.topbar h1');
@@ -1605,6 +1904,59 @@ document.addEventListener('alpine:init', () => {
       return this.status?.routingRules || [];
     },
 
+    async refreshCurrentView() {
+      if (this.activeView === 'logs') await this.refreshLogs();
+      else await this.refreshAll();
+    },
+
+    async refreshLogs(showMessage = true) {
+      await this.runAction(async () => {
+        const [runtime, audit] = await Promise.all([
+          this.api('/api/logs?limit=500'),
+          this.api('/api/audit?limit=200')
+        ]);
+        const runtimeEntries = Array.isArray(runtime?.entries) ? runtime.entries : [];
+        const auditEntries = (audit?.events || []).map((event) => ({
+          time: event.time,
+          source: 'audit',
+          level: 'info',
+          message: event.event,
+          fields: event.fields || {}
+        }));
+        this.logEntries = [...runtimeEntries, ...auditEntries].sort((left, right) => new Date(right.time) - new Date(left.time));
+        this.logsLoaded = true;
+        this.lastUpdated = new Date();
+        if (showMessage) this.showNotice(this.t('msg.logsRefreshed'));
+      });
+    },
+
+    logSources() {
+      return [...new Set(this.logEntries.map((entry) => entry.source).filter(Boolean))].sort();
+    },
+
+    filteredLogEntries() {
+      const query = this.logQuery.trim().toLowerCase();
+      return this.logEntries.filter((entry) => {
+        const levelMatches = this.logLevel === 'all' || String(entry.level || 'info').toLowerCase() === this.logLevel;
+        const sourceMatches = this.logSource === 'all' || entry.source === this.logSource;
+        const searchText = `${entry.message || ''} ${entry.source || ''} ${this.logFields(entry.fields)}`.toLowerCase();
+        return levelMatches && sourceMatches && (!query || searchText.includes(query));
+      });
+    },
+
+    logLevelClass(level) {
+      const value = String(level || 'info').toLowerCase();
+      return value === 'error' ? 'error' : value === 'warn' || value === 'warning' ? 'warn' : value === 'info' ? 'ok' : '';
+    },
+
+    logFields(fields) {
+      return fields && Object.keys(fields).length ? JSON.stringify(fields, null, 2) : '';
+    },
+
+    certificateName(certificate) {
+      return certificate?.subjects?.[0] || certificate?.certificateFile?.split('/').pop() || '-';
+    },
+
     listenerLabel(id) {
       const listener = this.listeners().find((candidate) => candidate.id === id);
       if (!listener) return id || '-';
@@ -1616,6 +1968,7 @@ document.addEventListener('alpine:init', () => {
     },
 
     routingRuleHealth(rule) {
+      if (this.routingChangesPending()) return { text: this.t('status.pendingApply'), className: 'warn', detail: '' };
       const route = this.routes().find((candidate) => candidate.id === rule.id);
       return route ? this.routeHealth(route) : { text: this.t('status.unknown'), className: '', detail: '' };
     },
@@ -1812,6 +2165,31 @@ document.addEventListener('alpine:init', () => {
       return Number.isNaN(date.getTime()) ? value : date.toLocaleString(this.locale);
     },
 
+    certificateState(certificate) {
+      const states = {
+        valid: { text: this.t('status.valid'), className: 'ok' },
+        renewal_due: { text: this.t('status.renewalDue'), className: 'warn' },
+        expired: { text: this.t('status.expired'), className: 'error' },
+        not_yet_valid: { text: this.t('status.notYetValid'), className: 'warn' }
+      };
+      return states[certificate?.state] || { text: this.t('status.unknown'), className: '' };
+    },
+
+    formatCertificateRemaining(value) {
+      const seconds = Number(value);
+      if (!Number.isFinite(seconds)) return '-';
+      const absolute = Math.abs(seconds);
+      const unit = absolute >= 86400 ? 'day' : absolute >= 3600 ? 'hour' : 'minute';
+      const divisor = unit === 'day' ? 86400 : unit === 'hour' ? 3600 : 60;
+      const amount = seconds < 0 ? Math.floor(seconds / divisor) : Math.ceil(seconds / divisor);
+      return new Intl.RelativeTimeFormat(this.locale, { numeric: 'always' }).format(amount, unit);
+    },
+
+    shortFingerprint(value) {
+      const fingerprint = String(value || '');
+      return fingerprint ? fingerprint.match(/.{1,2}/g).join(':') : '-';
+    },
+
     translateBackendText(value) {
       const text = String(value ?? '');
       const key = backendMessageKeys.get(text);
@@ -1908,7 +2286,7 @@ function emptySystemForm() {
   return {
     deploymentMode: 'container-socket', adminToken: '', azureEnabled: false,
     azureManageDNS: true, azureManageNSG: true, azureSubscriptionId: '', azureResourceGroup: '',
-    azureDNSZonesText: '', azureNSGName: '', azurePublicIP: '', azureNSGPriority: 120,
+    azureDNSZonesText: '', azureNSGResourceGroup: '', azureNSGName: '', azurePublicIP: '', azureNSGPriority: 120,
     azureNSGSourcesText: '*'
   };
 }
@@ -1963,8 +2341,13 @@ function formatBackendTarget(target) {
 function emptyCertificateForm() {
   return {
     issuer: 'letsencrypt', email: '', staging: false, caDirectory: '', subjectsText: '', dnsProvider: '',
+    renewalWindowRatio: 1 / 3,
     azureSubscriptionId: '', azureResourceGroup: '', azureAuthentication: 'managedidentity',
     azureTenantId: '', azureClientId: '', azureClientSecret: '', clientSecretConfigured: false,
     runtimeOnly: true, persisted: false
   };
+}
+
+function emptyCertificateRuntime() {
+  return { available: false, storageDirectory: '', scannedAt: '', certificates: [], warnings: [], error: '' };
 }

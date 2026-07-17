@@ -3,6 +3,7 @@ package caddy
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -24,13 +25,26 @@ type Manager struct {
 	ready    bool
 	stopping bool
 	lastErr  error
+	stdout   io.Writer
+	stderr   io.Writer
 }
 
 func NewManager(cfg model.GatewayConfig, logger *slog.Logger) *Manager {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Manager{cfg: cfg, logger: logger, done: make(chan error, 1)}
+	return &Manager{cfg: cfg, logger: logger, done: make(chan error, 1), stdout: os.Stdout, stderr: os.Stderr}
+}
+
+func (m *Manager) SetOutput(stdout, stderr io.Writer) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if stdout != nil {
+		m.stdout = stdout
+	}
+	if stderr != nil {
+		m.stderr = stderr
+	}
 }
 
 func (m *Manager) Start(ctx context.Context, initialConfig []byte) error {
@@ -59,8 +73,8 @@ func (m *Manager) Start(ctx context.Context, initialConfig []byte) error {
 	}
 
 	cmd := exec.CommandContext(ctx, m.cfg.CaddyBin, "run", "--config", configPath)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = m.stdout
+	cmd.Stderr = m.stderr
 	cmd.Env = append(os.Environ(), "XDG_DATA_HOME="+m.cfg.CaddyDataDir)
 	if err := cmd.Start(); err != nil {
 		m.mu.Unlock()

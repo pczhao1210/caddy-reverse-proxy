@@ -85,6 +85,30 @@ func TestDefaultsUseLetsEncryptCertificateIssuer(t *testing.T) {
 	}
 }
 
+func TestValidateCertificateConfigRenewalWindowRatio(t *testing.T) {
+	for _, ratio := range []float64{0, 0.5} {
+		if err := ValidateCertificateConfig(model.CertificateConfig{Issuer: "letsencrypt", RenewalWindowRatio: ratio}); err != nil {
+			t.Fatalf("ValidateCertificateConfig() ratio %v error = %v", ratio, err)
+		}
+	}
+	for _, ratio := range []float64{-0.1, 1} {
+		if err := ValidateCertificateConfig(model.CertificateConfig{Issuer: "letsencrypt", RenewalWindowRatio: ratio}); err == nil {
+			t.Fatalf("ValidateCertificateConfig() ratio %v error = nil", ratio)
+		}
+	}
+}
+
+func TestApplyEnvParsesCertificateRenewalWindowRatio(t *testing.T) {
+	t.Setenv("GATEWAY_CERTIFICATE_RENEWAL_WINDOW_RATIO", "0.5")
+	cfg := defaults()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	if cfg.Gateway.Certificate.RenewalWindowRatio != 0.5 {
+		t.Fatalf("RenewalWindowRatio = %v, want 0.5", cfg.Gateway.Certificate.RenewalWindowRatio)
+	}
+}
+
 func TestDefaultsEnableSecurityBaseline(t *testing.T) {
 	cfg := defaults()
 	if !cfg.Security.Enabled || cfg.Security.MaxRequestBodyBytes != 10*1024*1024 {
@@ -173,6 +197,68 @@ func TestApplyEnvParsesAzureDNSZones(t *testing.T) {
 	normalizeConfig(&cfg)
 	if len(cfg.Azure.DNSZones) != 2 || cfg.Azure.DNSZones[0].Name != "example.com" || cfg.Azure.DNSZones[1].ResourceGroup != "other-rg" {
 		t.Fatalf("DNSZones = %#v", cfg.Azure.DNSZones)
+	}
+}
+
+func TestNormalizeConfigUsesDedicatedNSGResourceGroup(t *testing.T) {
+	cfg := defaults()
+	cfg.Azure.ResourceGroup = "dns-rg"
+	cfg.Azure.NetworkSecurityGroupResourceGroup = " network-rg "
+	normalizeConfig(&cfg)
+	if cfg.Azure.NetworkSecurityGroupResourceGroup != "network-rg" {
+		t.Fatalf("NetworkSecurityGroupResourceGroup = %q, want network-rg", cfg.Azure.NetworkSecurityGroupResourceGroup)
+	}
+
+	cfg.Azure.NetworkSecurityGroupResourceGroup = ""
+	normalizeConfig(&cfg)
+	if cfg.Azure.NetworkSecurityGroupResourceGroup != "dns-rg" {
+		t.Fatalf("legacy NetworkSecurityGroupResourceGroup = %q, want dns-rg", cfg.Azure.NetworkSecurityGroupResourceGroup)
+	}
+}
+
+func TestNormalizeConfigUsesMatchingCertificateDNSZone(t *testing.T) {
+	cfg := defaults()
+	cfg.Azure.SubscriptionID = "subscription"
+	cfg.Azure.ResourceGroup = "platform-rg"
+	cfg.Azure.DNSZones = []model.AzureDNSZoneConfig{
+		{Name: "example.com", ResourceGroup: "parent-rg"},
+		{Name: "api.example.com", ResourceGroup: "api-rg"},
+	}
+	cfg.Gateway.Certificate = model.CertificateConfig{
+		Issuer: "letsencrypt", Subjects: []string{"*.api.example.com"},
+		DNSChallenge: model.DNSChallengeConfig{Provider: "azure"},
+	}
+	normalizeConfig(&cfg)
+	if cfg.Gateway.Certificate.DNSChallenge.Azure.SubscriptionID != "subscription" || cfg.Gateway.Certificate.DNSChallenge.Azure.ResourceGroup != "api-rg" {
+		t.Fatalf("certificate Azure defaults = %#v", cfg.Gateway.Certificate.DNSChallenge.Azure)
+	}
+}
+
+func TestNormalizeConfigDoesNotGuessCertificateDNSZone(t *testing.T) {
+	cfg := defaults()
+	cfg.Azure.ResourceGroup = "platform-rg"
+	cfg.Azure.DNSZones = []model.AzureDNSZoneConfig{
+		{Name: "example.com", ResourceGroup: "example-rg"},
+		{Name: "example.net", ResourceGroup: "example-net-rg"},
+	}
+	cfg.Gateway.Certificate = model.CertificateConfig{
+		Issuer: "letsencrypt", Subjects: []string{"unmatched.test"},
+		DNSChallenge: model.DNSChallengeConfig{Provider: "azure"},
+	}
+	normalizeConfig(&cfg)
+	if cfg.Gateway.Certificate.DNSChallenge.Azure.ResourceGroup != "" {
+		t.Fatalf("certificate resource group = %q, want blank", cfg.Gateway.Certificate.DNSChallenge.Azure.ResourceGroup)
+	}
+}
+
+func TestApplyEnvParsesNSGResourceGroup(t *testing.T) {
+	t.Setenv("GATEWAY_AZURE_NSG_RESOURCE_GROUP", "network-rg")
+	cfg := defaults()
+	if err := applyEnv(&cfg); err != nil {
+		t.Fatalf("applyEnv() error = %v", err)
+	}
+	if cfg.Azure.NetworkSecurityGroupResourceGroup != "network-rg" {
+		t.Fatalf("NetworkSecurityGroupResourceGroup = %q, want network-rg", cfg.Azure.NetworkSecurityGroupResourceGroup)
 	}
 }
 

@@ -24,6 +24,7 @@ type fileFormat struct {
 type Store struct {
 	path         string
 	mu           sync.RWMutex
+	staged       bool
 	listeners    []model.Listener
 	backendPools []model.BackendPool
 	routingRules []model.RoutingRule
@@ -184,6 +185,19 @@ func (s *Store) saveLocked() error {
 		return err
 	}
 	return os.Rename(temporaryPath, s.path)
+}
+
+func (s *Store) PersistStaged() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.staged {
+		return nil
+	}
+	if err := s.saveLocked(); err != nil {
+		return err
+	}
+	s.staged = false
+	return nil
 }
 
 func validate(route model.RouteConfig) error {

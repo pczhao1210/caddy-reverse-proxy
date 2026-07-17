@@ -49,6 +49,9 @@ func (s *Server) handleSecuritySettings(w http.ResponseWriter, r *http.Request) 
 		methodNotAllowed(w)
 		return
 	}
+	if s.rejectWhileConfigurationImportPending(w) {
+		return
+	}
 	if s.settingsStore == nil {
 		writeError(w, http.StatusServiceUnavailable, "settings persistence is unavailable")
 		return
@@ -89,13 +92,16 @@ func (s *Server) handleSecuritySettings(w http.ResponseWriter, r *http.Request) 
 	s.audit("settings.security.update", map[string]any{"enabled": candidate.Security.Enabled})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":  settingsResponse(candidate, desired, true),
-		"reconcile": s.reconciler.Sync(r.Context()),
+		"reconcile": s.reconciler.SyncWithoutPendingRoutingChanges(r.Context()),
 	})
 }
 
 func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPut {
 		methodNotAllowed(w)
+		return
+	}
+	if s.rejectWhileConfigurationImportPending(w) {
 		return
 	}
 	if s.settingsStore == nil {
@@ -137,7 +143,7 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 		active.Auth.AdminToken = newToken
 		active.Auth.AdminTokens = nil
 		s.applyLiveConfig(active)
-		reconcile = s.reconciler.Sync(r.Context())
+		reconcile = s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
 	}
 	s.audit("settings.system.update", map[string]any{"deploymentMode": desired.DeploymentMode, "azureEnabled": desired.Azure.Enabled, "tokenRotated": newToken != ""})
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -173,6 +179,13 @@ func (s *Server) handleAzurePermissions(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) desiredSettings() (appconfig.Settings, error) {
+	if draft := s.configurationImportDraftSnapshot(); draft != nil {
+		return draft.Settings, nil
+	}
+	return s.persistedSettings()
+}
+
+func (s *Server) persistedSettings() (appconfig.Settings, error) {
 	fallback := appconfig.SettingsFromConfig(s.configSnapshot())
 	if s.settingsStore == nil {
 		return fallback, nil
@@ -230,6 +243,7 @@ func azureSettingsEqual(left, right model.AzureConfig) bool {
 		left.ResourceGroup == right.ResourceGroup &&
 		left.DNSZoneName == right.DNSZoneName &&
 		slices.Equal(left.DNSZones, right.DNSZones) &&
+		left.NetworkSecurityGroupResourceGroup == right.NetworkSecurityGroupResourceGroup &&
 		left.NetworkSecurityGroupName == right.NetworkSecurityGroupName &&
 		left.PublicIPAddress == right.PublicIPAddress &&
 		left.NSGPriority == right.NSGPriority &&

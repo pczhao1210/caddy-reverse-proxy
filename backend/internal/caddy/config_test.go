@@ -46,7 +46,7 @@ func TestRenderProtectedRouteSkipsAutoHTTPSAndAddsFallback(t *testing.T) {
 	if len(routes) != 3 {
 		t.Fatalf("routes length = %d, want 3", len(routes))
 	}
-	fallback := routes[2].(map[string]any)["handle"].([]any)[0].(map[string]any)
+	fallback := renderedHandler(t, routes[2], "static_response")
 	if fallback["handler"] != "static_response" || fallback["status_code"].(float64) != 401 {
 		t.Fatalf("fallback handler = %#v", fallback)
 	}
@@ -181,7 +181,7 @@ func TestRenderSetsConfiguredUpstreamHostHeader(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	route := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)[0].(map[string]any)
-	handler := route["handle"].([]any)[0].(map[string]any)
+	handler := renderedHandler(t, route, "reverse_proxy")
 	requestHeaders := handler["headers"].(map[string]any)["request"].(map[string]any)
 	set := requestHeaders["set"].(map[string]any)
 	host := set["Host"].([]any)
@@ -216,7 +216,7 @@ func TestRenderManagementHostIsProtected(t *testing.T) {
 	if len(routes) != 3 {
 		t.Fatalf("management route entries = %d, want 3 protected entries", len(routes))
 	}
-	fallback := routes[2].(map[string]any)["handle"].([]any)[0].(map[string]any)
+	fallback := renderedHandler(t, routes[2], "static_response")
 	if fallback["handler"] != "static_response" || fallback["status_code"].(float64) != 401 {
 		t.Fatalf("management fallback handler = %#v", fallback)
 	}
@@ -463,6 +463,48 @@ func TestRenderRejectsMixedUpstreamSchemes(t *testing.T) {
 	}
 }
 
+func TestRenderEnablesAccessLogsWithRouteMetadata(t *testing.T) {
+	renderer := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: ":80", CaddyAdminEndpoint: "http://127.0.0.1:2019", CaddyDataDir: "/data/caddy",
+	}})
+	data, err := renderer.Render([]model.RouteConfig{{
+		ID: "rule-api", Name: "API", Host: "api.example.com", ListenerID: "listener-public", ListenerName: "Public HTTPS",
+		ListenerPort: 443, ListenerProtocol: "https", BackendPoolID: "pool-api", BackendPoolName: "API nodes",
+		Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://api:8080"}},
+	}})
+	if err != nil {
+		t.Fatalf("Render() error = %v", err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	if _, enabled := server["logs"].(map[string]any); !enabled {
+		t.Fatalf("server logs = %#v, want enabled access logs", server["logs"])
+	}
+	handlers := server["routes"].([]any)[0].(map[string]any)["handle"].([]any)
+	fields := make(map[string]any)
+	for _, value := range handlers {
+		handler := value.(map[string]any)
+		if handler["handler"] == "log_append" {
+			fields[handler["key"].(string)] = handler["value"]
+		}
+	}
+	want := map[string]any{
+		"route_id": "rule-api", "route_name": "API", "route_host": "api.example.com",
+		"listener_id": "listener-public", "listener_name": "Public HTTPS", "listener_protocol": "https",
+		"listener_port": "{http.request.local.port}", "backend_pool_id": "pool-api", "backend_pool_name": "API nodes",
+		"upstream_host": "{http.reverse_proxy.upstream.host}", "upstream_duration_ms": "{http.reverse_proxy.upstream.duration_ms}",
+		"upstream_latency_ms": "{http.reverse_proxy.upstream.latency_ms}",
+	}
+	for key, expected := range want {
+		if fields[key] != expected {
+			t.Errorf("access log field %s = %#v, want %#v", key, fields[key], expected)
+		}
+	}
+}
+
 func TestRenderProtectedRouteStripsGatewayCredentials(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{
 		Auth:    model.AuthConfig{AdminToken: "secret", ProtectedRoutes: model.ProtectedRouteConfig{AllowBearerToken: true, AllowAdminTokenHeader: true}},
@@ -480,12 +522,24 @@ func TestRenderProtectedRouteStripsGatewayCredentials(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
-	handler := routes[0].(map[string]any)["handle"].([]any)[0].(map[string]any)
+	handler := renderedHandler(t, routes[0], "reverse_proxy")
 	requestHeaders := handler["headers"].(map[string]any)["request"].(map[string]any)
 	deleted := requestHeaders["delete"].([]any)
 	if len(deleted) != 2 || deleted[0] != "Authorization" || deleted[1] != "X-Admin-Token" {
 		t.Fatalf("deleted request headers = %#v", deleted)
 	}
+}
+
+func renderedHandler(t *testing.T, route any, handlerType string) map[string]any {
+	t.Helper()
+	for _, value := range route.(map[string]any)["handle"].([]any) {
+		handler := value.(map[string]any)
+		if handler["handler"] == handlerType {
+			return handler
+		}
+	}
+	t.Fatalf("handler %q not found in %#v", handlerType, route)
+	return nil
 }
 
 func TestRenderSecurityBaselineBeforeReverseProxy(t *testing.T) {
@@ -538,7 +592,21 @@ func TestRenderSecurityBaselineBeforeReverseProxy(t *testing.T) {
 		t.Fatalf("denied paths = %#v", paths)
 	}
 	proxyHandlers := routes[5].(map[string]any)["handle"].([]any)
-	if len(proxyHandlers) != 2 || proxyHandlers[0].(map[string]any)["handler"] != "request_body" || proxyHandlers[0].(map[string]any)["max_size"].(float64) != 1024 {
+	requestBodyIndex := -1
+	proxyIndex := -1
+	for index, value := range proxyHandlers {
+		handler := value.(map[string]any)
+		if handler["handler"] == "request_body" {
+			requestBodyIndex = index
+			if handler["max_size"].(float64) != 1024 {
+				t.Fatalf("request body handler = %#v", handler)
+			}
+		}
+		if handler["handler"] == "reverse_proxy" {
+			proxyIndex = index
+		}
+	}
+	if requestBodyIndex < 0 || proxyIndex < 0 || requestBodyIndex >= proxyIndex {
 		t.Fatalf("proxy handlers = %#v", proxyHandlers)
 	}
 }
@@ -560,7 +628,12 @@ func TestRenderRouteCanDisableSecurityBaseline(t *testing.T) {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
 	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
-	if len(routes) != 1 || len(routes[0].(map[string]any)["handle"].([]any)) != 1 {
-		t.Fatalf("routes = %#v, want unmodified proxy route", routes)
+	if len(routes) != 1 {
+		t.Fatalf("routes = %#v, want one proxy route", routes)
+	}
+	for _, value := range routes[0].(map[string]any)["handle"].([]any) {
+		if value.(map[string]any)["handler"] == "request_body" {
+			t.Fatalf("routes = %#v, want no request body limit", routes)
+		}
 	}
 }

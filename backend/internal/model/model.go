@@ -209,9 +209,14 @@ func (rule *RoutingRule) UnmarshalJSON(data []byte) error {
 
 type RouteConfig struct {
 	ID               string              `json:"id"`
+	Name             string              `json:"name,omitempty"`
 	Host             string              `json:"host"`
+	ListenerID       string              `json:"listenerId,omitempty"`
+	ListenerName     string              `json:"listenerName,omitempty"`
 	ListenerPort     int                 `json:"listenerPort,omitempty"`
 	ListenerProtocol string              `json:"listenerProtocol,omitempty"`
+	BackendPoolID    string              `json:"backendPoolId,omitempty"`
+	BackendPoolName  string              `json:"backendPoolName,omitempty"`
 	PathPrefix       string              `json:"pathPrefix,omitempty"`
 	Exposure         string              `json:"exposure"`
 	Enabled          bool                `json:"enabled"`

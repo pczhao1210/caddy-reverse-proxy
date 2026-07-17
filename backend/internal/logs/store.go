@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const maxLineBytes = 64 * 1024
+const (
+	maxLineBytes  = 64 * 1024
+	maxStoreBytes = 8 * 1024 * 1024
+)
 
 type Entry struct {
 	Time    time.Time      `json:"time"`
@@ -21,16 +24,30 @@ type Entry struct {
 }
 
 type Store struct {
-	mu      sync.RWMutex
-	entries []Entry
-	limit   int
+	mu          sync.RWMutex
+	entries     []Entry
+	sizes       []int
+	start       int
+	count       int
+	storedBytes int
+	limit       int
+	byteLimit   int
 }
 
 func NewStore(limit int) *Store {
 	if limit <= 0 {
 		limit = 1000
 	}
-	return &Store{entries: make([]Entry, 0, limit), limit: limit}
+	return newStore(limit, maxStoreBytes)
+}
+
+func newStore(limit, byteLimit int) *Store {
+	return &Store{
+		entries:   make([]Entry, limit),
+		sizes:     make([]int, limit),
+		limit:     limit,
+		byteLimit: byteLimit,
+	}
 }
 
 func (s *Store) Add(entry Entry) {
@@ -43,15 +60,26 @@ func (s *Store) Add(entry Entry) {
 	}
 	entry.Source = strings.TrimSpace(entry.Source)
 	entry.Message = strings.TrimSpace(entry.Message)
+	encoded, err := json.Marshal(entry)
+	if err != nil || len(encoded) > s.byteLimit {
+		return
+	}
+	entrySize := len(encoded)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.entries) == s.limit {
-		copy(s.entries, s.entries[1:])
-		s.entries[len(s.entries)-1] = entry
-		return
+	for s.count > 0 && (s.count == s.limit || s.storedBytes+entrySize > s.byteLimit) {
+		s.storedBytes -= s.sizes[s.start]
+		s.entries[s.start] = Entry{}
+		s.sizes[s.start] = 0
+		s.start = (s.start + 1) % s.limit
+		s.count--
 	}
-	s.entries = append(s.entries, entry)
+	index := (s.start + s.count) % s.limit
+	s.entries[index] = entry
+	s.sizes[index] = entrySize
+	s.storedBytes += entrySize
+	s.count++
 }
 
 func (s *Store) ReadLast(limit int) []Entry {
@@ -60,11 +88,12 @@ func (s *Store) ReadLast(limit int) []Entry {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if limit > len(s.entries) {
-		limit = len(s.entries)
+	if limit > s.count {
+		limit = s.count
 	}
 	entries := make([]Entry, 0, limit)
-	for index := len(s.entries) - 1; index >= len(s.entries)-limit; index-- {
+	for offset := 0; offset < limit; offset++ {
+		index := (s.start + s.count - 1 - offset + s.limit) % s.limit
 		entries = append(entries, s.entries[index])
 	}
 	return entries
@@ -75,30 +104,42 @@ func (s *Store) Writer(source, level string) io.Writer {
 }
 
 type lineWriter struct {
-	mu      sync.Mutex
-	store   *Store
-	source  string
-	level   string
-	pending []byte
+	mu       sync.Mutex
+	store    *Store
+	source   string
+	level    string
+	pending  []byte
+	dropping bool
 }
 
 func (w *lineWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	w.pending = append(w.pending, data...)
-	for {
-		newline := bytes.IndexByte(w.pending, '\n')
+	written := len(data)
+	for len(data) > 0 {
+		newline := bytes.IndexByte(data, '\n')
+		part := data
+		if newline >= 0 {
+			part = data[:newline]
+		}
+		if !w.dropping {
+			available := maxLineBytes - len(w.pending)
+			if len(part) > available {
+				w.pending = append(w.pending, part[:available]...)
+				w.dropping = true
+			} else {
+				w.pending = append(w.pending, part...)
+			}
+		}
 		if newline < 0 {
 			break
 		}
-		w.addLine(w.pending[:newline])
-		w.pending = w.pending[newline+1:]
-	}
-	if len(w.pending) > maxLineBytes {
-		w.addLine(w.pending[:maxLineBytes])
+		w.addLine(w.pending)
 		w.pending = w.pending[:0]
+		w.dropping = false
+		data = data[newline+1:]
 	}
-	return len(data), nil
+	return written, nil
 }
 
 func (w *lineWriter) addLine(line []byte) {

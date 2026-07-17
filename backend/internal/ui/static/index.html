@@ -335,7 +335,7 @@
             <div class="panel-header"><h2 x-text="t('sections.runtimeLogs')"></h2><span class="pill" x-text="filteredLogEntries().length"></span></div>
             <div class="logs-toolbar">
               <label><span x-text="t('forms.logLevel')"></span><select x-model="logLevel"><option value="all" x-text="t('logs.allLevels')"></option><option value="error">ERROR</option><option value="warn">WARN</option><option value="info">INFO</option><option value="debug">DEBUG</option></select></label>
-              <label><span x-text="t('forms.logSource')"></span><select x-model="logSource"><option value="all" x-text="t('logs.allSources')"></option><template x-for="source in logSources()" :key="source"><option :value="source" x-text="source"></option></template></select></label>
+              <label><span x-text="t('forms.logSource')"></span><select x-model="logSource"><option value="routing" x-text="t('logs.routingActivity')"></option><option value="all" x-text="t('logs.allSources')"></option><template x-for="source in logSources()" :key="source"><option :value="source" x-text="source"></option></template></select></label>
               <label><span x-text="t('forms.logSearch')"></span><input type="search" x-model.debounce.150ms="logQuery" :placeholder="t('logs.searchPlaceholder')"></label>
               <button class="secondary-button" type="button" :disabled="busy()" @click="refreshLogs()" x-text="t('actions.refreshLogs')"></button>
             </div>
@@ -348,7 +348,7 @@
                     <code x-text="entry.source || '-'"></code>
                     <span class="pill" :class="logLevelClass(entry.level)" x-text="String(entry.level || 'info').toUpperCase()"></span>
                   </header>
-                  <p x-text="entry.message || '-'"></p>
+                  <p x-text="logMessage(entry)"></p>
                   <details class="log-fields" x-show="logFields(entry.fields)">
                     <summary x-text="t('logs.fields')"></summary>
                     <pre x-text="logFields(entry.fields)"></pre>

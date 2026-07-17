@@ -137,6 +137,7 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 
 	server := map[string]any{
 		"listen": listen,
+		"logs":   map[string]any{},
 		"routes": caddyRoutes,
 	}
 	if len(skipAutoHTTPS) > 0 || len(skipAutoCertificates) > 0 {
@@ -223,7 +224,7 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.
 
 	if !route.Protected {
 		handler := reverseProxyHandler(upstreams, useTLS, nil, route.Headers)
-		entry := map[string]any{"match": []any{match}, "handle": proxyHandlers(maxRequestBodyBytes, handler), "terminal": true}
+		entry := map[string]any{"match": []any{match}, "handle": proxyHandlers(route, maxRequestBodyBytes, handler), "terminal": true}
 		return append(securityEntries, entry), nil
 	}
 
@@ -236,7 +237,7 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.
 	}
 	fallback := map[string]any{
 		"match":    []any{match},
-		"handle":   []any{map[string]any{"handler": "static_response", "status_code": fallbackStatus, "body": fallbackBody}},
+		"handle":   routeLogHandlers(route, map[string]any{"handler": "static_response", "status_code": fallbackStatus, "body": fallbackBody}),
 		"terminal": true,
 	}
 	if len(policies) == 0 {
@@ -250,7 +251,7 @@ func renderRoute(route model.RouteConfig, auth model.AuthConfig, security model.
 		headerMatch := cloneMatch(match)
 		headerMatch["header"] = map[string]any{header.name: []string{header.value}}
 		handler := reverseProxyHandler(upstreams, useTLS, stripHeaders, route.Headers)
-		entries = append(entries, map[string]any{"match": []any{headerMatch}, "handle": proxyHandlers(maxRequestBodyBytes, handler), "terminal": true})
+		entries = append(entries, map[string]any{"match": []any{headerMatch}, "handle": proxyHandlers(route, maxRequestBodyBytes, handler), "terminal": true})
 	}
 	entries = append(entries, fallback)
 	return entries, nil
@@ -274,7 +275,7 @@ func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfi
 	if len(blockedCIDRs) > 0 {
 		match := cloneMatch(baseMatch)
 		match["remote_ip"] = map[string]any{"ranges": blockedCIDRs}
-		entries = append(entries, securityRejection(match, 403))
+		entries = append(entries, securityRejection(route, match, 403))
 	}
 	for _, allowedCIDRs := range [][]string{security.AllowedCIDRs, route.Security.AllowedCIDRs} {
 		if len(allowedCIDRs) == 0 {
@@ -282,19 +283,19 @@ func renderSecurityEntries(route model.RouteConfig, security model.SecurityConfi
 		}
 		match := cloneMatch(baseMatch)
 		match["not"] = []any{map[string]any{"remote_ip": map[string]any{"ranges": allowedCIDRs}}}
-		entries = append(entries, securityRejection(match, 403))
+		entries = append(entries, securityRejection(route, match, 403))
 	}
 	deniedMethods := appendUnique(security.DeniedMethods, route.Security.AdditionalDeniedMethods...)
 	if len(deniedMethods) > 0 {
 		match := cloneMatch(baseMatch)
 		match["method"] = deniedMethods
-		entries = append(entries, securityRejection(match, 405))
+		entries = append(entries, securityRejection(route, match, 405))
 	}
 	deniedPaths := appendUnique(security.DeniedPathPrefixes, route.Security.AdditionalDeniedPathPrefixes...)
 	if paths := restrictedPathMatchers(route.PathPrefix, deniedPaths); len(paths) > 0 {
 		match := cloneMatch(baseMatch)
 		match["path"] = paths
-		entries = append(entries, securityRejection(match, 403))
+		entries = append(entries, securityRejection(route, match, 403))
 	}
 	return entries, maxRequestBodyBytes, nil
 }
@@ -313,14 +314,14 @@ func routeMatch(route model.RouteConfig) map[string]any {
 	return match
 }
 
-func securityRejection(match map[string]any, status int) map[string]any {
+func securityRejection(route model.RouteConfig, match map[string]any, status int) map[string]any {
 	return map[string]any{
 		"match": []any{match},
-		"handle": []any{map[string]any{
+		"handle": routeLogHandlers(route, map[string]any{
 			"handler":     "static_response",
 			"status_code": status,
 			"body":        "request blocked by gateway security policy\n",
-		}},
+		}),
 		"terminal": true,
 	}
 }
@@ -414,12 +415,55 @@ func headerNameIn(name string, names []string) bool {
 	return false
 }
 
-func proxyHandlers(maxRequestBodyBytes int64, proxy map[string]any) []any {
-	handlers := make([]any, 0, 2)
+func proxyHandlers(route model.RouteConfig, maxRequestBodyBytes int64, proxy map[string]any) []any {
+	handlers := routeLogHandlers(route)
 	if maxRequestBodyBytes > 0 {
 		handlers = append(handlers, map[string]any{"handler": "request_body", "max_size": maxRequestBodyBytes})
 	}
-	return append(handlers, proxy)
+	handlers = append(handlers,
+		map[string]any{"handler": "log_append", "key": "upstream_host", "value": "{http.reverse_proxy.upstream.host}"},
+		map[string]any{"handler": "log_append", "key": "upstream_duration_ms", "value": "{http.reverse_proxy.upstream.duration_ms}"},
+		map[string]any{"handler": "log_append", "key": "upstream_latency_ms", "value": "{http.reverse_proxy.upstream.latency_ms}"},
+		proxy,
+	)
+	return handlers
+}
+
+func routeLogHandlers(route model.RouteConfig, final ...map[string]any) []any {
+	listenerProtocol := strings.ToLower(strings.TrimSpace(route.ListenerProtocol))
+	if listenerProtocol == "" {
+		if route.HTTPS {
+			listenerProtocol = "https"
+		} else {
+			listenerProtocol = "http"
+		}
+	}
+	fields := []struct {
+		key   string
+		value string
+	}{
+		{key: "route_id", value: route.ID},
+		{key: "route_name", value: route.Name},
+		{key: "route_host", value: route.Host},
+		{key: "route_path", value: route.PathPrefix},
+		{key: "listener_id", value: route.ListenerID},
+		{key: "listener_name", value: route.ListenerName},
+		{key: "listener_protocol", value: listenerProtocol},
+		{key: "listener_port", value: "{http.request.local.port}"},
+		{key: "backend_pool_id", value: route.BackendPoolID},
+		{key: "backend_pool_name", value: route.BackendPoolName},
+	}
+	handlers := make([]any, 0, len(fields)+len(final))
+	for _, field := range fields {
+		if field.value == "" {
+			continue
+		}
+		handlers = append(handlers, map[string]any{"handler": "log_append", "key": field.key, "value": field.value})
+	}
+	for _, handler := range final {
+		handlers = append(handlers, handler)
+	}
+	return handlers
 }
 
 func uniqueHeaderNames(policies []headerPolicy) []string {

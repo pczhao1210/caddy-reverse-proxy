@@ -315,6 +315,9 @@ func TestRoutingResourcesCompilePersistAndProtectReferences(t *testing.T) {
 	if len(compiled) != 1 || compiled[0].ListenerPort != 443 || compiled[0].ListenerProtocol != "https" {
 		t.Fatalf("compiled route = %#v", compiled)
 	}
+	if compiled[0].Name != rule.Name || compiled[0].ListenerID != listener.ID || compiled[0].ListenerName != listener.Name || compiled[0].BackendPoolID != pool.ID || compiled[0].BackendPoolName != pool.Name {
+		t.Fatalf("compiled route metadata = %#v", compiled[0])
+	}
 	if len(compiled[0].Upstreams) != 2 || compiled[0].Upstreams[1].URL != "https://app.internal:8443" {
 		t.Fatalf("compiled upstreams = %#v", compiled[0].Upstreams)
 	}

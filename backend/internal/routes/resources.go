@@ -670,9 +670,14 @@ func (s *Store) rebuildRoutesLocked() error {
 		}
 		route := model.RouteConfig{
 			ID:               rule.ID,
+			Name:             rule.Name,
 			Host:             listener.Hostname,
+			ListenerID:       listener.ID,
+			ListenerName:     listener.Name,
 			ListenerPort:     listener.Port,
 			ListenerProtocol: listener.Protocol,
+			BackendPoolID:    pool.ID,
+			BackendPoolName:  pool.Name,
 			PathPrefix:       rule.PathPrefix,
 			Exposure:         rule.Exposure,
 			Enabled:          rule.Enabled,

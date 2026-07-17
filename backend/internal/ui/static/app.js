@@ -446,6 +446,7 @@ const messages = {
     'routes.pendingApply': 'Route changes are saved but not active. Finish editing, then use Apply pending changes in the top-right corner.',
     'logs.allLevels': 'All levels',
     'logs.allSources': 'All sources',
+    'logs.routingActivity': 'Routing activity',
     'logs.time': 'Time',
     'logs.level': 'Level',
     'logs.source': 'Source',
@@ -872,6 +873,7 @@ const messages = {
     'routes.pendingApply': '路由更改已保存但尚未生效。完成编辑后，请点击右上角“应用待处理更改”。',
     'logs.allLevels': '全部级别',
     'logs.allSources': '全部来源',
+    'logs.routingActivity': '路由活动',
     'logs.time': '时间',
     'logs.level': '级别',
     'logs.source': '来源',
@@ -956,7 +958,7 @@ document.addEventListener('alpine:init', () => {
     logEntries: [],
     logsLoaded: false,
     logLevel: 'all',
-    logSource: 'all',
+    logSource: 'routing',
     logQuery: '',
     configurationFileName: '',
     configurationImportResult: null,
@@ -1934,14 +1936,46 @@ document.addEventListener('alpine:init', () => {
       return [...new Set(this.logEntries.map((entry) => entry.source).filter(Boolean))].sort();
     },
 
+    isAccessLog(entry) {
+      return String(entry.source || '').includes('http.log.access');
+    },
+
+    isRoutingLog(entry) {
+      const source = String(entry.source || '');
+      if (this.isAccessLog(entry)) return true;
+      if (source === 'gateway/reconcile') return ['error', 'warn', 'warning'].includes(String(entry.level || '').toLowerCase());
+      if (source !== 'audit') return false;
+      return /^(route\.|listener\.|backend-pool\.|routing-rule\.|reconcile\.|configuration\.import\.)/.test(String(entry.message || ''));
+    },
+
     filteredLogEntries() {
       const query = this.logQuery.trim().toLowerCase();
       return this.logEntries.filter((entry) => {
         const levelMatches = this.logLevel === 'all' || String(entry.level || 'info').toLowerCase() === this.logLevel;
-        const sourceMatches = this.logSource === 'all' || entry.source === this.logSource;
-        const searchText = `${entry.message || ''} ${entry.source || ''} ${this.logFields(entry.fields)}`.toLowerCase();
+        const sourceMatches = this.logSource === 'all' || (this.logSource === 'routing' ? this.isRoutingLog(entry) : entry.source === this.logSource);
+        const searchText = `${this.logMessage(entry)} ${entry.source || ''} ${this.logFields(entry.fields)}`.toLowerCase();
         return levelMatches && sourceMatches && (!query || searchText.includes(query));
       });
+    },
+
+    logMessage(entry) {
+      if (!this.isAccessLog(entry)) return entry.message || '-';
+      const fields = entry.fields || {};
+      const request = fields.request || {};
+      const client = request.client_ip || request.remote_ip || '-';
+      const method = request.method || '-';
+      const target = `${request.host || fields.route_host || ''}${request.uri || ''}` || '-';
+      const protocol = String(fields.listener_protocol || '').toUpperCase();
+      const endpoint = `${protocol || '?'}:${fields.listener_port || '?'}`;
+      const listener = fields.listener_name ? `${fields.listener_name} (${endpoint})` : endpoint;
+      const route = fields.route_name ? `${fields.route_name} (${fields.route_id || '-'})` : fields.route_id || fields.route_host || '-';
+      const backend = fields.backend_pool_name && fields.upstream_host
+        ? `${fields.backend_pool_name} (${fields.upstream_host})`
+        : fields.upstream_host || fields.backend_pool_name || '-';
+      const status = fields.status ?? '-';
+      const duration = Number(fields.duration);
+      const durationText = Number.isFinite(duration) ? `${duration * 1000 < 10 ? (duration * 1000).toFixed(1) : (duration * 1000).toFixed(0)} ms` : '-';
+      return `${client} · ${method} ${target} → ${listener} → ${route} → ${backend} · ${status} · ${durationText}`;
     },
 
     logLevelClass(level) {

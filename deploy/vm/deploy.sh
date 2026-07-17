@@ -6,7 +6,7 @@ if ((BASH_VERSINFO[0] < 4)); then
   exit 1
 fi
 
-IMAGE=${IMAGE:-pczhao1210/caddy-reverse-proxy@sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e03030aa94c52}
+IMAGE=${IMAGE:-pczhao1210/caddy-reverse-proxy:latest}
 DEPLOY_MODE=${DEPLOY_MODE:-}
 DEFAULT_LOCATION=${LOCATION:-japaneast}
 DEFAULT_VM_NAME=${VM_NAME:-caddy-gateway}

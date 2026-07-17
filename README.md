@@ -37,7 +37,7 @@ Start the VM profile directly from the repository:
 ./start.sh start
 ```
 
-The script pulls `pczhao1210/caddy-reverse-proxy:latest` when it is missing and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state. `start.sh` requires Docker to be available; use the interactive local deployment mode below when Docker is not installed yet.
+The script pulls `pczhao1210/caddy-reverse-proxy:latest` before every startup and starts exactly one gateway container. It publishes 80/443 publicly, binds the Console to `127.0.0.1:8080`, and persists all state under `~/docker_files/caddy-reverse-proxy`. When `.env` does not contain a custom admin token, the script generates one, prints it once at startup, and stores it with the persisted state. `start.sh` requires Docker to be available; use the interactive local deployment mode below when Docker is not installed yet.
 
 Open `http://127.0.0.1:8080`, sign in with that token, then configure routes, security, settings, and certificates in the Console. Security and token changes apply immediately. Deployment and Azure integration changes are staged for restart because they affect startup-time clients and topology; the launcher must still provide the selected Docker network, socket, and port mappings. To request `*.example.com`, open **Certificates**, add `*.example.com` and `example.com` as subjects, select Azure DNS, and provide the Azure authentication settings. The apex subject is separate because a wildcard does not cover `example.com` itself.
 
@@ -56,7 +56,7 @@ Other lifecycle commands accept either form, such as `build` or `--build`:
 ./start.sh restore
 ```
 
-`build` and `push` default to `pczhao1210/caddy-reverse-proxy:latest`; set `IMAGE` or `PUSH_IMAGE` to publish another repository or tag. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image, network, and path overrides.
+`build` and `push` use `pczhao1210/caddy-reverse-proxy:latest` by default. Set `IMAGE` or `PUSH_IMAGE` to select another repository; `start.sh` always replaces any supplied tag or digest with `latest`. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image repository, network, and path overrides.
 
 The interactive deployment script supports two modes: create a standalone Azure VM, or deploy only the gateway container on the current machine. Azure mode requires Azure Cloud Shell or local Bash 4+ with Azure CLI; local mode requires Bash 4+ and checks Docker. It can offer to install missing Docker on Debian/Ubuntu after confirmation. It can also explain and offer to repair a stopped service or missing access to the standard socket. Choose one block below; each downloads the script to a temporary file and runs it only after a successful download:
 
@@ -78,7 +78,7 @@ test "$status" -eq 0
 
 Select the first mode to create Azure infrastructure. It selects the subscription, region, VNet, subnet, VM size, and OS disk; creates a static public IP, NSG, NIC, managed identity, and Ubuntu VM; installs Docker; and starts the gateway. Select the second mode to deploy on the current host. It reuses `start.sh` from a checkout or installs the minimal launcher files under `~/caddy-reverse-proxy`, then starts only the container without changing Azure infrastructure or DNS.
 
-From a local clone, use `make azure-vm-deploy` or `make container-deploy`. Set `IMAGE` to override the digest-pinned image. Azure mode supports `ROLLBACK_ON_ERROR=false`; local mode supports the same `CONTAINER_NAME`, `DATA_DIR`, port, and `DOCKER_NETWORKS` overrides as `start.sh`. See [docs/deployment.md](docs/deployment.md) for permissions, persistence, and network constraints.
+From a local clone, use `make azure-vm-deploy` or `make container-deploy`. The deployment image defaults to `pczhao1210/caddy-reverse-proxy:latest`; set `IMAGE` to override it. Azure mode supports `ROLLBACK_ON_ERROR=false`; local mode supports the same `CONTAINER_NAME`, `DATA_DIR`, port, and `DOCKER_NETWORKS` overrides as `start.sh`. See [docs/deployment.md](docs/deployment.md) for permissions, persistence, and network constraints.
 
 ## Repository layout
 

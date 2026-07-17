@@ -1,9 +1,21 @@
 #!/bin/sh
 set -eu
 
+latest_image() {
+  image_repository=${1%%@*}
+  image_name=${image_repository##*/}
+  case "$image_name" in
+    *:*) image_repository=${image_repository%:*} ;;
+  esac
+  printf '%s:latest\n' "$image_repository"
+}
+
 ROOT_DIR=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
-IMAGE=${IMAGE:-pczhao1210/caddy-reverse-proxy:latest}
+IMAGE=$(latest_image "${IMAGE:-pczhao1210/caddy-reverse-proxy}")
 PUSH_IMAGE=${PUSH_IMAGE:-}
+if [ -n "$PUSH_IMAGE" ]; then
+  PUSH_IMAGE=$(latest_image "$PUSH_IMAGE")
+fi
 CONTAINER_NAME=${CONTAINER_NAME:-caddy-reverse-proxy}
 DATA_DIR=${DATA_DIR:-"$HOME/docker_files/caddy-reverse-proxy"}
 HTTP_PORT=${HTTP_PORT:-80}
@@ -36,8 +48,8 @@ Commands:
   help, --help        Show this help
 
 Environment:
-  IMAGE             Gateway image (default: pczhao1210/caddy-reverse-proxy:latest)
-  PUSH_IMAGE        Docker Hub image name (default: logged-in-user/IMAGE)
+  IMAGE             Gateway repository (tag is always latest)
+  PUSH_IMAGE        Docker Hub repository (tag is always latest; default: IMAGE)
   ENV_FILE          Optional environment file (default: .env, then .env.example)
   CONTAINER_NAME    Container name (default: caddy-reverse-proxy)
   DATA_DIR          Persistent data (default: ~/docker_files/caddy-reverse-proxy)
@@ -65,15 +77,15 @@ require_docker() {
 }
 
 ensure_image() {
-  if docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    return
-  fi
   case "$IMAGE" in
     */*)
       printf 'Pulling %s...\n' "$IMAGE"
       docker pull "$IMAGE"
       ;;
     *)
+      if docker image inspect "$IMAGE" >/dev/null 2>&1; then
+        return
+      fi
       printf 'Building %s...\n' "$IMAGE"
       docker build -f "$ROOT_DIR/backend/Dockerfile" -t "$IMAGE" "$ROOT_DIR"
       ;;
@@ -163,15 +175,14 @@ wait_for_readiness() {
 }
 
 validate_docker_hub_image() {
-  image_without_digest=${PUSH_IMAGE%%@*}
-  first_component=${image_without_digest%%/*}
+  first_component=${PUSH_IMAGE%%/*}
 
-  [ "$first_component" != "$image_without_digest" ] || fail \
+  [ "$first_component" != "$PUSH_IMAGE" ] || fail \
     "Docker Hub image must include a username or organization, for example: pczhao1210/caddy-reverse-proxy:latest"
 
   case "$first_component" in
     docker.io|index.docker.io)
-      docker_hub_path=${image_without_digest#*/}
+      docker_hub_path=${PUSH_IMAGE#*/}
       case "$docker_hub_path" in
         */*) ;;
         *) fail "Docker Hub image must include a username or organization." ;;

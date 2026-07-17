@@ -112,7 +112,7 @@ The default Ubuntu 24.04 image resolves to x64, Hyper-V Generation 2 in Japan Ea
 
 Azure Run Command first waits for cloud-init to finish, then allows up to five minutes for gateway readiness. On timeout it prints the container state and the last 100 Docker log lines before rollback begins.
 
-The default container image is pinned by digest so repeated deployments do not silently move to a different build. Set `IMAGE=<repository:tag-or-digest>` when invoking the script to use another image.
+The default container image is `pczhao1210/caddy-reverse-proxy:latest`, so each deployment resolves the current published build. Set `IMAGE=<repository:tag-or-digest>` when invoking the script to use another image in Azure mode.
 
 `Standard_B1s` has half the memory and half the baseline CPU performance of `Standard_B1ms`. It can run this prebuilt gateway at very low traffic, but leaves little headroom for Ubuntu, Docker, certificate operations, traffic spikes, or route growth. Monitor available memory, OOM events, CPU credits, and response latency; use `Standard_B1ms` when the gateway is internet-facing or expected to grow.
 
@@ -150,7 +150,7 @@ The same interactive script supports a container-only mode for an existing Linux
 make container-deploy
 ```
 
-Inside a checkout, this mode delegates to the existing `start.sh`. Otherwise it downloads `start.sh`, `.env.example`, and `config/platform.example.json` into `~/caddy-reverse-proxy` by default, then starts the container. The download uses a temporary staging directory and refuses to overwrite an existing incomplete or customized launcher directory. Override the launcher location with `LOCAL_INSTALL_DIR`; `IMAGE`, `CONTAINER_NAME`, `DATA_DIR`, `HTTP_PORT`, `HTTPS_PORT`, `MANAGEMENT_PORT`, and `DOCKER_NETWORKS` are passed through to `start.sh`. `DATA_DIR` must remain below `~/docker_files`; the mode preserves `/data` there and makes no infrastructure changes.
+Inside a checkout, this mode delegates to the existing `start.sh`. Otherwise it downloads `start.sh`, `.env.example`, and `config/platform.example.json` into `~/caddy-reverse-proxy` by default, then starts the container. The download uses a temporary staging directory and refuses to overwrite an existing incomplete or customized launcher directory. Override the launcher location with `LOCAL_INSTALL_DIR`; `IMAGE`, `CONTAINER_NAME`, `DATA_DIR`, `HTTP_PORT`, `HTTPS_PORT`, `MANAGEMENT_PORT`, and `DOCKER_NETWORKS` are passed through to `start.sh`. The launcher normalizes the image repository to the `latest` tag and pulls it before every startup. `DATA_DIR` must remain below `~/docker_files`; the mode preserves `/data` there and makes no infrastructure changes.
 
 If the Docker daemon is running but the current user cannot access `/var/run/docker.sock`, the script explains that the `docker` group grants root-equivalent host access. After confirmation, it adds the user to that group and tries to continue this deployment in a temporary group session. If `sg` is unavailable or that session fails, the script stops and asks the user to sign out, sign back in, and rerun it. Later Docker commands in the original terminal may require the same sign-in refresh.
 

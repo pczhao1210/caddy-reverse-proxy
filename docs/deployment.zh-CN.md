@@ -112,7 +112,7 @@ bash deploy/vm/deploy.sh
 
 Azure Run Command 会先等待 cloud-init 完成，再给网关最多 5 分钟进入就绪状态。超时时会输出容器状态和最近 100 行 Docker 日志，然后开始回滚。
 
-默认容器镜像固定到 digest，因此重复部署不会在无提示的情况下切换构建版本。调用脚本时设置 `IMAGE=<仓库:tag或digest>` 可改用其他镜像。
+默认容器镜像为 `pczhao1210/caddy-reverse-proxy:latest`，因此每次部署都会解析当前已发布版本。在 Azure 模式中调用脚本时，可设置 `IMAGE=<仓库:tag或digest>` 改用其他镜像。
 
 `Standard_B1s` 的内存和 CPU 基线性能均只有 `Standard_B1ms` 的一半。极低流量时可以运行当前预构建网关，但给 Ubuntu、Docker、证书操作、流量突发和路由增长留下的余量很小。应监控可用内存、OOM、CPU credits 和响应延迟；网关面向公网或预期增长时使用 `Standard_B1ms`。
 
@@ -150,7 +150,7 @@ DNS -> VM Standard 静态公网 IP -> Caddy :80/:443/:自定义Listener
 make container-deploy
 ```
 
-在仓库内运行时，该模式直接委托给现有 `start.sh`；否则默认把 `start.sh`、`.env.example` 和 `config/platform.example.json` 下载到 `~/caddy-reverse-proxy`，再启动容器。下载使用临时 staging 目录，并拒绝覆盖已有的残缺或自定义 launcher 目录。可通过 `LOCAL_INSTALL_DIR` 修改 launcher 位置；`IMAGE`、`CONTAINER_NAME`、`DATA_DIR`、`HTTP_PORT`、`HTTPS_PORT`、`MANAGEMENT_PORT` 和 `DOCKER_NETWORKS` 会原样传给 `start.sh`。`DATA_DIR` 必须位于 `~/docker_files` 下；`/data` 会持久化到该目录，整个过程不修改基础设施。
+在仓库内运行时，该模式直接委托给现有 `start.sh`；否则默认把 `start.sh`、`.env.example` 和 `config/platform.example.json` 下载到 `~/caddy-reverse-proxy`，再启动容器。下载使用临时 staging 目录，并拒绝覆盖已有的残缺或自定义 launcher 目录。可通过 `LOCAL_INSTALL_DIR` 修改 launcher 位置；`IMAGE`、`CONTAINER_NAME`、`DATA_DIR`、`HTTP_PORT`、`HTTPS_PORT`、`MANAGEMENT_PORT` 和 `DOCKER_NETWORKS` 会原样传给 `start.sh`。launcher 会把镜像仓库归一化为 `latest` tag，并在每次启动前拉取。`DATA_DIR` 必须位于 `~/docker_files` 下；`/data` 会持久化到该目录，整个过程不修改基础设施。
 
 Docker daemon 已运行但当前用户无权访问 `/var/run/docker.sock` 时，脚本会说明 `docker` 组具有等同 root 的主机权限，并在确认后把当前用户加入该组，再尝试通过临时组会话继续本次部署。如果系统没有 `sg` 或临时组会话失败，脚本会停止并要求注销、重新登录后再次运行。原终端中的后续 Docker 命令同样可能要在重新登录后才能使用。
 

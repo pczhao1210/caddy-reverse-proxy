@@ -36,6 +36,13 @@ This document tracks what is currently implemented and what still needs to be co
 
 ## Further Hardening
 
+### Dependency Upgrade (2026-09-22)
+
+- Local implementation complete: Go 1.26.8, Caddy 2.11.4, xcaddy 0.4.7, aligned CertMagic 0.25.4, Azure SDK and Go security dependencies, Alpine Linux 3.22.6, Alpine.js 3.17.4, socket proxy v0.5.0 and sample httpbin 2.25.0. Base/companion images are digest-pinned; Azure DNS 0.6.0 is retained. HTTPS upstream Host compatibility is explicitly preserved with regression coverage.
+- Verification passed: final image build, full Go race/vet with the real Caddy binary, Node 6/6, browser login/forms/certificate archive fixtures and 401/503 checks at desktop/390px, Compose rendering and isolated read-only socket proxy/httpbin tests. Control-plane source scanning found no reachable vulnerabilities; the gateway OS image scan found none.
+- Security release gate remains open: Caddy CEL/OpenPGP advisories, socket proxy OpenSSL findings, and the sample httpbin's older Go toolchain. See [the dependency baseline](operations.md#dependency-upgrade-baseline-2026-09-22) for versions, evidence and limitations. No deployment, real Azure/public ACME or production archive was attempted.
+- Next smallest step: resolve or explicitly assess the upstream exceptions and rescan exact artifacts before authorized staging. A successful upgrade/build is not a claim of zero vulnerabilities.
+
 ### Certificate Lifecycle Remediation (2026-09-22)
 
 - Implemented active-policy versus historical/unknown inventory, independent estimated validity windows, bounded recent issuance/renewal events, and confirmed reversible archive with runtime, TLS, path, file-identity, configuration-lock and CertMagic storage-lock checks.
@@ -76,4 +83,4 @@ Certificate policy is still managed globally by subject rather than as a separat
 
 ## Recommended Next Milestone
 
-Promote Entra ID/OIDC management auth and CI-backed E2E coverage next. The gateway now has the operational loop in place: deploy a container, bind a route, reconcile network state, obtain HTTPS, audit the change, and show health/error state in the UI.
+Close the dependency security release gates above before production rollout. Then promote Entra ID/OIDC management auth and CI-backed E2E coverage. The gateway now has the operational loop in place: deploy a container, bind a route, reconcile network state, obtain HTTPS, audit the change, and show health/error state in the UI.

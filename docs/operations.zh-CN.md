@@ -131,6 +131,33 @@ make docker-push
 
 发布到其他仓库或不可变 tag 时覆盖 `IMAGE`。
 
+## 依赖升级基线（2026-09-22）
+
+| 组件 | 选定版本 |
+|---|---|
+| Go 构建/测试工具链 | 1.26.8 |
+| Caddy / xcaddy / Azure DNS 插件 | 2.11.4 / 0.4.7 / 0.6.0 |
+| 控制平面与 Caddy 的 CertMagic | 0.25.4 |
+| Azure azcore / azidentity | 1.23.1 / 1.14.1 |
+| `x/crypto` / `x/net` / `x/text` | 0.57.0 / 0.59.0 / 0.42.0 |
+| 网关运行时 Alpine Linux / UI Alpine.js | 3.22.6 / 3.17.4 |
+| Docker socket proxy / 示例 go-httpbin | v0.5.0 / 2.25.0 |
+
+构建基础镜像与附属镜像均固定 tag 和 registry digest。控制平面的 `go.mod` 与 xcaddy 生成的模块依赖图相互独立，必须分别升级和扫描。Dockerfile 还固定了 Chi、compress、OpenTelemetry 和 gRPC 的安全修复版本，但没有锁定每个间接构建依赖。UI vendor 声明记录了 npm 来源及文件哈希。
+
+Caddy 2.11 改变了 HTTPS 上游的默认 Host 行为。渲染器现在显式保留入口 Host 以维持兼容；用户显式设置的 Host 仍优先，TLS 验证保持启用。控制平面与 Caddy 的 CertMagic 版本保持一致，因为证书归档依赖其原生存储锁。后续升级应同步更新运行时版本断言，并重跑存储锁与真实 Caddy 测试。
+
+本地验证通过：全量 Go race 与 vet，真实 Caddy HTTP/TLS/鉴权/Host/活动配置回归，Node 测试 6/6，以及 Alpine 3.17.4 浏览器 fixture 的登录、嵌套表单、证书筛选/归档确认、401/503 处理、桌面和 390px 布局。所有 Compose 文件渲染通过。隔离 socket proxy 使用模拟 Unix socket，允许 GET containers/info/networks，拒绝 POST create 和 GET secrets；示例 httpbin 健康与 GET 检查通过。未使用现有网关或真实 Docker socket。
+
+安全结果是指定日期的快照，**不代表已通过生产安全发布门槛**：
+
+- `govulncheck` 1.8.0 对 `./cmd/server` 未发现可达或已导入包漏洞，仍有仅模块级的 OpenPGP 告警。Trivy 0.74.0 对最终网关镜像的 OS 包扫描为零项（Alpine 3.22.6，共 18 个包）。
+- 最终 Caddy 二进制仍报告 CEL 0.28.1 的 [GO-2026-6094](https://pkg.go.dev/vuln/GO-2026-6094)，涉及 `NativeTypes`/`ParseStructTag`。修复版 CEL 0.30.0 与 Caddy 2.11.4 的 interpreter API 编译不兼容。另有不再维护的 OpenPGP 包 [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932)，公告没有列出修复版本。二进制扫描不等于证明当前网关配置可触达漏洞；兼容修复与可达性评估仍待完成。
+- 固定的 socket proxy 镜像仍含 OpenSSL `libcrypto3`/`libssl3` 3.5.7-r0：共 10 个不同 CVE，其中 1 个高危，分布于 20 条包级记录。Alpine 列出的修复版本为 3.5.8-r0。需要等待上游镜像更新，或明确批准维护重建镜像，不应直接替换为可变 nightly tag。
+- 示例 httpbin 镜像没有 OS 扫描发现，但其 Go 1.26.5 二进制有 8 项标准库高危 CVE。该结果基于版本，并非调用链分析；相关修复从 Go 1.26.6 开始，需要上游重建。该示例不属于生产 Compose，不应对公网暴露。
+
+下一最小步骤：解决或明确评估这些上游例外，重扫准确镜像后再进行授权的预发布演练。本轮未部署，未进行真实 Azure 集成、公网 ACME 续期、生产证书归档或会销毁示例栈的 E2E。演练前备份网关状态并保留旧镜像，在预发布环境验证 HTTPS Host、证书清单和续期后再安排生产升级。
+
 ## 核心运行时变量
 
 | Variable | Default | Meaning |

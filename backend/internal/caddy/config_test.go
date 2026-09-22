@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"debug/buildinfo"
 	"encoding/json"
 	"encoding/pem"
 	"io"
@@ -174,6 +175,88 @@ func TestRuntimeMixedListeners(t *testing.T) {
 			t.Errorf("%s%s (%s): got %d, want %d", test.host, test.path, test.header, response.StatusCode, test.status)
 		}
 	}
+}
+
+func TestRuntimeHTTPSUpstreamHeaders(t *testing.T) {
+	binary := os.Getenv("CADDY_TEST_BIN")
+	if binary == "" {
+		t.Skip("set CADDY_TEST_BIN to run real Caddy tests")
+	}
+	upstream := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_ = json.NewEncoder(writer).Encode(map[string]string{
+			"host": request.Host, "forwardedHost": request.Header.Get("X-Forwarded-Host"),
+			"authorization": request.Header.Get("Authorization"),
+		})
+	}))
+	defer upstream.Close()
+	rootCertificate := filepath.Join(t.TempDir(), "root.pem")
+	if err := os.WriteFile(rootCertificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: upstream.Certificate().Raw}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SSL_CERT_FILE", rootCertificate)
+	httpAddress, httpPort := testListenerAddress(t)
+	httpsAddress, _ := testListenerAddress(t)
+	adminAddress, _ := testListenerAddress(t)
+	data, err := NewRenderer(model.AppConfig{
+		Auth:    model.AuthConfig{Required: true, AdminToken: "runtime-test-token"},
+		Gateway: model.GatewayConfig{HTTPListen: httpAddress, HTTPSListen: httpsAddress, CaddyAdminEndpoint: "http://" + adminAddress, CaddyDataDir: t.TempDir()},
+	}).Render([]model.RouteConfig{
+		{ID: "default", Host: "app.example.test", Enabled: true, ListenerPort: httpPort, ListenerProtocol: "http", Upstreams: []model.UpstreamTarget{{URL: upstream.URL}}},
+		{ID: "override", Host: "override.example.test", Enabled: true, ListenerPort: httpPort, ListenerProtocol: "http", Headers: map[string]string{"hOsT": "backend.example.test"}, Upstreams: []model.UpstreamTarget{{URL: upstream.URL}}},
+		{ID: "protected", Host: "protected.example.test", Enabled: true, Protected: true, ListenerPort: httpPort, ListenerProtocol: "http", Upstreams: []model.UpstreamTarget{{URL: upstream.URL}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	startTestCaddy(t, binary, data, adminAddress)
+	client := &http.Client{Timeout: 3 * time.Second}
+	defer client.CloseIdleConnections()
+	for _, test := range []struct{ host, upstreamHost, authorization string }{
+		{"app.example.test", "app.example.test", "Bearer runtime-test-token"},
+		{"override.example.test", "backend.example.test", "Bearer runtime-test-token"},
+		{"protected.example.test", "protected.example.test", ""},
+	} {
+		request, err := http.NewRequest(http.MethodGet, "http://"+httpAddress, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = test.host
+		request.Header.Set("Authorization", "Bearer runtime-test-token")
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var headers map[string]string
+		err = json.NewDecoder(response.Body).Decode(&headers)
+		response.Body.Close()
+		if err != nil || response.StatusCode != http.StatusOK || headers["host"] != test.upstreamHost || headers["forwardedHost"] != test.host || headers["authorization"] != test.authorization {
+			t.Errorf("%s: status=%d headers=%v err=%v", test.host, response.StatusCode, headers, err)
+		}
+	}
+}
+
+func TestRuntimeCertMagicVersion(t *testing.T) {
+	binary := os.Getenv("CADDY_TEST_BIN")
+	if binary == "" {
+		t.Skip("set CADDY_TEST_BIN to verify the Caddy storage dependency")
+	}
+	info, err := buildinfo.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, dependency := range info.Deps {
+		if dependency.Path != "github.com/caddyserver/certmagic" {
+			continue
+		}
+		if dependency.Replace != nil {
+			dependency = dependency.Replace
+		}
+		if dependency.Version != "v0.25.4" {
+			t.Fatalf("Caddy CertMagic=%s; archive storage locks require the tested v0.25.4 baseline", dependency.Version)
+		}
+		return
+	}
+	t.Fatal("Caddy CertMagic build metadata is missing")
 }
 
 func testListenerAddress(t *testing.T) (string, int) {

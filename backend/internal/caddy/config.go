@@ -417,10 +417,16 @@ func reverseProxyHandler(upstreams []any, useTLS bool, stripHeaders []string, se
 		requestHeaders["delete"] = stripHeaders
 	}
 	set := make(map[string][]string, len(setHeaders))
+	if useTLS {
+		set["Host"] = []string{"{http.request.hostport}"}
+	}
 	for name, value := range setHeaders {
 		name = strings.TrimSpace(name)
 		if name == "" || headerNameIn(name, stripHeaders) {
 			continue
+		}
+		if strings.EqualFold(name, "Host") {
+			name = "Host"
 		}
 		set[name] = []string{value}
 	}

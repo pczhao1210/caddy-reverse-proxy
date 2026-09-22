@@ -131,6 +131,33 @@ make docker-push
 
 Override `IMAGE` when publishing another repository or immutable tag.
 
+## Dependency Upgrade Baseline (2026-09-22)
+
+| Component | Selected version |
+|---|---|
+| Go build/test toolchain | 1.26.8 |
+| Caddy / xcaddy / Azure DNS plugin | 2.11.4 / 0.4.7 / 0.6.0 |
+| CertMagic, control plane and Caddy | 0.25.4 |
+| Azure azcore / azidentity | 1.23.1 / 1.14.1 |
+| `x/crypto` / `x/net` / `x/text` | 0.57.0 / 0.59.0 / 0.42.0 |
+| Gateway runtime Alpine Linux / UI Alpine.js | 3.22.6 / 3.17.4 |
+| Docker socket proxy / sample go-httpbin | v0.5.0 / 2.25.0 |
+
+Build-base and companion images are pinned by tag and registry digest. The control plane's `go.mod` and xcaddy's generated module graph are independent: update and scan both. The Dockerfile also pins security fixes for Chi, compress, OpenTelemetry, and gRPC. These pins do not lock every transitive build dependency. The UI vendor notice records the npm source and file hash.
+
+Caddy 2.11 changes HTTPS upstream Host defaults. The renderer explicitly preserves the incoming Host for compatibility; an explicitly configured Host still takes precedence. TLS verification remains enabled. Control-plane and Caddy CertMagic versions are aligned because certificate archive operations use its native storage locks. When upgrading again, update the runtime-version assertion and rerun the storage-lock and real-Caddy tests.
+
+Local verification passed: full Go race tests and vet, real Caddy HTTP/TLS/auth/Host/active-config regressions, Node tests (6/6), browser fixtures for Alpine 3.17.4 login, nested forms, certificate filtering/archive confirmation, 401/503 handling, and desktop/390px layouts. All Compose files rendered successfully. An isolated socket proxy with a mock Unix socket allowed GET containers/info/networks and denied POST create and GET secrets; sample httpbin health and GET checks passed. No existing gateway or real Docker socket was used.
+
+Security results are a dated snapshot, **not a clean production release gate**:
+
+- `govulncheck` 1.8.0 found no reachable or imported-package vulnerabilities in `./cmd/server`; its module-only OpenPGP warning remains. Trivy 0.74.0 found no OS-package vulnerabilities in the final gateway image (Alpine 3.22.6, 18 packages).
+- The final Caddy binary still reports [GO-2026-6094](https://pkg.go.dev/vuln/GO-2026-6094) in CEL 0.28.1 (`NativeTypes`/`ParseStructTag`). The fixed CEL 0.30.0 fails to compile against Caddy 2.11.4's interpreter API. It also reports [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) in the unmaintained OpenPGP package, for which no patched version is listed. Binary findings do not establish exposure through this gateway's configuration; compatibility fixes and reachability review remain required.
+- The pinned socket proxy image contains OpenSSL `libcrypto3`/`libssl3` 3.5.7-r0: 10 distinct CVEs, including one high-severity CVE, across 20 package findings. Alpine lists 3.5.8-r0 as fixed. Await an updated upstream image or explicitly approve a maintained rebuilt image; do not substitute a mutable nightly tag.
+- The sample httpbin image has no reported OS findings, but its Go 1.26.5 binary has eight high-severity standard-library CVE findings. These are version-based findings, not a call-path analysis. The relevant fixes start at Go 1.26.6; an upstream rebuild is needed. This sample is not part of the production Compose file and should not be publicly exposed.
+
+Next smallest step: resolve or explicitly review these upstream exceptions, then rescan the exact images before an authorized staging rollout. No deployment, real Azure integration, public ACME renewal, production certificate archive, or destructive sample-stack E2E was performed. Back up gateway state and retain the previous image before staging; verify HTTPS Host behavior, certificate inventory and renewal there before production.
+
 ## Core Runtime Variables
 
 | Variable | Default | Meaning |

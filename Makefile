@@ -22,7 +22,7 @@ help:
 	@printf '%s\n' '  compose-down  Stop the VM profile sample stack'
 
 test:
-	docker run --rm -v "$$(pwd)/$(BACKEND_DIR):/src" -w /src golang:1.25-alpine go test ./...
+	docker run --rm -v "$$(pwd)/$(BACKEND_DIR):/src" -w /src golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c go test ./...
 
 test-e2e:
 	ENV_FILE=$(ENV_FILE) ./scripts/e2e-caddy-routing.sh

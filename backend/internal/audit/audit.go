@@ -1,13 +1,15 @@
 package audit
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -74,21 +76,64 @@ func (l *Logger) ReadLast(limit int) ([]Event, error) {
 	}
 	defer file.Close()
 
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	return l.readLast(file, info.Size(), limit)
+}
+
+func (l *Logger) readLast(reader io.ReaderAt, size int64, limit int) ([]Event, error) {
+	const blockSize = 64 * 1024
+	const maxLineSize = 1024 * 1024
 	events := make([]Event, 0, limit)
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
+	parse := func(line []byte) error {
+		if len(line) == 0 {
+			return nil
+		}
+		if len(line) > maxLineSize {
+			return fmt.Errorf("read audit log: line exceeds %d bytes", maxLineSize)
+		}
 		var event Event
-		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
+		if err := json.Unmarshal(line, &event); err != nil {
 			l.logger.Warn("skipping invalid audit log line", "error", err)
-			continue
+			return nil
 		}
 		events = append(events, event)
-		if len(events) > limit {
-			events = events[1:]
+		return nil
+	}
+	var remainder []byte
+	for size > 0 && len(events) < limit {
+		count := min(int64(blockSize), size)
+		size -= count
+		data := make([]byte, int(count)+len(remainder))
+		if _, err := reader.ReadAt(data[:count], size); err != nil {
+			return nil, fmt.Errorf("read audit log: %w", err)
+		}
+		copy(data[count:], remainder)
+		for len(events) < limit {
+			separator := bytes.LastIndexByte(data, '\n')
+			if separator < 0 {
+				break
+			}
+			if err := parse(data[separator+1:]); err != nil {
+				return nil, err
+			}
+			data = data[:separator]
+		}
+		if len(events) == limit {
+			break
+		}
+		if len(data) > maxLineSize {
+			return nil, fmt.Errorf("read audit log: line exceeds %d bytes", maxLineSize)
+		}
+		remainder = data
+		if size == 0 {
+			if err := parse(remainder); err != nil {
+				return nil, err
+			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read audit log: %w", err)
-	}
+	slices.Reverse(events)
 	return events, nil
 }

@@ -6,25 +6,30 @@ import (
 	"net"
 	"net/url"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/aidockerfarm/gateway/internal/model"
+	"github.com/aidockerfarm/gateway/internal/persistence"
 )
 
 type fileFormat struct {
-	Version      int                 `json:"version,omitempty"`
-	Listeners    []model.Listener    `json:"listeners,omitempty"`
-	BackendPools []model.BackendPool `json:"backendPools,omitempty"`
-	RoutingRules []model.RoutingRule `json:"routingRules,omitempty"`
-	Routes       []model.RouteConfig `json:"routes,omitempty"`
+	Version         int                 `json:"version,omitempty"`
+	Revision        uint64              `json:"revision,omitempty"`
+	AppliedRevision uint64              `json:"appliedRevision,omitempty"`
+	Applied         *ResourceSet        `json:"applied,omitempty"`
+	Listeners       []model.Listener    `json:"listeners,omitempty"`
+	BackendPools    []model.BackendPool `json:"backendPools,omitempty"`
+	RoutingRules    []model.RoutingRule `json:"routingRules,omitempty"`
+	Routes          []model.RouteConfig `json:"routes,omitempty"`
 }
 
 type Store struct {
 	path         string
 	mu           sync.RWMutex
 	staged       bool
+	revision     uint64
+	applied      Snapshot
 	listeners    []model.Listener
 	backendPools []model.BackendPool
 	routingRules []model.RoutingRule
@@ -32,7 +37,82 @@ type Store struct {
 }
 
 func NewStore(path string) *Store {
-	return &Store{path: path}
+	return &Store{path: path, applied: Snapshot{Resources: ResourceSet{Version: ResourceSetVersion}}}
+}
+
+type Snapshot struct {
+	Resources ResourceSet
+	Routes    []model.RouteConfig
+	Revision  uint64
+}
+
+func (s *Store) DesiredSnapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.desiredSnapshotLocked()
+}
+
+func (s *Store) desiredSnapshotLocked() Snapshot {
+	return cloneSnapshot(Snapshot{
+		Resources: ResourceSet{Version: ResourceSetVersion, Listeners: s.listeners, BackendPools: s.backendPools, RoutingRules: s.routingRules},
+		Routes:    s.routes, Revision: s.revision,
+	})
+}
+
+func (s *Store) AppliedSnapshot() Snapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneSnapshot(s.applied)
+}
+
+func (s *Store) Pending() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.revision != s.applied.Revision
+}
+
+func (s *Store) Staged() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.staged
+}
+
+func (s *Store) MarkApplied(snapshot Snapshot) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if snapshot.Revision > s.revision || snapshot.Revision < s.applied.Revision {
+		return fmt.Errorf("applied routing revision is stale or invalid")
+	}
+	previous := s.applied
+	s.applied = cloneSnapshot(snapshot)
+	if err := s.saveLocked(); err != nil {
+		s.applied = previous
+		return err
+	}
+	s.staged = false
+	return nil
+}
+
+func cloneSnapshot(snapshot Snapshot) Snapshot {
+	snapshot.Resources.Listeners = append([]model.Listener(nil), snapshot.Resources.Listeners...)
+	snapshot.Resources.BackendPools = cloneBackendPools(snapshot.Resources.BackendPools)
+	snapshot.Resources.RoutingRules = cloneRoutingRules(snapshot.Resources.RoutingRules)
+	snapshot.Routes = cloneRoutes(snapshot.Routes)
+	return snapshot
+}
+
+func cloneRoutes(input []model.RouteConfig) []model.RouteConfig {
+	output := append([]model.RouteConfig(nil), input...)
+	for index := range output {
+		output[index].Upstreams = append([]model.UpstreamTarget(nil), output[index].Upstreams...)
+		output[index].Headers = cloneStringMap(output[index].Headers)
+		security := &output[index].Security
+		security.AdditionalDeniedMethods = append([]string(nil), security.AdditionalDeniedMethods...)
+		security.AdditionalDeniedPathPrefixes = append([]string(nil), security.AdditionalDeniedPathPrefixes...)
+		security.AllowedCIDRs = append([]string(nil), security.AllowedCIDRs...)
+		security.BlockedCIDRs = append([]string(nil), security.BlockedCIDRs...)
+	}
+	return output
 }
 
 func (s *Store) Load() error {
@@ -52,7 +132,7 @@ func (s *Store) Load() error {
 	if err := json.Unmarshal(data, &payload); err != nil {
 		return err
 	}
-	if payload.Version > 2 {
+	if payload.Version > 3 {
 		return fmt.Errorf("routes file version %d is not supported", payload.Version)
 	}
 	snapshot := s.snapshotLocked()
@@ -82,6 +162,25 @@ func (s *Store) Load() error {
 		s.restoreLocked(snapshot)
 		return err
 	}
+	s.revision = payload.Revision
+	s.staged = false
+	if payload.Version < 3 {
+		s.revision = 1
+		s.applied = s.desiredSnapshotLocked()
+		migrated = true
+	} else {
+		if payload.Applied == nil || payload.AppliedRevision > payload.Revision {
+			s.restoreLocked(snapshot)
+			return fmt.Errorf("invalid applied routing snapshot")
+		}
+		appliedStore := NewStore("")
+		if err := appliedStore.ReplaceResources(*payload.Applied); err != nil {
+			s.restoreLocked(snapshot)
+			return fmt.Errorf("invalid applied routing resources: %w", err)
+		}
+		s.applied = appliedStore.DesiredSnapshot()
+		s.applied.Revision = payload.AppliedRevision
+	}
 	if migrated {
 		if err := s.saveLocked(); err != nil {
 			s.restoreLocked(snapshot)
@@ -94,9 +193,7 @@ func (s *Store) Load() error {
 func (s *Store) List() []model.RouteConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	output := make([]model.RouteConfig, len(s.routes))
-	copy(output, s.routes)
-	return output
+	return cloneRoutes(s.routes)
 }
 
 func (s *Store) SetRuntimeStatus(statuses []model.RouteHealthStatus) {
@@ -149,42 +246,15 @@ func (s *Store) saveLocked() error {
 	if s.path == "" {
 		return nil
 	}
-	directory := filepath.Dir(s.path)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
-		return err
-	}
-	data, err := json.MarshalIndent(fileFormat{
-		Version:      2,
-		Listeners:    s.listeners,
-		BackendPools: s.backendPools,
-		RoutingRules: s.routingRules,
-	}, "", "  ")
-	if err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, "."+filepath.Base(s.path)+".tmp-*")
-	if err != nil {
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(temporaryPath, s.path)
+	return persistence.WriteJSON(s.path, fileFormat{
+		Version:         3,
+		Revision:        s.revision,
+		AppliedRevision: s.applied.Revision,
+		Applied:         &s.applied.Resources,
+		Listeners:       s.listeners,
+		BackendPools:    s.backendPools,
+		RoutingRules:    s.routingRules,
+	}, 0o755)
 }
 
 func (s *Store) PersistStaged() error {

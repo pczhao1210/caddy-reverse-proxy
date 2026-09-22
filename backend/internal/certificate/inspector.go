@@ -31,6 +31,9 @@ type Status struct {
 	PrivateKeyFile     string    `json:"privateKeyFile,omitempty"`
 	MetadataFile       string    `json:"metadataFile,omitempty"`
 	FingerprintSHA256  string    `json:"fingerprintSha256"`
+	Usage              string    `json:"usage"`
+	CoveredBy          []string  `json:"coveredBy,omitempty"`
+	CanArchive         bool      `json:"canArchive"`
 }
 
 type Snapshot struct {
@@ -38,6 +41,7 @@ type Snapshot struct {
 	ScannedAt        time.Time `json:"scannedAt"`
 	Certificates     []Status  `json:"certificates"`
 	Warnings         []string  `json:"warnings,omitempty"`
+	PolicyKnown      bool      `json:"policyKnown"`
 }
 
 type Inspector struct {
@@ -72,6 +76,10 @@ func (i *Inspector) Inspect(renewalWindowRatio float64) (Snapshot, error) {
 			return walkErr
 		}
 		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".crt") {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			snapshot.Warnings = append(snapshot.Warnings, "symbolic link certificate skipped: "+path)
 			return nil
 		}
 		status, err := i.inspectFile(path, now, renewalWindowRatio)
@@ -109,11 +117,15 @@ func (i *Inspector) inspectFile(path string, now time.Time, renewalWindowRatio f
 	}
 
 	subjects := slices.Clone(cert.DNSNames)
+	for _, address := range cert.IPAddresses {
+		subjects = append(subjects, address.String())
+	}
 	if len(subjects) == 0 && cert.Subject.CommonName != "" {
 		subjects = []string{cert.Subject.CommonName}
 	}
 	slices.Sort(subjects)
 	fingerprint := sha256.Sum256(cert.Raw)
+	id := sha256.Sum256(append([]byte(path+"\x00"), cert.Raw...))
 	renewalWindowStart := cert.NotAfter.Add(-time.Duration(float64(cert.NotAfter.Sub(cert.NotBefore)) * renewalWindowRatio))
 	state := "valid"
 	switch {
@@ -127,7 +139,7 @@ func (i *Inspector) inspectFile(path string, now time.Time, renewalWindowRatio f
 
 	base := strings.TrimSuffix(path, filepath.Ext(path))
 	return Status{
-		ID:                 hex.EncodeToString(fingerprint[:]),
+		ID:                 hex.EncodeToString(id[:]),
 		State:              state,
 		Subjects:           subjects,
 		Issuer:             certificateIssuer(cert),
@@ -140,6 +152,7 @@ func (i *Inspector) inspectFile(path string, now time.Time, renewalWindowRatio f
 		PrivateKeyFile:     existingFile(base + ".key"),
 		MetadataFile:       existingFile(base + ".json"),
 		FingerprintSHA256:  hex.EncodeToString(fingerprint[:]),
+		Usage:              "unknown",
 	}, nil
 }
 

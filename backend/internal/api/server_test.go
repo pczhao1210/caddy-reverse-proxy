@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,12 @@ type testCertificateInspector struct {
 	ratio    float64
 	snapshot certificate.Snapshot
 	err      error
+	archived bool
+}
+
+func (i *testCertificateInspector) Archive(_ context.Context, id, fingerprint string, data []byte) (certificate.ArchiveResult, error) {
+	i.archived = true
+	return certificate.ArchiveResult{ID: id, Directory: "/fixture/archive"}, i.err
 }
 
 func (i *testCertificateInspector) Inspect(ratio float64) (certificate.Snapshot, error) {
@@ -85,6 +92,77 @@ type testCertificateReconciler struct {
 	syncCalls          int
 	preservedSyncCalls int
 	routingPending     bool
+	runtimeConfig      []byte
+}
+
+func (r *testCertificateReconciler) WithRuntimeConfig(_ context.Context, check func([]byte) error) error {
+	if r.runtimeConfig == nil {
+		return errors.New("active configuration unavailable")
+	}
+	return check(r.runtimeConfig)
+}
+
+func TestCertificateUsageUsesRuntimeNotSavedPolicy(t *testing.T) {
+	inspector := &testCertificateInspector{snapshot: certificate.Snapshot{StorageDirectory: "/fixture", Certificates: []certificate.Status{{Subjects: []string{"app.example.com"}, Usage: "unknown"}}}}
+	config := settingsTestConfig()
+	config.Gateway.Certificate.Subjects = []string{"app.example.com"}
+	reconciler := &testCertificateReconciler{runtimeConfig: []byte(`{"storage":{"module":"file_system","root":"/fixture"},"apps":{"tls":{"certificates":{"automate":["*.example.com"]}}}}`)}
+	server := NewServer(Options{Config: config, CertificateInspector: inspector, Reconciler: reconciler})
+	for _, known := range []bool{true, false} {
+		if !known {
+			reconciler.runtimeConfig = nil
+			inspector.snapshot.Certificates[0].Usage = "unknown"
+			inspector.snapshot.Certificates[0].CanArchive = false
+		}
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, authenticatedRequest(http.MethodGet, "/api/certificate", "", "old-token"))
+		var payload struct{ Runtime certificate.Snapshot }
+		if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Runtime.PolicyKnown != known {
+			t.Fatalf("runtime known=%v: %s", known, response.Body)
+		}
+		want := "unknown"
+		if known {
+			want = "covered"
+		}
+		if payload.Runtime.Certificates[0].Usage != want {
+			t.Fatalf("classification used saved policy: %s", response.Body)
+		}
+	}
+}
+
+func TestCertificateArchiveAPIGuards(t *testing.T) {
+	for _, mode := range []string{"success", "unauthorized", "unconfirmed", "unknown-runtime", "import-pending"} {
+		t.Run(mode, func(t *testing.T) {
+			inspector := &testCertificateInspector{}
+			reconciler := &testCertificateReconciler{runtimeConfig: []byte(`{}`)}
+			server := NewServer(Options{Config: settingsTestConfig(), CertificateInspector: inspector, Reconciler: reconciler})
+			body := `{"id":"` + strings.Repeat("a", 64) + `","fingerprintSha256":"` + strings.Repeat("b", 64) + `","confirm":true}`
+			token := "old-token"
+			want := http.StatusOK
+			switch mode {
+			case "unauthorized":
+				token = "invalid"
+				want = http.StatusUnauthorized
+			case "unconfirmed":
+				body = strings.Replace(body, "true", "false", 1)
+				want = http.StatusBadRequest
+			case "unknown-runtime":
+				reconciler.runtimeConfig = nil
+				want = http.StatusConflict
+			case "import-pending":
+				server.configurationDraft = &configurationImportDraft{}
+				want = http.StatusConflict
+			}
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, authenticatedRequest(http.MethodPost, "/api/certificate/archive", body, token))
+			if response.Code != want || inspector.archived != (mode == "success") {
+				t.Fatalf("status=%d archived=%v body=%s", response.Code, inspector.archived, response.Body)
+			}
+		})
+	}
 }
 
 func (r *testCertificateReconciler) Sync(context.Context) model.ReconcileResult {

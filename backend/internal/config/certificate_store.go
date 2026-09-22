@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/aidockerfarm/gateway/internal/model"
+	"github.com/aidockerfarm/gateway/internal/persistence"
 )
 
 type CertificateStore struct {
@@ -40,33 +40,8 @@ func (s *CertificateStore) Save(certificate model.CertificateConfig) error {
 	if s == nil || s.path == "" {
 		return fmt.Errorf("certificate config file is not configured")
 	}
-	directory := filepath.Dir(s.path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create certificate config directory: %w", err)
-	}
-	data, err := json.MarshalIndent(certificate, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode certificate config: %w", err)
-	}
-	temporary, err := os.CreateTemp(directory, "."+filepath.Base(s.path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temporary certificate config: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, s.path); err != nil {
-		return fmt.Errorf("replace certificate config: %w", err)
+	if err := persistence.WriteJSON(s.path, certificate, 0o700); err != nil {
+		return fmt.Errorf("save certificate config: %w", err)
 	}
 	return nil
 }

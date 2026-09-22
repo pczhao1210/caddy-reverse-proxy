@@ -13,6 +13,8 @@ import (
 
 type storeSnapshot struct {
 	staged       bool
+	revision     uint64
+	applied      Snapshot
 	listeners    []model.Listener
 	backendPools []model.BackendPool
 	routingRules []model.RoutingRule
@@ -104,6 +106,7 @@ func (s *Store) StageResources(resources ResourceSet) error {
 		s.restoreLocked(snapshot)
 		return err
 	}
+	s.revision++
 	return nil
 }
 
@@ -705,6 +708,7 @@ func (s *Store) commitLocked(snapshot storeSnapshot) error {
 		s.restoreLocked(snapshot)
 		return err
 	}
+	s.revision++
 	if s.staged {
 		return nil
 	}
@@ -718,6 +722,8 @@ func (s *Store) commitLocked(snapshot storeSnapshot) error {
 func (s *Store) snapshotLocked() storeSnapshot {
 	return storeSnapshot{
 		staged:       s.staged,
+		revision:     s.revision,
+		applied:      s.applied,
 		listeners:    append([]model.Listener(nil), s.listeners...),
 		backendPools: cloneBackendPools(s.backendPools),
 		routingRules: cloneRoutingRules(s.routingRules),
@@ -727,6 +733,8 @@ func (s *Store) snapshotLocked() storeSnapshot {
 
 func (s *Store) restoreLocked(snapshot storeSnapshot) {
 	s.staged = snapshot.staged
+	s.revision = snapshot.revision
+	s.applied = snapshot.applied
 	s.listeners = snapshot.listeners
 	s.backendPools = snapshot.backendPools
 	s.routingRules = snapshot.routingRules
@@ -1002,6 +1010,11 @@ func cloneRoutingRules(input []model.RoutingRule) []model.RoutingRule {
 	output := append([]model.RoutingRule(nil), input...)
 	for index := range output {
 		output[index].Headers = cloneStringMap(output[index].Headers)
+		security := &output[index].Security
+		security.AdditionalDeniedMethods = append([]string(nil), security.AdditionalDeniedMethods...)
+		security.AdditionalDeniedPathPrefixes = append([]string(nil), security.AdditionalDeniedPathPrefixes...)
+		security.AllowedCIDRs = append([]string(nil), security.AllowedCIDRs...)
+		security.BlockedCIDRs = append([]string(nil), security.BlockedCIDRs...)
 	}
 	return output
 }

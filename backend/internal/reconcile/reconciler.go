@@ -2,9 +2,9 @@ package reconcile
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/aidockerfarm/gateway/internal/model"
@@ -56,21 +56,22 @@ type Options struct {
 }
 
 type Reconciler struct {
-	cfg                       model.AppConfig
-	store                     *routes.Store
-	discoverer                Discoverer
-	azureManager              AzureManager
-	healthChecker             HealthChecker
-	auditLogger               AuditLogger
-	renderer                  Renderer
-	loader                    Loader
-	logger                    *slog.Logger
-	syncMu                    sync.Mutex
-	lastDiscovered            []model.RouteConfig
-	lastAppliedExplicitRoutes []model.RouteConfig
-	mu                        sync.RWMutex
-	last                      model.ReconcileResult
-	routingPending            atomic.Bool
+	cfg            model.AppConfig
+	store          *routes.Store
+	discoverer     Discoverer
+	azureManager   AzureManager
+	healthChecker  HealthChecker
+	auditLogger    AuditLogger
+	renderer       Renderer
+	loader         Loader
+	logger         *slog.Logger
+	syncMu         sync.Mutex
+	azureMu        sync.Mutex
+	lastDiscovered []model.RouteConfig
+	mu             sync.RWMutex
+	generation     uint64
+	cancelChecks   context.CancelFunc
+	last           model.ReconcileResult
 }
 
 func New(options Options) *Reconciler {
@@ -79,14 +80,11 @@ func New(options Options) *Reconciler {
 		logger = slog.Default()
 	}
 	reconciler := &Reconciler{cfg: options.Config, store: options.Store, discoverer: options.Discoverer, azureManager: options.AzureManager, healthChecker: options.HealthChecker, auditLogger: options.AuditLogger, renderer: options.Renderer, loader: options.Loader, logger: logger}
-	if options.Store != nil {
-		reconciler.lastAppliedExplicitRoutes = options.Store.List()
-	}
 	return reconciler
 }
 
 func (r *Reconciler) Run(ctx context.Context) {
-	_ = r.Sync(ctx)
+	_ = r.SyncWithoutPendingRoutingChanges(ctx)
 	interval := time.Duration(r.configSnapshot().ReconcileIntervalSeconds) * time.Second
 	if interval <= 0 {
 		interval = 30 * time.Second
@@ -98,43 +96,78 @@ func (r *Reconciler) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if !r.RoutingChangesPending() {
-				_ = r.Sync(ctx)
-			}
+			_ = r.SyncWithoutPendingRoutingChanges(ctx)
 		}
 	}
 }
 
-func (r *Reconciler) MarkRoutingChangesPending() {
-	r.routingPending.Store(true)
-}
-
-func (r *Reconciler) ClearRoutingChangesPending() {
-	r.routingPending.Store(false)
-}
-
 func (r *Reconciler) RoutingChangesPending() bool {
-	return r.routingPending.Load()
+	return r.store.Pending()
+}
+
+func (r *Reconciler) WithRuntimeConfig(ctx context.Context, inspect func([]byte) error) error {
+	r.syncMu.Lock()
+	defer r.syncMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	reader, ok := r.loader.(interface {
+		Config(context.Context) ([]byte, error)
+	})
+	if !ok {
+		return fmt.Errorf("active Caddy configuration is unavailable")
+	}
+	data, err := reader.Config(ctx)
+	if err != nil {
+		return err
+	}
+	return inspect(data)
 }
 
 func (r *Reconciler) Sync(ctx context.Context) model.ReconcileResult {
-	return r.sync(ctx, false)
+	return r.sync(ctx, false, nil, nil)
 }
 
 func (r *Reconciler) SyncWithoutPendingRoutingChanges(ctx context.Context) model.ReconcileResult {
-	return r.sync(ctx, true)
+	return r.sync(ctx, true, nil, nil)
 }
 
-func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool) model.ReconcileResult {
+func (r *Reconciler) SyncWithCommit(ctx context.Context, cfg *model.AppConfig, commit func(routes.Snapshot) error) model.ReconcileResult {
+	return r.sync(ctx, false, cfg, commit)
+}
+
+func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool, candidate *model.AppConfig, commit func(routes.Snapshot) error) model.ReconcileResult {
 	r.syncMu.Lock()
-	defer r.syncMu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			r.syncMu.Unlock()
+		}
+	}()
+	r.mu.Lock()
+	if r.cancelChecks != nil {
+		r.cancelChecks()
+	}
+	checksContext, cancel := context.WithCancel(ctx)
+	defer cancel()
+	r.cancelChecks = cancel
+	r.generation++
+	generation := r.generation
+	r.mu.Unlock()
 
 	started := time.Now().UTC()
-	cfg := r.configSnapshot()
-	explicitRoutes := r.store.List()
-	if preservePendingRoutes && r.RoutingChangesPending() {
-		explicitRoutes = append([]model.RouteConfig{}, r.lastAppliedExplicitRoutes...)
+	previousConfig := r.configSnapshot()
+	previous := r.store.AppliedSnapshot()
+	previousDiscovered := append([]model.RouteConfig(nil), r.lastDiscovered...)
+	if candidate != nil {
+		r.UpdateConfig(*candidate)
 	}
+	cfg := r.configSnapshot()
+	snapshot := r.store.DesiredSnapshot()
+	if preservePendingRoutes {
+		snapshot = previous
+	}
+	explicitRoutes := snapshot.Routes
 	result := model.ReconcileResult{StartedAt: started, Profile: string(cfg.Profile), ExplicitRoutes: len(explicitRoutes)}
 
 	allRoutes := append([]model.RouteConfig{}, explicitRoutes...)
@@ -152,39 +185,72 @@ func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool) model
 
 	rendered, err := r.renderer.Render(allRoutes)
 	if err != nil {
+		if candidate != nil {
+			r.UpdateConfig(previousConfig)
+		}
 		result.Error = err.Error()
-		return r.finish(result)
+		return r.finish(result, generation)
 	}
 	if err := r.loader.Load(ctx, rendered); err != nil {
+		if candidate != nil {
+			r.UpdateConfig(previousConfig)
+		}
 		result.Error = err.Error()
-		return r.finish(result)
+		return r.finish(result, generation)
 	}
-	r.lastAppliedExplicitRoutes = append([]model.RouteConfig{}, explicitRoutes...)
-
 	result.AppliedRoutes = len(allRoutes)
 	result.CaddyLoaded = true
+	if !preservePendingRoutes {
+		if commit == nil {
+			commit = r.store.MarkApplied
+		}
+		if err := commit(snapshot); err != nil {
+			if candidate != nil {
+				r.UpdateConfig(previousConfig)
+			}
+			rollbackRoutes := append(previous.Routes, previousDiscovered...)
+			rollback, rollbackErr := r.renderer.Render(rollbackRoutes)
+			if rollbackErr == nil {
+				rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+				rollbackErr = r.loader.Load(rollbackCtx, rollback)
+				cancel()
+			}
+			result.Error = fmt.Sprintf("persist applied configuration: %v", err)
+			if rollbackErr != nil {
+				result.Error += fmt.Sprintf("; restore previous runtime configuration: %v", rollbackErr)
+			} else {
+				result.CaddyLoaded = false
+				result.AppliedRoutes = len(rollbackRoutes)
+			}
+			return r.finish(result, generation)
+		}
+	}
+	locked = false
+	r.syncMu.Unlock()
 	if r.healthChecker != nil {
-		result.RouteHealth = r.healthChecker.Check(ctx, allRoutes)
+		result.RouteHealth = r.healthChecker.Check(checksContext, allRoutes)
 		result.HealthChecks = len(result.RouteHealth)
 		for _, status := range result.RouteHealth {
 			if !status.Healthy {
 				result.UnhealthyRoutes++
 			}
 		}
-		r.store.SetRuntimeStatus(result.RouteHealth)
 	}
 	if r.azureManager != nil {
-		result.Azure = r.azureRoutes(ctx, allRoutes)
+		r.azureMu.Lock()
+		if checksContext.Err() == nil {
+			result.Azure = r.azureRoutes(checksContext, cfg, allRoutes)
+		}
+		r.azureMu.Unlock()
 		if result.Azure.Error != "" {
 			result.Error = result.Azure.Error
-			return r.finish(result)
+			return r.finish(result, generation)
 		}
 	}
-	return r.finish(result)
+	return r.finish(result, generation)
 }
 
-func (r *Reconciler) azureRoutes(ctx context.Context, routes []model.RouteConfig) model.AzureResult {
-	cfg := r.configSnapshot()
+func (r *Reconciler) azureRoutes(ctx context.Context, cfg model.AppConfig, routes []model.RouteConfig) model.AzureResult {
 	output := append([]model.RouteConfig{}, routes...)
 	if cfg.Control.ManagementHost != "" {
 		output = append(output, model.RouteConfig{
@@ -231,11 +297,16 @@ func (r *Reconciler) Last() model.ReconcileResult {
 	return r.last
 }
 
-func (r *Reconciler) finish(result model.ReconcileResult) model.ReconcileResult {
+func (r *Reconciler) finish(result model.ReconcileResult, generation uint64) model.ReconcileResult {
 	result.FinishedAt = time.Now().UTC()
 	result.Duration = result.FinishedAt.Sub(result.StartedAt)
 	r.mu.Lock()
-	r.last = result
+	if r.generation == generation {
+		if result.CaddyLoaded && result.RouteHealth != nil {
+			r.store.SetRuntimeStatus(result.RouteHealth)
+		}
+		r.last = result
+	}
 	r.mu.Unlock()
 	if r.auditLogger != nil {
 		if err := r.auditLogger.Record(context.Background(), "reconcile.complete", map[string]any{

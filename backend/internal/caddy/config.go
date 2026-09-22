@@ -41,15 +41,17 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 
 	routeList := append([]model.RouteConfig{}, input...)
 	if cfg.Control.ManagementHost != "" {
+		if !cfg.Auth.Required || len(authTokens(cfg.Auth)) == 0 {
+			return nil, fmt.Errorf("management host requires API authentication and an admin token")
+		}
 		routeList = append(routeList, model.RouteConfig{
-			ID:        "management-ui",
-			Host:      cfg.Control.ManagementHost,
-			Exposure:  "protected",
-			Enabled:   true,
-			Public:    true,
-			HTTPS:     true,
-			Protected: true,
-			Source:    "management",
+			ID:       "management-ui",
+			Host:     cfg.Control.ManagementHost,
+			Exposure: "public",
+			Enabled:  true,
+			Public:   true,
+			HTTPS:    true,
+			Source:   "management",
 			Upstreams: []model.UpstreamTarget{
 				{Name: "management-ui", URL: "http://" + loopbackTarget(cfg.Control.Listen)},
 			},
@@ -69,86 +71,108 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 		return len(strings.TrimRight(routeList[left].PathPrefix, "/")) > len(strings.TrimRight(routeList[right].PathPrefix, "/"))
 	})
 
-	listen := make([]string, 0, 2+len(routeList))
-	listenSet := make(map[string]struct{}, 2+len(routeList))
-	appendListen := func(address string) {
-		if address == "" {
-			return
+	servers := make(map[string]any)
+	protocols := make(map[string]string)
+	ensureServer := func(address, protocol string) (map[string]any, error) {
+		for existing, existingProtocol := range protocols {
+			if existingProtocol != protocol && listenerAddressesOverlap(existing, address) {
+				return nil, fmt.Errorf("listener %s conflicts with %s on %s", address, existingProtocol, existing)
+			}
 		}
-		if _, exists := listenSet[address]; exists {
-			return
+		if existing, ok := servers[address]; ok {
+			return existing.(map[string]any), nil
 		}
-		listenSet[address] = struct{}{}
-		listen = append(listen, address)
-	}
-	if cfg.Gateway.HTTPListen != "" {
-		appendListen(cfg.Gateway.HTTPListen)
-	}
-	if cfg.Gateway.HTTPSListen != "" {
-		appendListen(cfg.Gateway.HTTPSListen)
-	}
-	for _, route := range routeList {
-		if route.ListenerPort > 0 {
-			appendListen(listenerAddress(cfg.Gateway, route.ListenerProtocol, route.ListenerPort))
+		server := map[string]any{"listen": []string{address}, "logs": map[string]any{}, "routes": []any{}}
+		if protocol == "http" {
+			server["automatic_https"] = map[string]any{"disable": true}
+		} else {
+			server["automatic_https"] = map[string]any{"disable_redirects": true}
+			server["tls_connection_policies"] = []any{map[string]any{}}
 		}
+		protocols[address] = protocol
+		servers[address] = server
+		return server, nil
 	}
-	if len(listen) == 0 {
-		return nil, fmt.Errorf("at least one gateway listener is required")
-	}
-
-	caddyRoutes := make([]any, 0, len(routeList))
-	skipAutoHTTPS := make([]string, 0)
-	skipAutoCertificates := make([]string, 0)
-	httpsHosts := make(map[string]struct{}, len(routeList))
-	for _, route := range routeList {
-		if route.Enabled && route.HTTPS {
-			httpsHosts[strings.ToLower(route.Host)] = struct{}{}
+	for _, listener := range []struct{ address, protocol string }{{cfg.Gateway.HTTPListen, "http"}, {cfg.Gateway.HTTPSListen, "https"}} {
+		if listener.address != "" {
+			if _, err := ensureServer(listener.address, listener.protocol); err != nil {
+				return nil, err
+			}
 		}
 	}
-	skippedHosts := make(map[string]struct{}, len(routeList))
-	skippedCertificateHosts := make(map[string]struct{}, len(routeList))
+	redirects := make([]any, 0)
 	for _, route := range routeList {
 		if !route.Enabled {
 			continue
 		}
-		if !route.HTTPS {
-			host := strings.ToLower(route.Host)
-			_, hasHTTPS := httpsHosts[host]
-			_, alreadySkipped := skippedHosts[host]
-			if !hasHTTPS && !alreadySkipped {
-				skipAutoHTTPS = append(skipAutoHTTPS, route.Host)
-				skippedHosts[host] = struct{}{}
+		protocol := route.ListenerProtocol
+		if protocol == "" {
+			protocol = "http"
+			if route.HTTPS {
+				protocol = "https"
 			}
-		} else if wildcardCertificateCoversHost(cfg.Gateway.Certificate.Subjects, route.Host) {
-			host := strings.ToLower(route.Host)
-			if _, alreadySkipped := skippedCertificateHosts[host]; !alreadySkipped {
-				skipAutoCertificates = append(skipAutoCertificates, route.Host)
-				skippedCertificateHosts[host] = struct{}{}
+		}
+		address := cfg.Gateway.HTTPListen
+		if protocol == "https" {
+			address = cfg.Gateway.HTTPSListen
+		}
+		if route.ListenerPort > 0 {
+			address = listenerAddress(cfg.Gateway, protocol, route.ListenerPort)
+		}
+		if address == "" {
+			return nil, fmt.Errorf("route %s: no default %s listener is configured", route.ID, protocol)
+		}
+		server, err := ensureServer(address, protocol)
+		if err != nil {
+			return nil, err
+		}
+		if protocol == "https" && wildcardCertificateCoversHost(cfg.Gateway.Certificate.Subjects, route.Host) {
+			automatic, _ := server["automatic_https"].(map[string]any)
+			if automatic == nil {
+				automatic = map[string]any{}
+				server["automatic_https"] = automatic
 			}
+			skipped, _ := automatic["skip_certificates"].([]string)
+			automatic["skip_certificates"] = appendUnique(skipped, route.Host)
 		}
 		entries, err := renderRoute(route, cfg.Auth, cfg.Security, cfg.Gateway.InternalSourceRanges)
 		if err != nil {
 			return nil, err
 		}
 		for _, entry := range entries {
-			caddyRoutes = append(caddyRoutes, entry)
+			server["routes"] = append(server["routes"].([]any), entry)
+		}
+		if protocol == "https" && cfg.Gateway.HTTPListen != "" {
+			_, port, err := net.SplitHostPort(address)
+			if err != nil {
+				return nil, fmt.Errorf("listener %s: %w", address, err)
+			}
+			location := "https://{http.request.host}"
+			if port != "443" {
+				location += ":" + port
+			}
+			match := map[string]any{"host": []string{route.Host}}
+			if route.PathPrefix != "" {
+				match["path"] = routePathMatchers(route.PathPrefix)
+			}
+			redirects = append(redirects, map[string]any{
+				"match": []any{match}, "terminal": true,
+				"handle": []any{map[string]any{"handler": "static_response", "status_code": 308, "headers": map[string]any{"Location": []string{location + "{http.request.uri}"}}}},
+			})
 		}
 	}
-
-	server := map[string]any{
-		"listen": listen,
-		"logs":   map[string]any{},
-		"routes": caddyRoutes,
+	if len(redirects) > 0 {
+		server := servers[cfg.Gateway.HTTPListen].(map[string]any)
+		server["routes"] = append(server["routes"].([]any), redirects...)
 	}
-	if len(skipAutoHTTPS) > 0 || len(skipAutoCertificates) > 0 {
-		automaticHTTPS := map[string]any{}
-		if len(skipAutoHTTPS) > 0 {
-			automaticHTTPS["skip"] = skipAutoHTTPS
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("at least one gateway listener is required")
+	}
+	httpApp := map[string]any{"servers": servers}
+	if _, port, err := net.SplitHostPort(cfg.Gateway.HTTPListen); err == nil {
+		if number, err := strconv.Atoi(port); err == nil {
+			httpApp["http_port"] = number
 		}
-		if len(skipAutoCertificates) > 0 {
-			automaticHTTPS["skip_certificates"] = skipAutoCertificates
-		}
-		server["automatic_https"] = automaticHTTPS
 	}
 
 	config := map[string]any{
@@ -159,19 +183,22 @@ func (r *Renderer) Render(input []model.RouteConfig) ([]byte, error) {
 			"module": "file_system",
 			"root":   cfg.Gateway.CaddyDataDir,
 		},
-		"apps": map[string]any{
-			"http": map[string]any{
-				"servers": map[string]any{
-					"gateway": server,
-				},
-			},
-		},
+		"apps": map[string]any{"http": httpApp},
 	}
 	if tlsConfig := tlsAutomation(cfg.Gateway.Certificate); tlsConfig != nil {
 		config["apps"].(map[string]any)["tls"] = tlsConfig
 	}
 
 	return json.MarshalIndent(config, "", "  ")
+}
+
+func listenerAddressesOverlap(left, right string) bool {
+	leftHost, leftPort, leftErr := net.SplitHostPort(left)
+	rightHost, rightPort, rightErr := net.SplitHostPort(right)
+	if leftErr != nil || rightErr != nil {
+		return left == right
+	}
+	return leftPort == rightPort && (leftHost == rightHost || leftHost == "" || rightHost == "" || leftHost == "0.0.0.0" || rightHost == "0.0.0.0" || leftHost == "::" || rightHost == "::")
 }
 
 func wildcardCertificateCoversHost(subjects []string, host string) bool {
@@ -483,10 +510,6 @@ func uniqueHeaderNames(policies []headerPolicy) []string {
 type headerPolicy struct {
 	name  string
 	value string
-}
-
-func protectedPolicyConfigured(auth model.AuthConfig) bool {
-	return len(protectedHeaderPolicies(auth)) > 0
 }
 
 func protectedHeaderPolicies(auth model.AuthConfig) []headerPolicy {

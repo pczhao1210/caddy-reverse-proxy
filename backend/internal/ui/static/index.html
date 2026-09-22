@@ -298,7 +298,9 @@
               <dl class="certificate-runtime-meta" x-show="certificateRuntime.available" x-cloak>
                 <div><dt x-text="t('certificates.storage')"></dt><dd><code x-text="certificateRuntime.storageDirectory || '-'"></code></dd></div>
                 <div><dt x-text="t('certificates.scannedAt')"></dt><dd x-text="formatDate(certificateRuntime.scannedAt)"></dd></div>
+                <div x-show="certificateRuntime.policyKnown"><dt x-text="t('certificates.activeSubjects')"></dt><dd x-text="certificateRuntime.managedSubjects.join(', ') || '-'"></dd></div>
               </dl>
+              <p class="certificate-message warn-text" x-show="certificateRuntime.available && !certificateRuntime.policyKnown" :title="certificateRuntime.policyError" x-text="t('certificates.policyUnknown')"></p>
               <p class="certificate-message error-text" x-show="!certificateRuntime.available" x-text="certificateRuntime.error || t('certificates.runtimeUnavailable')"></p>
               <p class="certificate-message muted" x-show="certificateRuntime.available && certificateRuntime.certificates.length === 0" x-text="t('certificates.noCertificates')"></p>
 
@@ -306,15 +308,19 @@
                 <template x-for="warning in certificateRuntime.warnings" :key="warning"><p class="certificate-message warn-text" x-text="warning"></p></template>
               </div>
 
+              <label class="certificate-filter"><span x-text="t('certificates.filter')"></span><select x-model="certificateFilter"><option value="all" x-text="t('certificates.all')"></option><option value="managed" x-text="t('certificates.managed')"></option><option value="history" x-text="t('certificates.history')"></option><option value="unknown" x-text="t('certificates.unknown')"></option></select></label>
               <div class="certificate-list" x-show="certificateRuntime.certificates.length > 0">
-                <template x-for="certificate in certificateRuntime.certificates" :key="certificate.id">
+                <template x-for="certificate in filteredCertificates()" :key="certificate.id">
                   <details class="certificate-entry">
                     <summary class="certificate-entry-header">
                       <strong x-text="certificateName(certificate)"></strong>
-                      <span class="pill" :class="certificateState(certificate).className" x-text="certificateState(certificate).text"></span>
+                      <span class="pill" :class="certificateSummaryState(certificate).className" x-text="certificateSummaryState(certificate).text"></span>
                     </summary>
                     <dl class="certificate-details">
                       <div><dt x-text="t('certificates.subjects')"></dt><dd x-text="(certificate.subjects || []).join(', ') || '-'"></dd></div>
+                      <div><dt x-text="t('certificates.usage')"></dt><dd x-text="certificateUsage(certificate).text"></dd></div>
+                      <div><dt x-text="t('certificates.validity')"></dt><dd x-text="certificateState(certificate).text"></dd></div>
+                      <div x-show="certificate.coveredBy?.length"><dt x-text="t('certificates.coveredBy')"></dt><dd x-text="(certificate.coveredBy || []).join(', ')"></dd></div>
                       <div><dt x-text="t('certificates.issuer')"></dt><dd x-text="certificate.issuer || '-'"></dd></div>
                       <div><dt x-text="t('certificates.expires')"></dt><dd><span x-text="formatDate(certificate.notAfter)"></span><small x-text="formatCertificateRemaining(certificate.remainingSeconds)"></small></dd></div>
                       <div><dt x-text="t('certificates.renewalStarts')"></dt><dd x-text="formatDate(certificate.renewalWindowStart)"></dd></div>
@@ -323,9 +329,23 @@
                       <div x-show="certificate.metadataFile"><dt x-text="t('certificates.metadataFile')"></dt><dd><code class="certificate-path" x-text="certificate.metadataFile"></code></dd></div>
                       <div><dt x-text="t('certificates.fingerprint')"></dt><dd><code class="certificate-path" x-text="shortFingerprint(certificate.fingerprintSha256)"></code></dd></div>
                     </dl>
+                    <div class="form-actions" x-show="certificate.canArchive"><button class="secondary-button small" type="button" :disabled="busy() || !canArchiveCertificate(certificate)" @click="requestArchiveCertificate(certificate)" x-text="t('certificates.archive')"></button></div>
                   </details>
                 </template>
               </div>
+              <section class="certificate-events">
+                <h3 x-text="t('certificates.events')"></h3>
+                <p class="certificate-message muted" x-show="certificateRuntime.events.length === 0" x-text="t('certificates.noEvents')"></p>
+                <template x-for="(event, index) in certificateRuntime.events" :key="index">
+                  <div class="certificate-event">
+                    <div class="certificate-event-heading"><strong x-text="t('certificates.' + event.operation)"></strong><span class="pill" :class="event.outcome === 'success' ? 'ok' : event.outcome === 'failure' ? 'error' : 'warn'" x-text="t('certificates.' + event.outcome)"></span></div>
+                    <time x-text="formatDate(event.time)"></time>
+                    <div x-text="(event.subjects || []).join(', ') || '-'"></div>
+                    <div class="warn-text" x-show="event.errorCode" x-text="t('certificates.error.' + event.errorCode)"></div>
+                    <div x-show="event.retryAt"><span x-text="t('certificates.retryAt')"></span>: <time x-text="formatDate(event.retryAt)"></time></div>
+                  </div>
+                </template>
+              </section>
             </aside>
           </div>
         </section>
@@ -367,6 +387,14 @@
         <label><span x-text="t('auth.adminToken')"></span><input x-model.trim="loginToken" @input="loginError = ''" type="password" autocomplete="current-password" required></label>
         <p class="dialog-error" x-show="loginError" x-text="loginError" role="alert" aria-live="assertive"></p>
         <button class="primary-button" type="submit" :disabled="isActing" x-text="t('actions.continue')"></button>
+      </form>
+    </dialog>
+
+    <dialog x-ref="archiveCertificateDialog" class="confirm-dialog" aria-labelledby="archive-certificate-title" @cancel.prevent="cancelArchiveCertificate()">
+      <form method="dialog" @submit.prevent="confirmArchiveCertificate()">
+        <h2 id="archive-certificate-title" x-text="t('certificates.archive')"></h2>
+        <p x-text="format('certificates.archiveConfirm', { name: certificateName(certificateToArchive) })"></p>
+        <div class="form-actions"><button class="secondary-button" type="button" @click="cancelArchiveCertificate()" x-text="t('actions.cancel')"></button><button class="primary-button" type="submit" :disabled="busy() || !canArchiveCertificate(certificateToArchive)" x-text="t('certificates.archive')"></button></div>
       </form>
     </dialog>
 

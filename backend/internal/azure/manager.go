@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -24,13 +25,15 @@ const managedNSGRuleName = "Allow-AIDockerFarm-Gateway-HTTPHTTPS"
 const (
 	managedDNSMetadataKey   = "managed-by"
 	managedDNSMetadataValue = "ai-docker-farm-gateway"
+	managedDNSOwnerKey      = "gateway-instance-id"
 )
 
 type Manager struct {
-	cfg       model.AppConfig
-	dnsClient *armdns.RecordSetsClient
-	nsgClient *armnetwork.SecurityRulesClient
-	logger    *slog.Logger
+	cfg        model.AppConfig
+	instanceID string
+	dnsClient  *armdns.RecordSetsClient
+	nsgClient  *armnetwork.SecurityRulesClient
+	logger     *slog.Logger
 }
 
 func NewManager(cfg model.AppConfig, logger *slog.Logger) (*Manager, error) {
@@ -44,7 +47,11 @@ func NewManager(cfg model.AppConfig, logger *slog.Logger) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	manager := &Manager{cfg: cfg, logger: logger}
+	instanceID, err := loadInstanceID(cfg.Gateway.StateDir)
+	if err != nil {
+		return nil, fmt.Errorf("load Azure resource owner: %w", err)
+	}
+	manager := &Manager{cfg: cfg, logger: logger, instanceID: instanceID}
 	if cfg.Azure.ManageDNS {
 		client, err := armdns.NewRecordSetsClient(cfg.Azure.SubscriptionID, credential, nil)
 		if err != nil {
@@ -126,6 +133,9 @@ func (m *Manager) reconcileDNS(ctx context.Context, routes []model.RouteConfig, 
 	if m.dnsClient == nil {
 		return 0, 0, nil, nil
 	}
+	if m.instanceID == "" {
+		return 0, 0, nil, fmt.Errorf("Azure DNS owner identity is unavailable")
+	}
 	zones := configuredDNSZones(m.cfg.Azure)
 	if len(zones) == 0 {
 		return 0, 0, nil, fmt.Errorf("at least one DNS zone is required for Azure DNS reconciliation")
@@ -149,13 +159,31 @@ func (m *Manager) reconcileDNS(ctx context.Context, routes []model.RouteConfig, 
 			continue
 		}
 		desired[relativeName] = struct{}{}
+		existing, getErr := m.dnsClient.Get(ctx, zone.ResourceGroup, zone.Name, relativeName, armdns.RecordTypeA, nil)
+		options := &armdns.RecordSetsClientCreateOrUpdateOptions{IfNoneMatch: to.Ptr("*")}
+		if getErr == nil {
+			if !m.ownsDNSRecord(&existing.RecordSet) {
+				return count, deleted, warnings, fmt.Errorf("DNS record %s is not owned by this gateway; explicit ownership migration is required", route.Host)
+			}
+			properties := existing.Properties
+			if properties.TTL != nil && *properties.TTL == 300 && len(properties.ARecords) == 1 && properties.ARecords[0] != nil && properties.ARecords[0].IPv4Address != nil && *properties.ARecords[0].IPv4Address == publicIP && properties.TargetResource == nil {
+				count++
+				continue
+			}
+			if existing.Etag == nil || *existing.Etag == "" {
+				return count, deleted, warnings, fmt.Errorf("DNS record %s has no ETag; refusing unconditional update", route.Host)
+			}
+			options = &armdns.RecordSetsClientCreateOrUpdateOptions{IfMatch: existing.Etag}
+		} else if !isNotFound(getErr) {
+			return count, deleted, warnings, fmt.Errorf("read DNS record %s: %w", route.Host, getErr)
+		}
 		_, err := m.dnsClient.CreateOrUpdate(ctx, zone.ResourceGroup, zone.Name, relativeName, armdns.RecordTypeA, armdns.RecordSet{
 			Properties: &armdns.RecordSetProperties{
 				TTL:      to.Ptr[int64](300),
-				Metadata: managedDNSMetadata(route.Host),
+				Metadata: m.dnsMetadata(route.Host),
 				ARecords: []*armdns.ARecord{{IPv4Address: to.Ptr(publicIP)}},
 			},
-		}, nil)
+		}, options)
 		if err != nil {
 			return count, deleted, warnings, fmt.Errorf("reconcile DNS record %s in zone %s: %w", route.Host, zone.Name, err)
 		}
@@ -179,6 +207,20 @@ func managedDNSMetadata(host string) map[string]*string {
 	}
 }
 
+func (m *Manager) dnsMetadata(host string) map[string]*string {
+	metadata := managedDNSMetadata(host)
+	metadata[managedDNSOwnerKey] = to.Ptr(m.instanceID)
+	return metadata
+}
+
+func (m *Manager) ownsDNSRecord(record *armdns.RecordSet) bool {
+	if !isManagedDNSRecord(record) || m.instanceID == "" {
+		return false
+	}
+	owner := record.Properties.Metadata[managedDNSOwnerKey]
+	return owner != nil && *owner == m.instanceID
+}
+
 func (m *Manager) cleanupDNS(ctx context.Context, zone model.AzureDNSZoneConfig, desired map[string]struct{}) (int, []string, error) {
 	deleted := 0
 	warnings := make([]string, 0)
@@ -189,7 +231,10 @@ func (m *Manager) cleanupDNS(ctx context.Context, zone model.AzureDNSZoneConfig,
 			return deleted, warnings, fmt.Errorf("list Azure DNS A records in zone %s: %w", zone.Name, err)
 		}
 		for _, record := range page.Value {
-			if !isManagedDNSRecord(record) {
+			if !m.ownsDNSRecord(record) {
+				if isManagedDNSRecord(record) && record.Properties.Metadata[managedDNSOwnerKey] == nil {
+					warnings = append(warnings, "legacy managed DNS record was retained because its instance owner is unknown")
+				}
 				continue
 			}
 			relativeName, ok := recordSetRelativeName(record)
@@ -200,7 +245,10 @@ func (m *Manager) cleanupDNS(ctx context.Context, zone model.AzureDNSZoneConfig,
 			if _, ok := desired[relativeName]; ok {
 				continue
 			}
-			if _, err := m.dnsClient.Delete(ctx, zone.ResourceGroup, zone.Name, relativeName, armdns.RecordTypeA, nil); err != nil && !isNotFound(err) {
+			if record.Etag == nil || *record.Etag == "" {
+				return deleted, warnings, fmt.Errorf("DNS record %s has no ETag; refusing unconditional delete", relativeName)
+			}
+			if _, err := m.dnsClient.Delete(ctx, zone.ResourceGroup, zone.Name, relativeName, armdns.RecordTypeA, &armdns.RecordSetsClientDeleteOptions{IfMatch: record.Etag}); err != nil && !isNotFound(err) {
 				return deleted, warnings, fmt.Errorf("delete Azure DNS record %s in zone %s: %w", relativeName, zone.Name, err)
 			}
 			deleted++
@@ -280,6 +328,9 @@ func (m *Manager) reconcileNSG(ctx context.Context, destinationPorts []int) (int
 	if m.nsgClient == nil {
 		return 0, 0, nil
 	}
+	if m.instanceID == "" {
+		return 0, 0, fmt.Errorf("Azure NSG owner identity is unavailable")
+	}
 	resourceGroup := nsgResourceGroup(m.cfg.Azure)
 	if resourceGroup == "" || m.cfg.Azure.NetworkSecurityGroupName == "" {
 		return 0, 0, fmt.Errorf("networkSecurityGroupResourceGroup and networkSecurityGroupName are required for Azure NSG reconciliation")
@@ -288,14 +339,30 @@ func (m *Manager) reconcileNSG(ctx context.Context, destinationPorts []int) (int
 		deleted, err := m.deleteNSGRule(ctx)
 		return 0, deleted, err
 	}
-	poller, err := m.nsgClient.BeginCreateOrUpdate(ctx, resourceGroup, m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, armnetwork.SecurityRule{
-		Properties: nsgRuleProperties(m.cfg.Azure, destinationPorts),
+	name := m.nsgRuleName()
+	properties := nsgRuleProperties(m.cfg.Azure, destinationPorts)
+	properties.Description = to.Ptr(m.nsgOwnerDescription())
+	existing, err := m.nsgClient.Get(ctx, resourceGroup, m.cfg.Azure.NetworkSecurityGroupName, name, nil)
+	if err == nil {
+		if !m.ownsNSGRule(existing.SecurityRule) {
+			return 0, 0, fmt.Errorf("NSG rule %s is not owned by this gateway", name)
+		}
+		current := *existing.Properties
+		current.ProvisioningState = nil
+		if reflect.DeepEqual(current, *properties) {
+			return 1, 0, nil
+		}
+	} else if !isNotFound(err) {
+		return 0, 0, fmt.Errorf("read NSG rule %s: %w", name, err)
+	}
+	poller, err := m.nsgClient.BeginCreateOrUpdate(ctx, resourceGroup, m.cfg.Azure.NetworkSecurityGroupName, name, armnetwork.SecurityRule{
+		Properties: properties,
 	}, nil)
 	if err != nil {
-		return 0, 0, fmt.Errorf("reconcile NSG rule %s: %w", managedNSGRuleName, err)
+		return 0, 0, fmt.Errorf("reconcile NSG rule %s: %w", name, err)
 	}
 	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
-		return 0, 0, fmt.Errorf("wait for NSG rule %s: %w", managedNSGRuleName, err)
+		return 0, 0, fmt.Errorf("wait for NSG rule %s: %w", name, err)
 	}
 	return 1, 0, nil
 }
@@ -367,20 +434,43 @@ func toPtrs(values []string) []*string {
 }
 
 func (m *Manager) deleteNSGRule(ctx context.Context) (int, error) {
-	poller, err := m.nsgClient.BeginDelete(ctx, nsgResourceGroup(m.cfg.Azure), m.cfg.Azure.NetworkSecurityGroupName, managedNSGRuleName, nil)
+	name := m.nsgRuleName()
+	existing, err := m.nsgClient.Get(ctx, nsgResourceGroup(m.cfg.Azure), m.cfg.Azure.NetworkSecurityGroupName, name, nil)
+	if isNotFound(err) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read NSG rule %s: %w", name, err)
+	}
+	if !m.ownsNSGRule(existing.SecurityRule) {
+		return 0, fmt.Errorf("NSG rule %s is not owned by this gateway", name)
+	}
+	poller, err := m.nsgClient.BeginDelete(ctx, nsgResourceGroup(m.cfg.Azure), m.cfg.Azure.NetworkSecurityGroupName, name, nil)
 	if err != nil {
 		if isNotFound(err) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("delete NSG rule %s: %w", managedNSGRuleName, err)
+		return 0, fmt.Errorf("delete NSG rule %s: %w", name, err)
 	}
 	if _, err := poller.PollUntilDone(ctx, nil); err != nil {
 		if isNotFound(err) {
 			return 0, nil
 		}
-		return 0, fmt.Errorf("wait for NSG rule delete %s: %w", managedNSGRuleName, err)
+		return 0, fmt.Errorf("wait for NSG rule delete %s: %w", name, err)
 	}
 	return 1, nil
+}
+
+func (m *Manager) nsgRuleName() string {
+	return managedNSGRuleName + "-" + m.instanceID
+}
+
+func (m *Manager) nsgOwnerDescription() string {
+	return "Managed by AI Docker Farm Gateway; instance=" + m.instanceID
+}
+
+func (m *Manager) ownsNSGRule(rule armnetwork.SecurityRule) bool {
+	return m.instanceID != "" && rule.Properties != nil && rule.Properties.Description != nil && *rule.Properties.Description == m.nsgOwnerDescription()
 }
 
 func isNotFound(err error) bool {

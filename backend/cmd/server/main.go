@@ -46,7 +46,7 @@ func main() {
 	auditLogger := audit.NewLogger(cfg.Audit, logger.With("component", "audit"))
 
 	renderer := caddy.NewRenderer(cfg)
-	initialConfig, err := renderer.Render(store.List())
+	initialConfig, err := renderer.Render(store.AppliedSnapshot().Routes)
 	if err != nil {
 		logger.Error("failed to render initial caddy config", "error", err)
 		os.Exit(1)

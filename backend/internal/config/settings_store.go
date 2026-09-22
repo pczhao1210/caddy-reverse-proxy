@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 
 	"github.com/aidockerfarm/gateway/internal/model"
+	"github.com/aidockerfarm/gateway/internal/persistence"
 )
 
 const settingsFileName = "settings.json"
@@ -105,37 +106,8 @@ func (s *SettingsStore) Save(settings Settings) error {
 	if s == nil || s.path == "" {
 		return fmt.Errorf("settings file is not configured")
 	}
-	directory := filepath.Dir(s.path)
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create settings directory: %w", err)
-	}
-	data, err := json.MarshalIndent(settings, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode settings: %w", err)
-	}
-	temporary, err := os.CreateTemp(directory, "."+filepath.Base(s.path)+".tmp-*")
-	if err != nil {
-		return fmt.Errorf("create temporary settings: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(data, '\n')); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, s.path); err != nil {
-		return fmt.Errorf("replace settings: %w", err)
+	if err := persistence.WriteJSON(s.path, settings, 0o700); err != nil {
+		return fmt.Errorf("save settings: %w", err)
 	}
 	return nil
 }

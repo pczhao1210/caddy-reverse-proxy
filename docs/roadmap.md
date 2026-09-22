@@ -29,12 +29,26 @@ This document tracks what is currently implemented and what still needs to be co
 - Docker socket proxy deployment option for VM profile discovery.
 - E2E routing test script for Caddy plus a sample Docker service.
 - Supervised Caddy lifecycle with `/livez` and `/readyz` orchestration probes.
-- Serialized reconciliation, last-known-good Docker discovery routes, and atomic route file replacement.
+- Serialized configuration commits, generation-checked status publication, last-known-good Docker discovery routes, and atomic route file replacement.
 - Internal-route CIDR enforcement, deterministic path priority, homogeneous upstream transports, and gateway credential stripping.
 - Multi-zone Azure DNS reconciliation with an explicit ingress public IP.
 - Single-container lifecycle script for existing hosts and a Cloud Shell/local Azure CLI deployment script for standalone Azure VMs.
 
 ## Further Hardening
+
+### Certificate Lifecycle Remediation (2026-09-22)
+
+- Implemented active-policy versus historical/unknown inventory, independent estimated validity windows, bounded recent issuance/renewal events, and confirmed reversible archive with runtime, TLS, path, file-identity, configuration-lock and CertMagic storage-lock checks.
+- Local verification: full Go race tests and vet; renderer/API/security regression tests; real Caddy 2.10.2 active-config reading and manual-loader rejection; Node UI regressions (6/6); browser fixture tests for filtering, cancel/confirm archive, events, desktop and 390px layout. No public CA requests or production certificate removal were performed.
+- Remaining environment gates: real ACME renewal, production storage/archive rehearsal, shared-storage/crash fault injection. Multi-instance archive coordination and whole-system power-loss durability are not guaranteed. Next smallest step: back up data and validate the new inventory against the deployed runtime in an authorized test environment before exercising archive; see the operations guide.
+
+### Prioritized Audit Remediation (2026-09-22)
+
+- Phases 1-4 implemented: HTTP/TLS separation, management API credential preservation, restart-safe desired/applied revisions, concurrent Apply confirmation, instance-owned Azure resources, shared-network Docker discovery, and non-authentication 503 handling.
+- Phase 5 implemented: bounded concurrent health checks outside the commit lock, reverse-block audit tail reads, no-op Azure write suppression, shared atomic JSON persistence, and removal of two unused wrappers. Compatibility APIs are retained.
+- Phase 6 local verification complete: full `go test -race ./...` and `go vet ./...` passed, including isolated Caddy 2.10.2 HTTP/TLS/auth tests using `CADDY_TEST_BIN`; Node authentication regressions passed (4/4). Browser checks passed for real login, injected 401/503 responses, pending drafts, and Apply through to actual Caddy forwarding; a 390px viewport had no horizontal overflow. JS/shell syntax, editor diagnostics, and `git diff --check` passed. SDK tests use mock transports, not cloud resources. Million-event audit tail benchmark: approximately 0.15 ms/op on the test host, not a production throughput claim.
+- Optional/environment gates not run: real Azure integration, public ACME issuance, full Docker-stack E2E, crash injection during multi-file import, and production load tests. The existing E2E script tears down its sample stack and volumes, so it was not run against current workloads. Multi-file import remains non-atomic across process crashes.
+- Next smallest step: back up state and rehearse the v3/ownership migration in an explicitly authorized test environment before production rollout; see the operations guide. No deployment or cloud resources were changed in this remediation.
 
 - Entra ID/OIDC should replace token-based management auth for production multi-user governance.
 - Health checks currently use simple HTTP status probes; future work can add per-route intervals, thresholds, and active/passive policy controls.
@@ -43,13 +57,13 @@ This document tracks what is currently implemented and what still needs to be co
 
 ## Routing Resource Model
 
-The persisted v2 model and the Routes UI now use three reusable resources:
+The v2 resource model and the Routes UI use three reusable resources, wrapped in a v3 disk envelope:
 
 - Listener: a frontend hostname, port, and HTTP/HTTPS protocol.
 - Backend pool: a named set of IP addresses or DNS names.
 - Routing rule: selects one listener and backend pool, then defines backend protocol/port, path, health path, exposure, and WebSocket behavior.
 
-The store compiles these resources into the existing runtime route model consumed by reconciliation, health checks, Azure, and Caddy. A legacy `routes` file is migrated atomically to v2 on load. The old route API remains as a compatibility adapter for Docker bind and existing clients.
+The store compiles these resources into the runtime route model consumed by reconciliation, health checks, Azure, and Caddy. Legacy v1/v2 files migrate atomically to a v3 envelope with desired/applied snapshots and revisions, taking existing contents as an applied baseline. Configuration ZIPs remain v2. The old route API remains as a compatibility adapter for Docker bind and existing clients.
 
 Certificate policy is still managed globally by subject rather than as a separate per-listener binding. Docker-discovered service identities also remain runtime inputs rather than persisted first-class resources.
 

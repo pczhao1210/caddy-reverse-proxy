@@ -264,6 +264,7 @@ type ContainerService struct {
 	NetworkAddresses []string             `json:"networkAddresses,omitempty"`
 	BindPolicy       *ContainerBindPolicy `json:"bindPolicy,omitempty"`
 	RouteHint        *RouteConfig         `json:"routeHint,omitempty"`
+	RouteWarning     string               `json:"routeWarning,omitempty"`
 }
 
 type NetworkEndpoint struct {

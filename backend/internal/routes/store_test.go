@@ -9,6 +9,61 @@ import (
 	"github.com/aidockerfarm/gateway/internal/model"
 )
 
+func TestAppliedSnapshotSurvivesRestartAndConcurrentDraft(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := NewStore(path)
+	first, err := store.Add(model.RouteConfig{ID: "first", Host: "first.example.com", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewStore(path)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.Pending() || len(restarted.AppliedSnapshot().Routes) != 0 || len(restarted.List()) != 1 {
+		t.Fatal("restart applied an unapproved draft")
+	}
+	loaded := store.DesiredSnapshot()
+	first.Host = "newer.example.com"
+	if _, err := store.Replace(first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkApplied(loaded); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if !restarted.Pending() || restarted.AppliedSnapshot().Routes[0].Host != "first.example.com" || restarted.List()[0].Host != "newer.example.com" {
+		t.Fatal("confirming an older revision lost the newer draft")
+	}
+	if err := restarted.MarkApplied(restarted.DesiredSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if store.Pending() || store.AppliedSnapshot().Routes[0].Host != "newer.example.com" {
+		t.Fatal("applied revision was not preserved after restart")
+	}
+}
+
+func TestMarkAppliedRollsBackOnPersistenceFailure(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "routes.json")
+	store := NewStore(path)
+	if _, err := store.Add(model.RouteConfig{Host: "first.example.com", Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}}); err != nil {
+		t.Fatal(err)
+	}
+	store.path = directory
+	if err := store.MarkApplied(store.DesiredSnapshot()); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if !store.Pending() || len(store.AppliedSnapshot().Routes) != 0 {
+		t.Fatal("failed persistence changed the applied snapshot")
+	}
+}
+
 func TestAddNormalizesInternalRoute(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "routes.json"))
 	route, err := store.Add(model.RouteConfig{
@@ -342,7 +397,7 @@ func TestRoutingResourcesCompilePersistAndProtectReferences(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
 	}
-	if !strings.Contains(string(persisted), `"version": 2`) || strings.Contains(string(persisted), `"routes"`) {
+	if !strings.Contains(string(persisted), `"version": 3`) || strings.Contains(string(persisted), `"routes"`) {
 		t.Fatalf("persisted v2 payload = %s", persisted)
 	}
 }

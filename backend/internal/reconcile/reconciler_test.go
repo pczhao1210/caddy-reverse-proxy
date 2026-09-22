@@ -3,7 +3,9 @@ package reconcile
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,8 +30,100 @@ func (r *captureRenderer) Render(routes []model.RouteConfig) ([]byte, error) {
 
 type testLoader struct{}
 
+type runtimeConfigLoader struct{ testLoader }
+
+func (runtimeConfigLoader) Config(context.Context) ([]byte, error) {
+	return []byte(`{"active":true}`), nil
+}
+
+func TestRuntimeInspectionHoldsConfigurationLock(t *testing.T) {
+	controller := New(Options{Loader: runtimeConfigLoader{}})
+	if err := controller.WithRuntimeConfig(context.Background(), func(data []byte) error {
+		if controller.syncMu.TryLock() {
+			controller.syncMu.Unlock()
+			t.Fatal("runtime inspection did not lock configuration commits")
+		}
+		if string(data) != `{"active":true}` {
+			t.Fatalf("unexpected active config: %s", data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !controller.syncMu.TryLock() {
+		t.Fatal("configuration lock leaked")
+	}
+	controller.syncMu.Unlock()
+	controller.loader = testLoader{}
+	if err := controller.WithRuntimeConfig(context.Background(), func([]byte) error { t.Fatal("unknown runtime accepted"); return nil }); err == nil {
+		t.Fatal("missing reader accepted")
+	}
+}
+
 func (testLoader) Load(context.Context, []byte) error {
 	return nil
+}
+
+type callbackLoader func() error
+
+func (loader callbackLoader) Load(context.Context, []byte) error {
+	return loader()
+}
+
+func TestApplyConfirmsOnlyLoadedRevision(t *testing.T) {
+	store := routes.NewStore(filepath.Join(t.TempDir(), "routes.json"))
+	renderer := &captureRenderer{}
+	loader := callbackLoader(func() error {
+		_, err := store.Add(model.RouteConfig{Host: "new.example.com", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}})
+		return err
+	})
+	controller := New(Options{Store: store, Renderer: renderer, Loader: loader})
+	result := controller.Sync(context.Background())
+	if result.Error != "" || !controller.RoutingChangesPending() || len(store.AppliedSnapshot().Routes) != 0 || len(store.List()) != 1 {
+		t.Fatalf("apply lost newer draft: result=%+v pending=%t", result, controller.RoutingChangesPending())
+	}
+}
+
+func TestBackgroundSyncAfterRestartUsesAppliedSnapshot(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "routes.json")
+	store := routes.NewStore(path)
+	created, err := store.Add(model.RouteConfig{Host: "live.example.com", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkApplied(store.DesiredSnapshot()); err != nil {
+		t.Fatal(err)
+	}
+	created.Host = "draft.example.com"
+	if _, err := store.Replace(created); err != nil {
+		t.Fatal(err)
+	}
+	restarted := routes.NewStore(path)
+	if err := restarted.Load(); err != nil {
+		t.Fatal(err)
+	}
+	renderer := &captureRenderer{}
+	controller := New(Options{Store: restarted, Renderer: renderer, Loader: testLoader{}})
+	if result := controller.SyncWithoutPendingRoutingChanges(context.Background()); result.Error != "" {
+		t.Fatal(result.Error)
+	}
+	if len(renderer.routes) != 1 || renderer.routes[0].Host != "live.example.com" || !controller.RoutingChangesPending() {
+		t.Fatalf("background applied draft: %#v", renderer.routes)
+	}
+}
+
+func TestApplyPersistenceFailureRestoresRuntime(t *testing.T) {
+	store := routes.NewStore("")
+	if _, err := store.Add(model.RouteConfig{Host: "draft.example.com", Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}}); err != nil {
+		t.Fatal(err)
+	}
+	renderer := &captureRenderer{}
+	loads := 0
+	controller := New(Options{Store: store, Renderer: renderer, Loader: callbackLoader(func() error { loads++; return nil })})
+	result := controller.SyncWithCommit(context.Background(), nil, func(routes.Snapshot) error { return errors.New("disk unavailable") })
+	if result.Error == "" || result.CaddyLoaded || loads != 2 || len(renderer.routes) != 0 || !store.Pending() {
+		t.Fatalf("failed commit did not restore previous runtime: result=%+v loads=%d", result, loads)
+	}
 }
 
 type testAzureManager struct {
@@ -49,6 +143,60 @@ func (testHealthChecker) Check(_ context.Context, routes []model.RouteConfig) []
 		statuses = append(statuses, model.RouteHealthStatus{RouteID: route.ID, Host: route.Host, Healthy: false, Error: "not ready"})
 	}
 	return statuses
+}
+
+type callbackHealthChecker func(context.Context, []model.RouteConfig) []model.RouteHealthStatus
+
+func (checker callbackHealthChecker) Check(ctx context.Context, routes []model.RouteConfig) []model.RouteHealthStatus {
+	return checker(ctx, routes)
+}
+
+func TestSlowHealthDoesNotBlockApplyOrPublishStaleStatus(t *testing.T) {
+	store := routes.NewStore("")
+	route, err := store.Add(model.RouteConfig{Host: "app.localhost", Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(release) })
+	defer unblock()
+	var calls atomic.Int32
+	checker := callbackHealthChecker(func(ctx context.Context, routes []model.RouteConfig) []model.RouteHealthStatus {
+		message := "new probe"
+		if calls.Add(1) == 1 {
+			close(entered)
+			<-release
+			message = "stale probe"
+			if ctx.Err() == nil {
+				t.Error("old probe context was not canceled")
+			}
+		}
+		return []model.RouteHealthStatus{{RouteID: route.ID, Error: message}}
+	})
+	controller := New(Options{Store: store, Renderer: testRenderer{}, Loader: testLoader{}, HealthChecker: checker})
+	first := make(chan model.ReconcileResult, 1)
+	go func() { first <- controller.Sync(context.Background()) }()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first probe did not start")
+	}
+	second := make(chan model.ReconcileResult, 1)
+	go func() { second <- controller.Sync(context.Background()) }()
+	select {
+	case result := <-second:
+		if result.Error != "" || !result.CaddyLoaded {
+			t.Fatalf("new apply failed: %+v", result)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("health probe blocked configuration apply")
+	}
+	unblock()
+	<-first
+	if controller.Last().RouteHealth[0].Error != "new probe" || store.List()[0].LastError != "new probe" {
+		t.Fatal("stale health result replaced current status")
+	}
 }
 
 type failingDiscoverer struct{}
@@ -227,8 +375,6 @@ func TestSyncWithoutPendingRoutingChangesUsesLastAppliedRoutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Replace() error = %v", err)
 	}
-	reconciler.MarkRoutingChangesPending()
-
 	if result := reconciler.SyncWithoutPendingRoutingChanges(context.Background()); result.Error != "" {
 		t.Fatalf("SyncWithoutPendingRoutingChanges() error = %q", result.Error)
 	}

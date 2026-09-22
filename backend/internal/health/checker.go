@@ -3,13 +3,18 @@ package health
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aidockerfarm/gateway/internal/model"
 )
+
+const maxConcurrentChecks = 8
+const checkBudget = 10 * time.Second
 
 type Checker struct {
 	cfg    model.HealthConfig
@@ -28,25 +33,46 @@ func (c *Checker) Check(ctx context.Context, routes []model.RouteConfig) []model
 	if c == nil || !c.cfg.Enabled {
 		return nil
 	}
-	statuses := make([]model.RouteHealthStatus, 0, len(routes))
+	ctx, cancel := context.WithTimeout(ctx, checkBudget)
+	defer cancel()
+	active := make([]model.RouteConfig, 0, len(routes))
 	for _, route := range routes {
 		if !route.Enabled || len(route.Upstreams) == 0 {
 			continue
 		}
-		status := model.RouteHealthStatus{RouteID: route.ID, Host: route.Host, Healthy: true, CheckedAt: time.Now().UTC()}
-		for _, upstream := range route.Upstreams {
-			if err := c.checkUpstream(ctx, upstream); err != nil {
-				status.Healthy = false
-				status.Error = fmt.Sprintf("%s: %v", upstream.Name, err)
-				break
-			}
-		}
-		statuses = append(statuses, status)
+		active = append(active, route)
 	}
+	statuses := make([]model.RouteHealthStatus, len(active))
+	jobs := make(chan int)
+	var workers sync.WaitGroup
+	for worker := 0; worker < min(maxConcurrentChecks, len(active)); worker++ {
+		workers.Go(func() {
+			for index := range jobs {
+				route := active[index]
+				status := model.RouteHealthStatus{RouteID: route.ID, Host: route.Host, Healthy: true, CheckedAt: time.Now().UTC()}
+				for _, upstream := range route.Upstreams {
+					if err := c.checkUpstream(ctx, upstream); err != nil {
+						status.Healthy = false
+						status.Error = fmt.Sprintf("%s: %v", upstream.Name, err)
+						break
+					}
+				}
+				statuses[index] = status
+			}
+		})
+	}
+	for index := range active {
+		jobs <- index
+	}
+	close(jobs)
+	workers.Wait()
 	return statuses
 }
 
 func (c *Checker) checkUpstream(ctx context.Context, upstream model.UpstreamTarget) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	healthURL, err := c.healthURL(upstream)
 	if err != nil {
 		return err
@@ -60,6 +86,7 @@ func (c *Checker) checkUpstream(ctx context.Context, upstream model.UpstreamTarg
 		return err
 	}
 	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	if response.StatusCode < 200 || response.StatusCode >= 400 {
 		return fmt.Errorf("health check returned %s", response.Status)
 	}

@@ -183,7 +183,7 @@ const messages = {
     'forms.caDirectory': 'CA directory URL',
     'forms.certificateSubjects': 'Managed frontend hostnames',
     'forms.renewalWindowRatio': 'Automatic renewal window',
-    'forms.renewalWindowRatioHint': 'Start renewal when this share of the certificate lifetime remains. 50% renews earlier than Caddy’s 33% default.',
+    'forms.renewalWindowRatioHint': 'Estimated window based on remaining lifetime. Actual renewal follows CA ARI and Caddy scheduling.',
     'forms.dnsProvider': 'DNS challenge provider',
     'forms.azureSubscriptionId': 'Azure subscription ID',
     'forms.azureResourceGroup': 'DNS zone resource group',
@@ -253,7 +253,7 @@ const messages = {
     'status.notConfigured': 'Not configured',
     'status.pendingApply': 'Pending apply',
     'status.valid': 'Valid',
-    'status.renewalDue': 'Renewal due',
+    'status.renewalDue': 'Estimated renewal window',
     'status.expired': 'Expired',
     'status.notYetValid': 'Not yet valid',
     'status.running': 'Running',
@@ -456,7 +456,7 @@ const messages = {
     'certificates.storage': 'Caddy storage',
     'certificates.scannedAt': 'Scanned',
     'certificates.expires': 'Expires',
-    'certificates.renewalStarts': 'Renewal window starts',
+    'certificates.renewalStarts': 'Estimated renewal window starts',
     'certificates.issuer': 'Issuer',
     'certificates.certificateFile': 'Certificate file',
     'certificates.privateKeyFile': 'Private key file',
@@ -466,7 +466,36 @@ const messages = {
     'certificates.noCertificates': 'No issued certificate files were found in Caddy storage.',
     'certificates.runtimeUnavailable': 'Certificate storage inspection is unavailable.',
     'certificates.policyNote': 'Saving updates Caddy’s automation policy. Reloading TLS applies the current policy; it does not force an ACME renewal.',
-    'certificates.earlyRenewalTitle': 'Set the renewal window to 50% of certificate lifetime and apply the policy.'
+    'certificates.earlyRenewalTitle': 'Set the renewal window to 50% of certificate lifetime and apply the policy.',
+    'certificates.usage': 'Management',
+    'certificates.validity': 'Validity',
+    'certificates.managed': 'Managed by active policy',
+    'certificates.covered': 'History: wildcard-covered',
+    'certificates.unreferenced': 'History: not referenced',
+    'certificates.unknown': 'Management unknown',
+    'certificates.coveredBy': 'Covered by active subjects',
+    'certificates.filter': 'Certificate inventory',
+    'certificates.all': 'All certificates',
+    'certificates.history': 'Historical certificates',
+    'certificates.policyUnknown': 'Active certificate policy is unavailable. Archiving is disabled.',
+    'certificates.activeSubjects': 'Active managed subjects',
+    'certificates.archive': 'Archive certificate',
+    'certificates.archiveConfirm': 'Archive {name} and its key and metadata? The materials will leave active storage and remain in a private archive. This does not revoke the certificate.',
+    'certificates.archived': 'Certificate archived: {directory}',
+    'certificates.events': 'Recent issuance and renewal events',
+    'certificates.noEvents': 'No recent issuance or renewal events in the runtime log buffer.',
+    'certificates.retryAt': 'Reported retry time',
+    'certificates.renew': 'Renewal',
+    'certificates.obtain': 'Issuance',
+    'certificates.success': 'Succeeded',
+    'certificates.failure': 'Failed',
+    'certificates.retry': 'Retry scheduled',
+    'certificates.started': 'Started',
+    'certificates.error.dns': 'DNS / propagation',
+    'certificates.error.authorization': 'Authorization / credentials',
+    'certificates.error.rate_limit': 'CA rate limit',
+    'certificates.error.network': 'Network / timeout',
+    'certificates.error.other': 'Unclassified error'
   },
   'zh-CN': {
     title: 'Caddy Proxy',
@@ -610,7 +639,7 @@ const messages = {
     'forms.caDirectory': 'CA Directory URL',
     'forms.certificateSubjects': '托管前端域名',
     'forms.renewalWindowRatio': '自动续期窗口',
-    'forms.renewalWindowRatioHint': '当证书剩余此比例的有效期时开始续期；50% 会早于 Caddy 默认的 33%。',
+    'forms.renewalWindowRatioHint': '按剩余有效期估算窗口，实际续期时间由 CA ARI 与 Caddy 调度决定。',
     'forms.dnsProvider': 'DNS Challenge 提供商',
     'forms.azureSubscriptionId': 'Azure 订阅 ID',
     'forms.azureResourceGroup': 'DNS Zone 资源组',
@@ -680,7 +709,7 @@ const messages = {
     'status.notConfigured': '未配置',
     'status.pendingApply': '等待应用',
     'status.valid': '有效',
-    'status.renewalDue': '需要续期',
+    'status.renewalDue': '进入预计续期窗口',
     'status.expired': '已过期',
     'status.notYetValid': '尚未生效',
     'status.running': '运行中',
@@ -707,9 +736,9 @@ const messages = {
     'certificate.managedIdentity': '托管身份',
     'certificate.appRegistration': 'App Registration',
     'certificate.secretConfigured': '已配置',
-    'certificate.renewalDefault': '标准 · 剩余 33% 时续期',
-    'certificate.renewalEarlier': '较早 · 剩余 50% 时续期',
-    'certificate.renewalEarliest': '最早 · 剩余 67% 时续期',
+    'certificate.renewalDefault': '标准 · 剩余 33% 时进入窗口',
+    'certificate.renewalEarlier': '较早 · 剩余 50% 时进入窗口',
+    'certificate.renewalEarliest': '最早 · 剩余 67% 时进入窗口',
     'certificate.persistedNote': 'Caddy 会在到期前自动续签托管证书。请持久化 /data/caddy，并确保签发验证仍可用。“重新加载 TLS 配置”只会重新应用策略，不会强制续期。',
     'deployment.containerSocket': '容器 + Docker Socket',
     'deployment.azureVM': 'Azure VM',
@@ -883,7 +912,7 @@ const messages = {
     'certificates.storage': 'Caddy 存储目录',
     'certificates.scannedAt': '扫描时间',
     'certificates.expires': '过期时间',
-    'certificates.renewalStarts': '续期窗口开始',
+    'certificates.renewalStarts': '预计续期窗口开始',
     'certificates.issuer': '签发者',
     'certificates.certificateFile': '证书文件',
     'certificates.privateKeyFile': '私钥文件',
@@ -893,7 +922,36 @@ const messages = {
     'certificates.noCertificates': 'Caddy 存储中尚未找到已签发的证书文件。',
     'certificates.runtimeUnavailable': '当前无法检查证书存储。',
     'certificates.policyNote': '保存会更新 Caddy 自动化策略；重新加载 TLS 只应用当前策略，不会强制发起 ACME 续期。',
-    'certificates.earlyRenewalTitle': '将续期窗口设为证书有效期的 50%，并应用该策略。'
+    'certificates.earlyRenewalTitle': '将续期窗口设为证书有效期的 50%，并应用该策略。',
+    'certificates.usage': '管理状态',
+    'certificates.validity': '有效期状态',
+    'certificates.managed': '当前策略管理',
+    'certificates.covered': '历史：通配符已覆盖',
+    'certificates.unreferenced': '历史：当前未引用',
+    'certificates.unknown': '管理状态未知',
+    'certificates.coveredBy': '当前策略覆盖域名',
+    'certificates.filter': '证书清单',
+    'certificates.all': '全部证书',
+    'certificates.history': '历史证书',
+    'certificates.policyUnknown': '无法确认当前运行中的证书策略，已禁止归档。',
+    'certificates.activeSubjects': '当前管理的域名',
+    'certificates.archive': '归档证书',
+    'certificates.archiveConfirm': '确定归档 {name} 及其私钥和元数据吗？材料将移出活动存储并保留在私有归档目录中，不会吊销证书。',
+    'certificates.archived': '证书已归档：{directory}',
+    'certificates.events': '近期签发与续期事件',
+    'certificates.noEvents': '运行日志缓冲区中暂无近期签发或续期事件。',
+    'certificates.retryAt': '日志记录的重试时间',
+    'certificates.renew': '续期',
+    'certificates.obtain': '签发',
+    'certificates.success': '成功',
+    'certificates.failure': '失败',
+    'certificates.retry': '等待重试',
+    'certificates.started': '已开始',
+    'certificates.error.dns': 'DNS / 传播',
+    'certificates.error.authorization': '权限 / 凭据',
+    'certificates.error.rate_limit': 'CA 限流',
+    'certificates.error.network': '网络 / 超时',
+    'certificates.error.other': '未分类错误'
   }
 };
 
@@ -955,6 +1013,8 @@ document.addEventListener('alpine:init', () => {
     bindForms: {},
     certificateForm: emptyCertificateForm(),
     certificateRuntime: emptyCertificateRuntime(),
+    certificateFilter: 'all',
+    certificateToArchive: null,
     logEntries: [],
     logsLoaded: false,
     logLevel: 'all',
@@ -1089,11 +1149,11 @@ document.addEventListener('alpine:init', () => {
         }
         this.lastUpdated = new Date();
         if (errors.length > 0) {
-          const authError = errors.find((error) => error.status === 401 || error.status === 503);
+          const authError = errors.find((error) => error.status === 401);
           if (authError) {
             this.token = '';
             localStorage.removeItem('gatewayToken');
-            this.loginError = authError.status === 401 ? this.t('msg.invalidAdminToken') : this.translateBackendText(authError.message);
+            this.loginError = this.t('msg.invalidAdminToken');
             this.openLogin();
           } else {
             this.showAlert(errors.map((error) => this.translateBackendText(error.message)).join('; '));
@@ -1616,10 +1676,10 @@ document.addEventListener('alpine:init', () => {
         await action();
       } catch (error) {
         this.showAlert(error.message);
-        if (error.status === 401 || error.status === 503) {
+        if (error.status === 401) {
           this.token = '';
           localStorage.removeItem('gatewayToken');
-          this.loginError = error.status === 401 ? this.t('msg.invalidAdminToken') : this.translateBackendText(error.message);
+          this.loginError = this.t('msg.invalidAdminToken');
           this.openLogin();
         }
       } finally {
@@ -1716,8 +1776,59 @@ document.addEventListener('alpine:init', () => {
         scannedAt: source.scannedAt || '',
         certificates: Array.isArray(source.certificates) ? source.certificates : [],
         warnings: Array.isArray(source.warnings) ? source.warnings : [],
-        error: source.error || ''
+        error: source.error || '',
+        policyKnown: Boolean(source.policyKnown),
+        policyError: source.policyError || '',
+        managedSubjects: Array.isArray(source.managedSubjects) ? source.managedSubjects : [],
+        events: Array.isArray(source.events) ? source.events : []
       };
+    },
+
+    filteredCertificates() {
+      return this.certificateRuntime.certificates.filter((certificate) => {
+        if (this.certificateFilter === 'all') return true;
+        if (this.certificateFilter === 'history') return ['covered', 'unreferenced'].includes(certificate.usage);
+        return (certificate.usage || 'unknown') === this.certificateFilter;
+      }).sort((left, right) => Number(right.usage === 'managed') - Number(left.usage === 'managed'));
+    },
+
+    certificateUsage(certificate) {
+      const usage = ['managed', 'covered', 'unreferenced'].includes(certificate?.usage) ? certificate.usage : 'unknown';
+      return { text: this.t('certificates.' + usage), className: usage === 'managed' ? 'ok' : '' };
+    },
+
+    certificateSummaryState(certificate) {
+      return certificate.usage === 'managed' ? this.certificateState(certificate) : this.certificateUsage(certificate);
+    },
+
+    canArchiveCertificate(certificate) {
+      return Boolean(certificate?.canArchive && this.certificateRuntime.policyKnown && !this.certificateDirty && !this.configurationImportPending());
+    },
+
+    requestArchiveCertificate(certificate) {
+      if (!this.canArchiveCertificate(certificate) || this.busy()) return;
+      this.certificateToArchive = certificate;
+      this.$refs.archiveCertificateDialog.showModal();
+    },
+
+    cancelArchiveCertificate() {
+      this.$refs.archiveCertificateDialog.close();
+      this.certificateToArchive = null;
+    },
+
+    async confirmArchiveCertificate() {
+      const certificate = this.certificateToArchive;
+      this.cancelArchiveCertificate();
+      if (!this.canArchiveCertificate(certificate)) return;
+      await this.runAction(async () => {
+        const result = await this.api('/api/certificate/archive', {
+          method: 'POST',
+          body: JSON.stringify({ id: certificate.id, fingerprintSha256: certificate.fingerprintSha256, confirm: true })
+        });
+        const refreshed = await this.api('/api/certificate');
+        this.setCertificateRuntime(refreshed.runtime);
+        this.showNotice(this.format('certificates.archived', { directory: result.directory }));
+      });
     },
 
     markCertificateDirty() {
@@ -2383,5 +2494,5 @@ function emptyCertificateForm() {
 }
 
 function emptyCertificateRuntime() {
-  return { available: false, storageDirectory: '', scannedAt: '', certificates: [], warnings: [], error: '' };
+  return { available: false, storageDirectory: '', scannedAt: '', certificates: [], warnings: [], error: '', policyKnown: false, policyError: '', managedSubjects: [], events: [] };
 }

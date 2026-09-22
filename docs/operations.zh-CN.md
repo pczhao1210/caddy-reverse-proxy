@@ -140,9 +140,9 @@ make docker-push
 | `GATEWAY_ADMIN_TOKEN` | `change-me` | 管理 API 和受保护路由的管理员令牌。真实部署前必须替换。 |
 | `GATEWAY_ADMIN_TOKENS` | empty | 可选的逗号分隔多令牌 allowlist。 |
 | `GATEWAY_AUTH_REQUIRED` | `true` | 为 `/api/*` 启用令牌认证。 |
-| `GATEWAY_RECONCILE_SECONDS` | `30` | 周期性协调间隔，单位秒。存在待应用路由草稿时暂停周期协调；手动 Apply 后草稿才会生效。 |
+| `GATEWAY_RECONCILE_SECONDS` | `30` | 周期性协调间隔，单位秒。存在草稿时后台仍协调已应用快照；只有手动 Apply 才激活草稿。 |
 | `GATEWAY_CONFIG_FILE` | `/config/platform.example.json` | 容器内 JSON 平台配置文件。环境变量会覆盖它。 |
-| `GATEWAY_ROUTES_FILE` | `/data/platform/routes.json` | 可写的 v2 Listener、Backend Pool 和 Routing Rule 存储；旧路由与 Docker bind 通过兼容适配层迁移。 |
+| `GATEWAY_ROUTES_FILE` | `/data/platform/routes.json` | v3 磁盘封装，保存 desired/applied 两份 v2 资源及版本号；旧路由与 Docker bind 仍使用兼容适配层。 |
 | `GATEWAY_STATE_DIR` | `/data/platform` | 平台状态目录。 |
 | `GATEWAY_CADDY_DATA_DIR` | `/data/caddy` | Caddy 证书和运行时数据。生产环境应持久化。 |
 | `GATEWAY_CERTIFICATE_FILE` | `/data/platform/certificate.json` | Console 管理的证书设置，原子保存；POSIX 文件系统上创建权限为 `0600`。 |
@@ -153,12 +153,16 @@ make docker-push
 | Variable | Default | Meaning |
 |---|---|---|
 | `GATEWAY_CONTROL_LISTEN` | `:8080` | 容器内管理 API/UI 监听地址。 |
-| `GATEWAY_MANAGEMENT_HOST` | empty | 可选公网管理 UI 主机名，通过 Caddy 在 80/443 暴露。它会成为受保护路由，并参与 Azure DNS/NSG 协调。 |
+| `GATEWAY_MANAGEMENT_HOST` | empty | 可选公网管理 UI 主机名，通过 Caddy 在 80/443 暴露。登录静态资源公开，`/api/*` 由管理 API 鉴权；参与 Azure DNS/NSG 协调。 |
 | `GATEWAY_HTTP_LISTEN` | `:80` | 容器内 Caddy HTTP 监听地址。 |
 | `GATEWAY_HTTPS_LISTEN` | `:443` | 容器内 Caddy HTTPS 监听地址。 |
 | `GATEWAY_CADDY_ADMIN_ENDPOINT` | `http://127.0.0.1:2019` | 本地 Caddy Admin API 地址。应保持只监听回环地址。 |
 
 默认建议：保持 `GATEWAY_MANAGEMENT_HOST` 为空，通过 SSH 隧道、VPN、Bastion、Tailscale 或 WireGuard 访问 UI。
+
+启用管理域名要求 `auth.required=true` 且至少配置一个管理员令牌，否则渲染拒绝。Caddy 只在内部生成的回环管理代理上保留凭据；普通 protected 业务路由仍在转发前移除网关凭据。Console 遇到普通 HTTP 503 会显示错误并保留令牌；401 才要求重新登录。
+
+HTTP 与 HTTPS 使用独立 Caddy server，包括自定义端口；同一重叠端点的协议冲突会被拒绝。HTTPS 路由从默认 HTTP 入口重定向到实际 TLS 端口，且优先匹配显式 HTTP 路由。
 
 ## 路由 UI 字段语义
 
@@ -172,11 +176,15 @@ Console 使用 Listener、Backend Pool 和 Routing Rule 组合一条路由：
 - `public` 允许任何能访问 Listener 的客户端，但仍受全局安全基线约束；`protected` 还要求提供已启用的网关令牌 Header；`internal` 只允许直接客户端 IP 位于 `gateway.internalSourceRanges`，且不参与托管公网 DNS/NSG 协调。
 - Caddy 的 HTTP 反向代理会自动处理 HTTP 或 HTTPS 上的 WebSocket Upgrade，不需要单独的路由规则 WebSocket 开关。
 
-Listener、Backend Pool、Routing Rule、旧 Route API 和 Docker bind 的修改都会先持久化为草稿，不会立即重载 Caddy、执行健康探测或协调 Azure。完成多项编辑后，点击右上角的**应用待处理更改**一次性生效。`/api/status` 通过 `routingChangesPending` 暴露该状态；手动 `POST /api/reconcile` 成功后清除。存在草稿时周期协调会暂停；证书、安全策略和令牌刷新仍使用最后一次成功应用的路由快照，因此不会意外带上未完成草稿。
+Listener、Backend Pool、Routing Rule、旧 Route API 和 Docker bind 的修改都会先持久化为草稿，点击**应用待处理更改**才激活。`/api/status` 根据 desired/applied 版本差异返回 `routingChangesPending`。手动 `POST /api/reconcile` 只确认 Caddy 实际接受的快照；期间保存的新草稿仍待应用。启动、周期协调、证书、安全策略和令牌刷新均使用已应用快照；存在草稿时，该快照的发现与健康检查仍继续运行。
+
+v3 路由文件以一次原子替换保存 desired/applied 两份快照。普通草稿重启后仍保留但不会生效。升级前请备份状态：旧 v1/v2 文件无法识别历史未应用草稿，迁移时只能把当前文件内容作为已应用基线。旧程序不能读取 v3；降级前须恢复兼容备份。配置 ZIP 中的资源格式仍为 v2。
+
+健康探测最多 8 个并发请求，每轮有 10 秒整体预算，同时保留配置的单请求超时。结果顺序不变，任一上游失败即标记该路由不健康。新配置加载不等待旧一轮探测或云操作完成；新一轮取消旧检查，仅当前代次可发布状态，Azure 操作另行串行执行。
 
 ## 运行日志
 
-**日志**页面合并展示 `GET /api/logs` 返回的近期网关/Caddy 运行日志与 `GET /api/audit` 返回的持久化配置审计事件，支持按级别、来源筛选，并可搜索消息或结构化字段。运行日志使用有界内存环形缓冲区：最多 1000 条、序列化数据总量最多 8 MiB、每个输入行最多 64 KiB；达到任一上限时自动淘汰最旧记录，网关进程重启后全部清空。因此它适合近期排障，而不是长期留存。审计日志是否持久化取决于已配置的审计文件；读取时采用流式扫描且只保留请求的末尾记录，但审计文件本身不会自动轮转，应纳入宿主机磁盘留存策略。API 只返回结构化运行消息，不提供任意文件读取能力。
+**日志**页面合并展示 `GET /api/logs` 返回的近期网关/Caddy 运行日志与 `GET /api/audit` 返回的持久化配置审计事件，支持按级别、来源筛选，并可搜索消息或结构化字段。运行日志使用有界内存环形缓冲区：最多 1000 条、序列化数据总量最多 8 MiB、每个输入行最多 64 KiB；达到任一上限时自动淘汰最旧记录，网关进程重启后全部清空。因此它适合近期排障，而不是长期留存。审计读取从文件末尾按 64 KiB 块逆向查找足够的有效记录，保持时间顺序并跳过损坏行；单行超过 1 MiB 会报错。历史审计不会自动轮转或删除，应纳入宿主机留存策略。API 只返回结构化消息，不提供任意文件读取能力。
 
 来源筛选默认选择**路由活动**。该视图会显示 Caddy HTTP 访问事件，合并路由、Listener、Backend Pool、Routing Rule、配置导入及协调相关的持久化审计事件，并显示路由协调的 WARN/ERROR 运行日志。每条访问事件摘要会直接展示客户端 IP、请求方法与目标、命中的 Listener 和 Routing Rule、Backend Pool 与实际选中的 upstream、响应状态及耗时；展开**详情**可查看完整结构化请求字段，认证类 Header 默认由 Caddy 脱敏。正常完成时会保留可持久化的 `audit: reconcile.complete`，隐藏表示同一操作的运行时 `reconcile complete`，避免常见的重复记录。选择**全部来源**或某个精确来源仍可查看其他 Caddy 与控制平面日志。筛选只改变 Console 展示，不会删除记录；启用审计持久化后，路由与协调审计事件可跨重启保留，而 HTTP 访问事件及其他 `gateway/*`、`caddy/*` 运行日志会在重启时清空。
 
@@ -199,11 +207,11 @@ Console 管理的设置会原子保存到 `/data/platform/settings.json`，POSIX
 | `settings.json` | Console 管理的 Deployment、Azure、安全及相关设置，已移除认证秘密。 |
 | `certificate-policy.json` | 签发者、域名、续期与 DNS challenge 策略，已移除 Azure 客户端密钥。 |
 
-压缩包绝不包含已签发证书、私钥、Caddy 数据、管理员令牌、附加认证 Header 值、Azure 客户端密钥、运行日志或审计日志。导入时会保留目标实例现有的这些秘密值，不会用来源实例中的空值覆盖。
+压缩包绝不包含已签发证书、私钥、Caddy 数据、管理员令牌、附加认证 Header 值、Azure 客户端密钥、Azure 实例身份、运行日志或审计日志。导入保留目标实例现有秘密值与资源所有权。
 
 导入只接受上述固定文件集；重复、嵌套、未知、符号链接、超限、JSON 格式错误或含未知字段的条目都会被拒绝。系统会先校验路由与设置，并完整渲染候选 Caddy 配置，再暂存任何内容。成功导入只替换可编辑的内存草稿，不写入路由、设置或证书文件，也不重载 Caddy。状态 API 会返回 `configurationImportPending`；草稿等待应用期间，系统会阻止有冲突的设置、安全和证书修改。
 
-审阅导入的路由、设置与证书策略后，点击**应用待处理更改**。只有 Caddy 接受候选配置后，网关才原子持久化导入文件并清除待处理状态；持久化失败会保留草稿以便重试，并尝试恢复原本的本地文件。证书申请在 Caddy 成功重载后异步开始，Apply 返回不表示证书已经签发完成。Deployment 和 Azure 设置也会由 Apply 持久化，但相关客户端与拓扑在启动时初始化，因此仍需重启网关进程后生效。
+审阅导入的路由、设置与证书策略后，点击**应用待处理更改**。Caddy 接受候选配置后，网关逐文件原子替换并确认应用版本。返回的持久化错误会保留草稿供重试，并触发旧文件与旧 Caddy 配置恢复；恢复失败会明确报错。这不是跨文件的崩溃原子事务：导入前保留备份，进程在落盘中途崩溃后应恢复一组一致状态。证书申请在重载后异步开始，Apply 不等待签发。Deployment 和 Azure 设置仍需重启进程，相关客户端与拓扑才生效。
 
 对应的认证 API 为：`GET /api/settings/configuration` 导出；以 `application/zip` 请求体调用 `POST /api/settings/configuration` 导入。压缩包上传上限为 8 MiB，解压后 JSON 总计上限为 4 MiB，单文件上限为 1 MiB。
 
@@ -260,9 +268,19 @@ Console 管理的设置会原子保存到 `/data/platform/settings.json`，POSIX
 
 Caddy 会在托管证书到期前自动续期。续期要求网关和 Caddy 运行时保持工作、`/data/caddy` 持久化，并且配置的 HTTP-01、TLS-ALPN-01 或 DNS-01 验证仍可使用。Console 的“启用提前续期”会把续期窗口比例设为 `0.5` 并重新应用策略；CA 的 ACME Renewal Information（ARI）及 Caddy/CertMagic 调度仍可能影响实际续期时间。“重新加载 TLS 配置”只应用当前策略，不会强制续期。
 
-“证书”页面右侧会只读扫描 `GATEWAY_CADDY_DATA_DIR/certificates/**/*.crt` 并解析 X.509 证书。每个证书名称默认折叠，展开后显示全部域名、签发者、有效状态、过期时间、计算出的续期窗口开始时间、SHA-256 指纹，以及证书/私钥/元数据文件路径；不会返回私钥内容。“刷新状态”只重新扫描存储，不修改 Caddy 配置。此处不展示单次 ACME 续期尝试历史。
+“证书”页面右侧扫描 `GATEWAY_CADDY_DATA_DIR/certificates/**/*.crt`，并根据 Caddy 已接受的 `/config/`，而非可编辑或已保存的策略，分类为“当前策略管理”“历史：通配符已覆盖”“历史：当前未引用”或“管理状态未知”。分类依据是域名匹配，不代表每份磁盘证书正在对外服务，也不证明仍使用其签发者。未知、手动加载、动态管理及不支持的运行配置会禁止归档。历史证书保留独立有效期详情，不再把进入预计续期窗口作为当前续期失败告警。窗口按所选策略的有效期比例估算，并非 Caddy 的 ARI 调度时间。“刷新状态”不重载 Caddy、不请求签发；私钥内容始终不会返回。
 
-通配符域名必须使用 DNS-01。需要根域名时同时添加 `*.example.com` 与 `example.com`，选择 Azure DNS，并使用 Let's Encrypt 或自定义 ACME；Caddy 的 ZeroSSL issuer 不接受可配置 DNS challenge。Azure 身份需要权威 Zone 上的 `DNS Zone Contributor`。显式配置 `*.example.com` 后，`a.example.com` 这类具体 HTTPS 路由 Host 会写入 Caddy 的 `automatic_https.skip_certificates`，直接使用通配符证书，不再触发单独申请。通配符只覆盖一级标签，不覆盖 `example.com` 或 `a.b.example.com`。通配符证书域名与通配符路由 Host 仍相互独立；精确 Host 路由会优先于 `*.example.com`。
+近期签发/续期事件从最近 1,000 条运行日志缓冲记录中提取，最新在前，最多 50 条，显示操作、结果、域名、宽泛的错误分类，以及 Caddy 明确报告的重试时间。为避免泄露凭据，不展示原始 ACME 错误及任意日志字段。这是近期观测，不是持久历史或未来执行承诺：重启和缓冲区淘汰会丢失事件，没有事件也不能证明续期正常。DNS、权限、连接与 CA 错误的详细原因应在受限运行日志中检查。
+
+### 归档历史证书
+
+“归档证书”调用 `POST /api/certificate/archive`，提交清单中的不透明 `id`、`fingerprintSha256` 与 `confirm: true`，不会吊销、强制续期或永久删除材料。服务端在配置提交锁内复核当前运行配置，并使用 CertMagic 的签发锁及存储清理锁。对受影响的具体 TLS 域名，本地握手必须返回另一份域名匹配且未过期的证书；无法握手或仍返回目标指纹会阻止归档。该检查不验证公网信任链或吊销状态。当前管理域名、未知配置、待应用的配置导入、符号链接、文件变化、非标准或不完整目录均会拒绝。按钮表示可进入服务端检查，并不保证归档成功。
+
+仅允许将恰好包含同名 `.crt`、`.key`、`.json` 三件套的标准目录，原子移动到 `GATEWAY_CADDY_DATA_DIR/certificate-archive/<随机ID>/materials`。父目录权限为 `0700`，`0600` 清单记录原相对目录、指纹和归档时间。移动前后均核对文件身份及内容；不一致时尝试恢复，否则明确报告需要人工恢复。归档不会自动清空，仍含私钥，必须纳入受保护的备份。此功能面向单实例、本地文件系统部署：禁止与其他 Caddy 实例共享存储，也不要同时绕过控制面修改 Admin API 或文件。仅绑定非回环地址的自定义监听器，以及通配符路由的握手检查，需要人工审查。
+
+恢复时先停止网关，备份完整数据目录，检查归档清单和指纹，再将 `materials` 移回同一 Caddy 数据根目录下记录的原相对目录。绝不覆盖已有目录或更新的证书，冲突须人工处理。保留严格的属主与权限，然后重启并检查 TLS 和日志。不要用归档/恢复触发续期；不保证整机断电持久性或多实例归档协调。
+
+通配符域名必须使用 DNS-01。需要根域名时同时添加 `*.example.com` 与 `example.com`，选择 Azure DNS，并使用 Let's Encrypt 或自定义 ACME；Caddy 的 ZeroSSL issuer 不接受可配置 DNS challenge。Azure 身份需要权威 Zone 上的 `DNS Zone Contributor`。显式配置 `*.example.com` 后，`a.example.com` 这类具体 HTTPS 路由 Host 会写入 Caddy 的 `automatic_https.skip_certificates`，直接使用通配符证书，不再触发单独申请。如果显式域名列表同时包含通配符和具体域名，仍会管理两者，不会擅自去重。策略切换后旧文件可能保留，不能据此认定仍在重复申请或续期失败。通配符只覆盖一级标签，不覆盖 `example.com` 或 `a.b.example.com`。通配符证书域名与通配符路由 Host 仍相互独立；精确 Host 路由会优先于 `*.example.com`。
 
 ## Docker 发现标签
 
@@ -278,6 +296,8 @@ Caddy 会在托管证书到期前自动续期。续期要求网关和 Caddy 运�
 | `exposure.mode` | No | `public` | `public`、`protected`、`internal` 三者之一。 |
 
 没有 `caddy.enable=true` 的容器仍会显示在发现列表中，但网关容器自身会被排除。UI 也可以手动绑定已发现容器；手动绑定必须明确选择容器端口与上游协议，会保存为显式路由，且不要求容器携带标签。
+
+自动路由只从网关与工作负载的共享网络选择地址，按网络名称确定性排序。Compose 服务名只作为共享自定义网络的回退，不用于默认 bridge。无法通过容器 hostname 识别网关或没有可达共享网络地址时，会跳过自动路由并返回警告。host-network 上游须使用显式路由。
 
 ## Docker 发现变量
 
@@ -319,10 +339,18 @@ Reconcile 会写入期望 A 记录、列出网关托管 A 记录用于清理、�
 
 清理行为：
 
-- DNS 清理只会删除带有 `managed-by=ai-docker-farm-gateway` 元数据的 A 记录。
+- DNS 清理只删除同时具有 `managed-by=ai-docker-farm-gateway` 和当前 `gateway-instance-id` 的 A 记录。更新、删除携带读取时的 ETag；新建使用 `If-None-Match: *`，412 会报错而不会降级为无条件覆盖。本实例内容未变的记录不重复写入。
 - 删除、禁用路由或将其改为 `internal` 后，下一次协调会移除对应托管 DNS 记录。
 - upstream 健康失败只记录在路由状态中，不会删除 DNS；需要撤回 DNS 时应禁用或删除路由，避免探针造成 DNS 缓存抖动。
-- NSG 规则由所有 `public/protected` 路由共享；Listener 端口集合变化时会更新。只有不存在任何 `public/protected` 路由时才会删除，除非设置了 `GATEWAY_MANAGEMENT_HOST`。
+- NSG 规则由本实例的 `public/protected` 路由共享；名称带实例 ID 后缀，描述必须标识同一归属。端口集合变化时更新，内容未变不重复写入；无公网路由且未设管理域名时删除。优先级冲突由 Azure 返回，不覆盖其他规则。NSG SDK 不提供 DNS 式条件写入保证。
+
+### 所有权与升级
+
+启用 Azure 的网关在 `GATEWAY_STATE_DIR/azure-instance-id` 创建稳定随机身份，文件权限为 `0600`。恢复同一逻辑网关时须保留；克隆独立网关时，在启动克隆前仅删除克隆的身份文件以生成新归属。不要让独立实例使用相同身份或共享状态目录。配置 ZIP 不转移资源所有权。
+
+未知归属、其他实例的 DNS 记录不会被自动接管。只有通用 `managed-by` 标记的旧记录会保留；期望域名与其冲突时返回所有权错误。如确需迁移，先停止旧写入者、备份 DNS 和本地状态，确认每条记录属于此网关，再通过 Azure 管理流程显式添加本实例的 `gateway-instance-id` 元数据。接管后不在期望路由集合中的记录可能被清理，迁移前须审阅完整集合。
+
+旧固定 NSG 规则 `Allow-AIDockerFarm-Gateway-HTTPHTTPS` 会保留。先为新实例规则选择空闲优先级，验证入站连通性，再确认无其他网关依赖后手工删除旧规则。直接复用旧规则优先级可能产生 Azure 冲突。移除旧访问规则是显式运维操作，不会自动进行。
 
 ## VM 部署说明
 

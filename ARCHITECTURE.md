@@ -23,10 +23,10 @@ The platform is intentionally packaged as one gateway image. The control plane o
 - Gateway process: starts the API server, reconcile loop, and Caddy runtime.
 - Caddy runtime: required child process that listens on the default 80/443 endpoints plus configured listener ports and receives generated config over a localhost-only admin endpoint. Startup or unexpected runtime failure terminates the container for orchestrator restart.
 - Route sources: persisted listeners, backend pools, and routing rules, plus optional Docker discovery for co-located workloads.
-- Reconciler: merges route sources, renders desired gateway config, reloads Caddy, and records status.
+- Reconciler: serializes rendering, Caddy loading, and applied-revision commits. Startup/background runs use applied resources; manual Apply captures desired resources. Health and separately serialized Azure operations run outside the commit lock with cancellation and generation-checked status publication.
 - Request security baseline: emits native Caddy matchers and handlers before each proxy for body-size limits, denied methods and paths, and direct-client IP/CIDR policy.
 - Settings store: atomically persists Console-managed security, authentication, desired deployment, and Azure settings. Security and token updates propagate to the running API/Reconciler/Renderer; deployment and Azure client changes activate on restart.
-- Health checker: probes configured upstream health paths during reconcile and records route-level readiness.
+- Health checker: probes upstream health paths with at most 8 concurrent requests and a 10-second round budget, preserving route order and recording readiness.
 - Audit logger: appends route, bind, reconcile, DNS, and NSG change summaries to JSONL state.
 - Management UI: static assets embedded in the Go binary and served by the API process.
 - Runtime probes: `/livez` reports control-plane liveness; `/readyz` and compatibility endpoint `/healthz` require Caddy readiness.
@@ -44,3 +44,7 @@ On a standalone gateway VM, Docker discovery is disabled and Console/API routes 
 ## State and persistence
 
 The platform stores versioned routing resources, audit data, the Console certificate policy, and Console-managed settings under `/data/platform`. `settings.json` contains the admin token; it and other sensitive state are created with mode `0600` on POSIX filesystems. Legacy route files are atomically migrated to listeners, backend pools, and routing rules. Caddy certificate storage uses `/data/caddy`. All of `/data` must be persistent in production. The Azure VM deployment bind-mounts `/var/lib/caddy-reverse-proxy`; `start.sh` uses `~/docker_files/caddy-reverse-proxy` on an existing host.
+
+The v3 routing envelope atomically stores desired/applied snapshots and revisions; the public resource/ZIP format remains v2. Old v1/v2 files become an applied baseline on migration. Pending ordinary edits survive restart without activation. ZIP imports are staged in memory, then persisted per file after Caddy accepts the candidate; returned failures trigger compensation, but cross-file crash atomicity is not guaranteed.
+
+Azure ownership is a stable local `azure-instance-id`, excluded from configuration archives. DNS writes/deletes validate that owner and use ETags; NSG names are instance-scoped. Legacy or foreign resources are not automatically adopted. HTTP and HTTPS endpoints render as separate Caddy servers. The internal management proxy preserves API credentials to loopback while business protected proxies strip them; management static assets are public and API authentication is mandatory when a management hostname is configured.

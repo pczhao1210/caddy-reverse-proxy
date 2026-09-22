@@ -1,11 +1,254 @@
 package caddy
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/aidockerfarm/gateway/internal/auth"
+	certificates "github.com/aidockerfarm/gateway/internal/certificate"
 	"github.com/aidockerfarm/gateway/internal/model"
 )
+
+func TestRenderSeparatesHTTPAndHTTPSListeners(t *testing.T) {
+	data, err := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{HTTPListen: ":80", HTTPSListen: ":443"}}).Render([]model.RouteConfig{
+		{ID: "http", Host: "app.example.com", Enabled: true, ListenerPort: 8088, ListenerProtocol: "http", Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}},
+		{ID: "https", Host: "secure.example.com", Enabled: true, HTTPS: true, ListenerPort: 8443, ListenerProtocol: "https", Upstreams: []model.UpstreamTarget{{URL: "http://app:8080"}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	servers := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)
+	found := false
+	for _, value := range servers {
+		server := value.(map[string]any)
+		for _, address := range server["listen"].([]any) {
+			if address != ":8088" {
+				continue
+			}
+			found = true
+			if len(server["listen"].([]any)) != 1 {
+				t.Fatal("HTTP listener shares a server with other endpoints")
+			}
+			if automatic, ok := server["automatic_https"].(map[string]any); !ok || automatic["disable"] != true {
+				t.Fatal("HTTP listener must explicitly disable automatic HTTPS")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("custom HTTP listener is missing")
+	}
+}
+
+func TestRuntimeMixedListeners(t *testing.T) {
+	binary := os.Getenv("CADDY_TEST_BIN")
+	if binary == "" {
+		t.Skip("set CADDY_TEST_BIN to run real Caddy tests")
+	}
+	authConfig := model.AuthConfig{Required: true, AdminToken: "runtime-test-token"}
+	backend := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Host == "protected.example.test" && (request.Header.Get("Authorization") != "" || request.Header.Get("X-Admin-Token") != "") {
+			http.Error(writer, "gateway credentials leaked", http.StatusBadRequest)
+			return
+		}
+		_, _ = io.WriteString(writer, "upstream-ok")
+	})
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Host == "admin.example.test" && strings.HasPrefix(request.URL.Path, "/api/") {
+			auth.Middleware(authConfig, backend).ServeHTTP(writer, request)
+			return
+		}
+		backend.ServeHTTP(writer, request)
+	}))
+	defer upstream.Close()
+	httpAddress, _ := testListenerAddress(t)
+	httpsAddress, httpsPort := testListenerAddress(t)
+	customAddress, customPort := testListenerAddress(t)
+	adminAddress, _ := testListenerAddress(t)
+	directory := t.TempDir()
+	data, err := NewRenderer(model.AppConfig{Auth: authConfig, Control: model.ControlConfig{Listen: strings.TrimPrefix(upstream.URL, "http://"), ManagementHost: "admin.example.test"}, Gateway: model.GatewayConfig{
+		HTTPListen: httpAddress, HTTPSListen: httpsAddress, CaddyAdminEndpoint: "http://" + adminAddress, CaddyDataDir: directory,
+	}}).Render([]model.RouteConfig{
+		{ID: "http", Host: "app.example.test", Enabled: true, ListenerPort: customPort, ListenerProtocol: "http", Upstreams: []model.UpstreamTarget{{URL: upstream.URL}}},
+		{ID: "https", Host: "app.example.test", Enabled: true, HTTPS: true, ListenerPort: httpsPort, ListenerProtocol: "https", Upstreams: []model.UpstreamTarget{{URL: upstream.URL}}},
+		{ID: "protected", Source: "management", Host: "protected.example.test", Enabled: true, HTTPS: true, Protected: true, Upstreams: []model.UpstreamTarget{{URL: upstream.URL}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	certificateServer := httptest.NewTLSServer(nil)
+	certificate := certificateServer.TLS.Certificates[0]
+	certificateServer.Close()
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Certificate[0]})
+	keyDER, err := x509.MarshalPKCS8PrivateKey(certificate.PrivateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+	config["apps"].(map[string]any)["tls"] = map[string]any{"certificates": map[string]any{"load_pem": []any{map[string]any{"certificate": string(certificatePEM), "key": string(keyPEM)}}}}
+	renderedServer(t, config, httpsAddress)["automatic_https"].(map[string]any)["disable_certificates"] = true
+	data, err = json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startTestCaddy(t, binary, data, adminAddress)
+	active, err := NewClient("http://" + adminAddress).Config(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := certificates.ParsePolicy(active, directory); err == nil || !strings.Contains(err.Error(), "manual certificate loaders") {
+		t.Fatalf("manual runtime certificate must not be archivable: %v", err)
+	}
+	client := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	defer client.CloseIdleConnections()
+	for _, endpoint := range []string{"http://" + customAddress, "https://" + httpsAddress} {
+		request, err := http.NewRequest(http.MethodGet, endpoint, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = "app.example.test"
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != http.StatusOK || string(body) != "upstream-ok" {
+			t.Fatalf("%s: status=%d body=%q err=%v", endpoint, response.StatusCode, body, err)
+		}
+	}
+	request, _ := http.NewRequest(http.MethodGet, "http://"+httpAddress+"/hello", nil)
+	request.Host = "app.example.test"
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusPermanentRedirect || !strings.Contains(response.Header.Get("Location"), ":"+strconv.Itoa(httpsPort)+"/hello") {
+		t.Fatalf("redirect: status=%d location=%s", response.StatusCode, response.Header.Get("Location"))
+	}
+	for _, test := range []struct {
+		host, path, header, token string
+		status                    int
+	}{
+		{host: "admin.example.test", path: "/", status: 200},
+		{host: "admin.example.test", path: "/api/status", status: 401},
+		{host: "admin.example.test", path: "/api/status", header: "Authorization", token: "Bearer invalid", status: 401},
+		{host: "admin.example.test", path: "/api/status", header: "Authorization", token: "Bearer " + authConfig.AdminToken, status: 200},
+		{host: "admin.example.test", path: "/api/status", header: "X-Admin-Token", token: authConfig.AdminToken, status: 200},
+		{host: "protected.example.test", path: "/", status: 401},
+		{host: "protected.example.test", path: "/", header: "Authorization", token: "Bearer " + authConfig.AdminToken, status: 200},
+	} {
+		request, _ := http.NewRequest(http.MethodGet, "https://"+httpsAddress+test.path, nil)
+		request.Host = test.host
+		if test.header != "" {
+			request.Header.Set(test.header, test.token)
+		}
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != test.status {
+			t.Errorf("%s%s (%s): got %d, want %d", test.host, test.path, test.header, response.StatusCode, test.status)
+		}
+	}
+}
+
+func testListenerAddress(t *testing.T) (string, int) {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	return listener.Addr().String(), listener.Addr().(*net.TCPAddr).Port
+}
+
+func TestRenderedWildcardCertificateInventory(t *testing.T) {
+	for _, explicitHost := range []bool{false, true} {
+		subjects := []string{"*.example.com"}
+		if explicitHost {
+			subjects = append(subjects, "app.example.com")
+		}
+		data, err := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+			HTTPListen: ":80", HTTPSListen: ":443", CaddyDataDir: "/fixture",
+			Certificate: model.CertificateConfig{Issuer: "letsencrypt", Subjects: subjects},
+		}}).Render([]model.RouteConfig{{ID: "app", Host: "app.example.com", Enabled: true, HTTPS: true, Upstreams: []model.UpstreamTarget{{URL: "http://127.0.0.1:8080"}}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := certificates.ParsePolicy(data, "/fixture")
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot := certificates.Snapshot{Certificates: []certificates.Status{{Subjects: []string{"app.example.com"}}, {Subjects: []string{"*.example.com"}}}}
+		certificates.Classify(&snapshot, policy)
+		want := "covered"
+		if explicitHost {
+			want = "managed"
+		}
+		if snapshot.Certificates[0].Usage != want || snapshot.Certificates[1].CanArchive {
+			t.Fatalf("explicit=%v inventory=%+v", explicitHost, snapshot)
+		}
+	}
+}
+
+func startTestCaddy(t *testing.T, binary string, data []byte, adminAddress string) {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "caddy.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	command := exec.CommandContext(ctx, binary, "run", "--config", path)
+	if err := command.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); _ = command.Wait() })
+	client := &http.Client{Timeout: 100 * time.Millisecond}
+	defer client.CloseIdleConnections()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	for {
+		response, err := client.Get("http://" + adminAddress + "/config/")
+		if err == nil {
+			response.Body.Close()
+			if response.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatal("Caddy did not become ready")
+		}
+	}
+}
 
 func TestRenderProtectedRouteSkipsAutoHTTPSAndAddsFallback(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{
@@ -36,11 +279,10 @@ func TestRenderProtectedRouteSkipsAutoHTTPSAndAddsFallback(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	server := renderedServer(t, config, ":80")
 	automaticHTTPS := server["automatic_https"].(map[string]any)
-	skip := automaticHTTPS["skip"].([]any)
-	if len(skip) != 1 || skip[0] != "app.localhost" {
-		t.Fatalf("automatic_https.skip = %#v", skip)
+	if automaticHTTPS["disable"] != true {
+		t.Fatalf("automatic_https = %#v", automaticHTTPS)
 	}
 	routes := server["routes"].([]any)
 	if len(routes) != 3 {
@@ -68,7 +310,7 @@ func TestRenderUsesListenerPortAndProtocol(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	server := renderedServer(t, config, ":8443")
 	listens := server["listen"].([]any)
 	found := false
 	for _, listen := range listens {
@@ -102,8 +344,8 @@ func TestRenderHTTPListenerDoesNotDisableHTTPSForSameHost(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
-	if automaticHTTPS, exists := server["automatic_https"]; exists {
+	server := renderedServer(t, config, ":443")
+	if automaticHTTPS := server["automatic_https"].(map[string]any); automaticHTTPS["skip"] != nil || automaticHTTPS["disable"] == true {
 		t.Fatalf("automatic_https = %#v, want no skip for host with HTTPS listener", automaticHTTPS)
 	}
 }
@@ -126,7 +368,7 @@ func TestRenderSkipsCertificatesCoveredByConfiguredWildcard(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	server := renderedServer(t, config, ":443")
 	automaticHTTPS := server["automatic_https"].(map[string]any)
 	skipped := automaticHTTPS["skip_certificates"].([]any)
 	if len(skipped) != 1 || skipped[0] != "a.example.com" {
@@ -150,7 +392,7 @@ func TestRenderSecurityEntriesUseListenerMatch(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	routes := renderedServer(t, config, ":8443")["routes"].([]any)
 	if len(routes) < 2 {
 		t.Fatalf("routes length = %d, want security and proxy entries", len(routes))
 	}
@@ -180,7 +422,7 @@ func TestRenderSetsConfiguredUpstreamHostHeader(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	route := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)[0].(map[string]any)
+	route := renderedServer(t, config, ":80")["routes"].([]any)[0].(map[string]any)
 	handler := renderedHandler(t, route, "reverse_proxy")
 	requestHeaders := handler["headers"].(map[string]any)["request"].(map[string]any)
 	set := requestHeaders["set"].(map[string]any)
@@ -190,10 +432,10 @@ func TestRenderSetsConfiguredUpstreamHostHeader(t *testing.T) {
 	}
 }
 
-func TestRenderManagementHostIsProtected(t *testing.T) {
+func TestRenderManagementHostPreservesAPIAuthentication(t *testing.T) {
 	renderer := NewRenderer(model.AppConfig{
 		Control: model.ControlConfig{Listen: ":8080", ManagementHost: "admin.example.com"},
-		Auth:    model.AuthConfig{AdminToken: "secret"},
+		Auth:    model.AuthConfig{Required: true, AdminToken: "secret"},
 		Gateway: model.GatewayConfig{
 			HTTPListen:         ":80",
 			HTTPSListen:        ":443",
@@ -211,14 +453,23 @@ func TestRenderManagementHostIsProtected(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	server := renderedServer(t, config, ":443")
 	routes := server["routes"].([]any)
-	if len(routes) != 3 {
-		t.Fatalf("management route entries = %d, want 3 protected entries", len(routes))
+	if len(routes) != 1 {
+		t.Fatalf("management route entries = %d, want one API-authenticated proxy", len(routes))
 	}
-	fallback := renderedHandler(t, routes[2], "static_response")
-	if fallback["handler"] != "static_response" || fallback["status_code"].(float64) != 401 {
-		t.Fatalf("management fallback handler = %#v", fallback)
+	proxy := renderedHandler(t, routes[0], "reverse_proxy")
+	if proxy["headers"] != nil {
+		t.Fatalf("management proxy rewrites authentication headers: %#v", proxy)
+	}
+}
+
+func TestRenderRejectsUnauthenticatedManagementHost(t *testing.T) {
+	for _, authentication := range []model.AuthConfig{{}, {AdminToken: "secret"}, {Required: true}} {
+		_, err := NewRenderer(model.AppConfig{Control: model.ControlConfig{ManagementHost: "admin.example.com"}, Auth: authentication, Gateway: model.GatewayConfig{HTTPSListen: ":443"}}).Render(nil)
+		if err == nil {
+			t.Fatal("management host accepted without required API authentication and tokens")
+		}
 	}
 }
 
@@ -332,7 +583,7 @@ func TestRenderProtectedRouteWithCustomHeaderPolicy(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	server := renderedServer(t, config, ":443")
 	routes := server["routes"].([]any)
 	if len(routes) != 2 {
 		t.Fatalf("routes length = %d, want custom header route plus fallback", len(routes))
@@ -389,7 +640,7 @@ func TestRenderInternalRouteRestrictsRemoteIP(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	routes := renderedServer(t, config, ":80")["routes"].([]any)
 	match := routes[0].(map[string]any)["match"].([]any)[0].(map[string]any)
 	remoteIP := match["remote_ip"].(map[string]any)
 	ranges := remoteIP["ranges"].([]any)
@@ -416,7 +667,7 @@ func TestRenderOrdersLongerPathPrefixesFirst(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	rendered := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	rendered := renderedServer(t, config, ":80")["routes"].([]any)
 	firstMatch := rendered[0].(map[string]any)["match"].([]any)[0].(map[string]any)
 	paths := firstMatch["path"].([]any)
 	if len(paths) != 2 || paths[0] != "/api/admin" || paths[1] != "/api/admin/*" {
@@ -443,7 +694,7 @@ func TestRenderOrdersExactHostBeforeWildcard(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	routes := renderedServer(t, config, ":80")["routes"].([]any)
 	match := routes[0].(map[string]any)["match"].([]any)[0].(map[string]any)
 	if match["host"].([]any)[0] != "api.example.com" {
 		t.Fatalf("first route match = %#v, want exact host", match)
@@ -479,7 +730,7 @@ func TestRenderEnablesAccessLogsWithRouteMetadata(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	server := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)
+	server := renderedServer(t, config, ":443")
 	if _, enabled := server["logs"].(map[string]any); !enabled {
 		t.Fatalf("server logs = %#v, want enabled access logs", server["logs"])
 	}
@@ -521,12 +772,34 @@ func TestRenderProtectedRouteStripsGatewayCredentials(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	routes := renderedServer(t, config, ":80")["routes"].([]any)
 	handler := renderedHandler(t, routes[0], "reverse_proxy")
 	requestHeaders := handler["headers"].(map[string]any)["request"].(map[string]any)
 	deleted := requestHeaders["delete"].([]any)
 	if len(deleted) != 2 || deleted[0] != "Authorization" || deleted[1] != "X-Admin-Token" {
 		t.Fatalf("deleted request headers = %#v", deleted)
+	}
+}
+
+func renderedServer(t *testing.T, config map[string]any, address string) map[string]any {
+	t.Helper()
+	servers := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)
+	for _, value := range servers {
+		server := value.(map[string]any)
+		for _, listen := range server["listen"].([]any) {
+			if listen == address {
+				return server
+			}
+		}
+	}
+	t.Fatalf("no server listening on %s", address)
+	return nil
+}
+
+func TestRenderRejectsConflictingListenerProtocols(t *testing.T) {
+	_, err := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{HTTPListen: ":8443", HTTPSListen: "127.0.0.1:8443"}}).Render(nil)
+	if err == nil {
+		t.Fatal("expected conflicting listener protocols to fail")
 	}
 }
 
@@ -566,7 +839,7 @@ func TestRenderSecurityBaselineBeforeReverseProxy(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	routes := renderedServer(t, config, ":80")["routes"].([]any)
 	if len(routes) != 6 {
 		t.Fatalf("routes length = %d, want 5 security entries plus proxy", len(routes))
 	}
@@ -627,7 +900,7 @@ func TestRenderRouteCanDisableSecurityBaseline(t *testing.T) {
 	if err := json.Unmarshal(data, &config); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	routes := config["apps"].(map[string]any)["http"].(map[string]any)["servers"].(map[string]any)["gateway"].(map[string]any)["routes"].([]any)
+	routes := renderedServer(t, config, ":80")["routes"].([]any)
 	if len(routes) != 1 {
 		t.Fatalf("routes = %#v, want one proxy route", routes)
 	}

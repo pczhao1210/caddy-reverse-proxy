@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -16,6 +15,7 @@ import (
 	"github.com/aidockerfarm/gateway/internal/azure"
 	"github.com/aidockerfarm/gateway/internal/certificate"
 	appconfig "github.com/aidockerfarm/gateway/internal/config"
+	"github.com/aidockerfarm/gateway/internal/docker"
 	"github.com/aidockerfarm/gateway/internal/logs"
 	"github.com/aidockerfarm/gateway/internal/model"
 	"github.com/aidockerfarm/gateway/internal/routes"
@@ -30,6 +30,10 @@ type Reconciler interface {
 	Sync(context.Context) model.ReconcileResult
 	SyncWithoutPendingRoutingChanges(context.Context) model.ReconcileResult
 	Last() model.ReconcileResult
+}
+
+type transactionalReconciler interface {
+	SyncWithCommit(context.Context, *model.AppConfig, func(routes.Snapshot) error) model.ReconcileResult
 }
 
 type routingChangeController interface {
@@ -89,6 +93,7 @@ type Options struct {
 
 type Server struct {
 	mu                     sync.RWMutex
+	mutationMu             sync.Mutex
 	configurationMu        sync.Mutex
 	cfg                    model.AppConfig
 	configurationDraft     *configurationImportDraft
@@ -155,6 +160,7 @@ func (s *Server) Handler() http.Handler {
 	apiMux.HandleFunc("/api/reconcile", s.handleReconcile)
 	apiMux.HandleFunc("/api/certificate", s.handleCertificate)
 	apiMux.HandleFunc("/api/certificate/refresh", s.handleCertificateRefresh)
+	apiMux.HandleFunc("/api/certificate/archive", s.handleCertificateArchive)
 	apiMux.HandleFunc("/api/config", s.handleConfig)
 	apiMux.HandleFunc("/api/settings", s.handleSettings)
 	apiMux.HandleFunc("/api/settings/configuration", s.handleConfigurationBundle)
@@ -164,6 +170,10 @@ func (s *Server) Handler() http.Handler {
 	apiMux.HandleFunc("/api/audit", s.handleAudit)
 	apiMux.HandleFunc("/api/logs", s.handleLogs)
 	root.Handle("/api/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			s.mutationMu.Lock()
+			defer s.mutationMu.Unlock()
+		}
 		auth.Middleware(s.configSnapshot().Auth, apiMux).ServeHTTP(w, r)
 	}))
 
@@ -303,13 +313,17 @@ func (s *Server) handleContainers(w http.ResponseWriter, r *http.Request) {
 	}
 	gatewayNetworks := gatewayContainerNetworks(containers)
 	containers, routeHints = withoutGatewayContainer(containers, routeHints)
+	warnings := []string{}
 	for index := range containers {
+		if containers[index].RouteWarning != "" {
+			warnings = append(warnings, containers[index].Name+": "+containers[index].RouteWarning)
+		}
 		if port, err := bindPort(containers[index], 0); err == nil {
 			policy := containerBindPolicy(containers[index], gatewayNetworks, port)
 			containers[index].BindPolicy = &policy
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "routeHints": routeHints, "gatewayNetworks": gatewayNetworks, "status": s.dockerStatus()})
+	writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "routeHints": routeHints, "gatewayNetworks": gatewayNetworks, "status": s.dockerStatus(), "warning": strings.Join(warnings, "; ")})
 }
 
 func (s *Server) handleBindContainer(w http.ResponseWriter, r *http.Request) {
@@ -503,11 +517,7 @@ func gatewayContainerNetworks(containers []model.ContainerService) []string {
 }
 
 func gatewayContainer(containers []model.ContainerService) (model.ContainerService, bool) {
-	hostname, err := os.Hostname()
-	if err != nil {
-		return model.ContainerService{}, false
-	}
-	return findContainer(containers, hostname)
+	return docker.GatewayContainer(containers)
 }
 
 func containerBindPolicy(container model.ContainerService, gatewayNetworks []string, port int) model.ContainerBindPolicy {
@@ -562,38 +572,11 @@ func bindPolicyError(container model.ContainerService, policy model.ContainerBin
 }
 
 func sharedNetworks(containerNetworks []string, gatewayNetworks []string) []string {
-	if len(containerNetworks) == 0 || len(gatewayNetworks) == 0 {
-		return nil
-	}
-	gatewaySet := make(map[string]struct{}, len(gatewayNetworks))
-	for _, network := range gatewayNetworks {
-		gatewaySet[network] = struct{}{}
-	}
-	shared := make([]string, 0, len(containerNetworks))
-	for _, network := range containerNetworks {
-		if _, ok := gatewaySet[network]; ok {
-			shared = append(shared, network)
-		}
-	}
-	return shared
+	return docker.SharedNetworks(containerNetworks, gatewayNetworks)
 }
 
 func sharedNetworkAddress(container model.ContainerService, gatewayNetworks []string) string {
-	shared := sharedNetworks(container.Networks, gatewayNetworks)
-	for _, network := range shared {
-		for _, endpoint := range container.NetworkEndpoints {
-			if endpoint.Name == network && strings.TrimSpace(endpoint.Address) != "" {
-				return endpoint.Address
-			}
-		}
-	}
-	if len(shared) > 0 && !hasNetwork(shared, "bridge") {
-		if name := strings.TrimSpace(container.Labels["com.docker.compose.service"]); name != "" {
-			return name
-		}
-		return container.Name
-	}
-	return ""
+	return docker.SharedNetworkAddress(container, gatewayNetworks)
 }
 
 func hasNetwork(networks []string, target string) bool {
@@ -665,9 +648,19 @@ func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request) {
 		methodNotAllowed(w)
 		return
 	}
+	if reconciler, ok := s.reconciler.(transactionalReconciler); ok {
+		var candidate *model.AppConfig
+		if draft := s.configurationImportDraftSnapshot(); draft != nil {
+			candidate = &draft.LiveConfig
+		}
+		result := reconciler.SyncWithCommit(r.Context(), candidate, s.persistConfigurationImport)
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	snapshot := s.store.DesiredSnapshot()
 	result := s.reconciler.Sync(r.Context())
 	if result.CaddyLoaded {
-		if err := s.persistConfigurationImport(); err != nil {
+		if err := s.persistConfigurationImport(snapshot); err != nil {
 			if result.Error != "" {
 				result.Error += "; "
 			}
@@ -693,7 +686,7 @@ func (s *Server) clearRoutingChangesPending() {
 
 func (s *Server) routingChangesPending() bool {
 	controller, ok := s.reconciler.(routingChangeController)
-	return ok && controller.RoutingChangesPending()
+	return (s.store != nil && s.store.Pending()) || (ok && controller.RoutingChangesPending())
 }
 
 func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
@@ -701,7 +694,7 @@ func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		cfg := s.configSnapshot()
 		certificatePolicy := s.desiredCertificatePolicy(cfg.Gateway.Certificate)
-		writeJSON(w, http.StatusOK, s.certificateResponse(certificateWithAzureDefaults(certificatePolicy, cfg.Azure)))
+		writeJSON(w, http.StatusOK, s.certificateResponse(r.Context(), certificateWithAzureDefaults(certificatePolicy, cfg.Azure)))
 	case http.MethodPut:
 		if s.rejectWhileConfigurationImportPending(w) {
 			return
@@ -733,7 +726,7 @@ func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
 		s.updateCertificate(cert)
 		s.audit("certificate.update", map[string]any{"issuer": cert.Issuer, "emailConfigured": cert.Email != "", "staging": cert.Staging, "customCA": cert.CADirectory != "", "subjects": len(cert.Subjects), "dnsProvider": cert.DNSChallenge.Provider})
 		reconcile := s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
-		writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(cert), "reconcile": reconcile})
+		writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(r.Context(), cert), "reconcile": reconcile})
 	default:
 		methodNotAllowed(w)
 	}
@@ -750,7 +743,7 @@ func (s *Server) handleCertificateRefresh(w http.ResponseWriter, r *http.Request
 	cert := s.configSnapshot().Gateway.Certificate
 	s.audit("certificate.refresh", map[string]any{"issuer": certificateIssuerName(cert), "emailConfigured": cert.Email != "", "staging": cert.Staging})
 	reconcile := s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(cert), "reconcile": reconcile})
+	writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(r.Context(), cert), "reconcile": reconcile})
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -831,10 +824,6 @@ func (s *Server) configSnapshot() model.AppConfig {
 	return s.cfg
 }
 
-func certificateStatus(cfg model.AppConfig) map[string]any {
-	return certificateStatusWithPolicy(cfg, cfg.Gateway.Certificate)
-}
-
 func certificateStatusWithPolicy(cfg model.AppConfig, cert model.CertificateConfig) map[string]any {
 	return map[string]any{
 		"issuer":             certificateIssuerName(cert),
@@ -875,7 +864,7 @@ func certificateConfigResponse(cert model.CertificateConfig) map[string]any {
 	}
 }
 
-func (s *Server) certificateResponse(cert model.CertificateConfig) map[string]any {
+func (s *Server) certificateResponse(ctx context.Context, cert model.CertificateConfig) map[string]any {
 	response := certificateConfigResponse(cert)
 	runtime := map[string]any{
 		"available":    s.certificateInspector != nil,
@@ -887,11 +876,28 @@ func (s *Server) certificateResponse(cert model.CertificateConfig) map[string]an
 			runtime["available"] = false
 			runtime["error"] = err.Error()
 		} else {
+			policyErr := s.withCertificateConfig(ctx, func(data []byte) error {
+				policy, err := certificate.ParsePolicy(data, snapshot.StorageDirectory)
+				if err != nil {
+					return err
+				}
+				certificate.Classify(&snapshot, policy)
+				runtime["managedSubjects"] = policy.ManagedSubjects
+				return nil
+			})
+			if policyErr != nil {
+				runtime["policyError"] = policyErr.Error()
+			}
+			runtime["policyKnown"] = snapshot.PolicyKnown
 			runtime["storageDirectory"] = snapshot.StorageDirectory
 			runtime["scannedAt"] = snapshot.ScannedAt
 			runtime["certificates"] = snapshot.Certificates
 			runtime["warnings"] = snapshot.Warnings
 		}
+	}
+	runtime["events"] = []certificate.Event{}
+	if s.runtimeLogs != nil {
+		runtime["events"] = certificate.RecentEvents(s.runtimeLogs.ReadLast(1000))
 	}
 	response["runtime"] = runtime
 	return response

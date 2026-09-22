@@ -23,10 +23,10 @@ Operators
 - Gateway 进程：启动 API 服务、协调循环和 Caddy 运行时。
 - Caddy 运行时：必需子进程，监听默认 80/443 入口及已配置的 Listener 端口，通过仅本地可访问的管理端点接收配置。启动失败或运行中异常退出会终止容器，由编排器重启。
 - 路由来源：持久化 Listener、Backend Pool 和 Routing Rule，以及同机部署时可选的 Docker 发现。
-- Reconciler：合并路由来源，渲染期望的网关配置，重载 Caddy，并记录状态。
+- Reconciler：串行执行渲染、Caddy 加载及应用版本确认。启动和后台使用 applied 资源，手动 Apply 捕获 desired 资源；健康探测与单独串行的 Azure 操作在提交锁外执行，以取消和代次校验保护状态发布。
 - 请求安全基线：在每条代理规则前生成 Caddy 原生匹配器和处理器，执行请求体上限、方法/路径拒绝以及直连客户端 IP/CIDR 策略。
 - 设置存储：原子持久化 Console 管理的安全、认证、期望 Deployment 和 Azure 设置。安全策略与令牌会传播到运行中的 API/Reconciler/Renderer；Deployment 和 Azure 客户端改动在重启后生效。
-- Health checker：在协调期间探测配置的上游健康路径，并记录路由级就绪状态。
+- Health checker：最多 8 个并发请求，每轮 10 秒预算，保留路由顺序并记录就绪状态。
 - Audit logger：将路由、bind、协调、DNS 和 NSG 变更摘要追加写入 JSONL 状态文件。
 - 管理 UI：静态资源被内嵌进 Go 二进制并由 API 进程提供服务。
 - 运行时探针：`/livez` 表示控制面存活；`/readyz` 和兼容端点 `/healthz` 要求 Caddy 已就绪。
@@ -44,3 +44,7 @@ Listener + Backend Pool + Routing Rule -> 路由编译器 -> 运行时路由模�
 ## 状态与持久化
 
 平台将版本化路由资源、审计数据、Console 证书策略和 Console 管理的设置保存在 `/data/platform`。`settings.json` 包含管理员令牌；它与其他敏感状态在 POSIX 文件系统上的创建权限为 `0600`。旧路由文件会被原子迁移为 Listener、Backend Pool 和 Routing Rule。Caddy 证书存储位于 `/data/caddy`。生产环境必须持久化整个 `/data`。Azure VM 部署 bind mount `/var/lib/caddy-reverse-proxy`；已有主机上的 `start.sh` 使用 `~/docker_files/caddy-reverse-proxy`。
+
+v3 路由封装一次原子保存 desired/applied 快照及版本，对外资源/ZIP 格式仍为 v2。旧 v1/v2 文件迁移为已应用基线；普通待应用编辑重启后不会自动激活。ZIP 导入先暂存在内存，Caddy 接受后逐文件落盘；返回错误会触发补偿，但不保证跨文件崩溃原子性。
+
+Azure 资源归属由本地稳定 `azure-instance-id` 标识，不进入配置 ZIP。DNS 写删校验归属并使用 ETag；NSG 名称按实例隔离，旧资源或其他实例资源不自动接管。HTTP/HTTPS 端点渲染为独立 Caddy server。内部管理代理保留 API 凭据至回环地址，业务 protected 代理仍移除凭据；管理静态资源公开，设置管理域名时必须启用 API 鉴权。

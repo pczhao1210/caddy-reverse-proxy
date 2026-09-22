@@ -92,12 +92,24 @@ func (d *Discoverer) Discover(ctx context.Context) ([]model.ContainerService, []
 	services := make([]model.ContainerService, 0, len(payload))
 	routeList := make([]model.RouteConfig, 0)
 	for _, container := range payload {
-		service := toService(container)
-		if route, ok := routeFromLabels(service); ok {
+		services = append(services, toService(container))
+	}
+	gateway, gatewayFound := GatewayContainer(services)
+	for index := range services {
+		service := &services[index]
+		if !labelTrue(service.Labels["caddy.enable"]) || (gatewayFound && service.ID == gateway.ID) {
+			continue
+		}
+		if !gatewayFound {
+			service.RouteWarning = "automatic route skipped: gateway container could not be identified"
+			continue
+		}
+		if route, ok := routeFromLabels(*service, gateway.Networks); ok {
 			service.RouteHint = &route
 			routeList = append(routeList, route)
+		} else {
+			service.RouteWarning = "automatic route skipped: no reachable shared-network address or invalid routing labels"
 		}
-		services = append(services, service)
 	}
 	sort.Slice(services, func(left int, right int) bool { return services[left].Name < services[right].Name })
 	return services, routeList, nil
@@ -144,7 +156,7 @@ func toService(container containerPayload) model.ContainerService {
 	return model.ContainerService{ID: container.ID, Name: cleanName(container.Names), Image: container.Image, State: container.State, Status: container.Status, Labels: container.Labels, Ports: ports, Networks: networks, NetworkEndpoints: endpoints, NetworkAddresses: addresses}
 }
 
-func routeFromLabels(service model.ContainerService) (model.RouteConfig, bool) {
+func routeFromLabels(service model.ContainerService, gatewayNetworks []string) (model.RouteConfig, bool) {
 	labels := service.Labels
 	if !labelTrue(labels["caddy.enable"]) {
 		return model.RouteConfig{}, false
@@ -154,10 +166,16 @@ func routeFromLabels(service model.ContainerService) (model.RouteConfig, bool) {
 		return model.RouteConfig{}, false
 	}
 	port := labels["caddy.port"]
-	if port == "" && len(service.Ports) > 0 {
-		port = strconv.Itoa(service.Ports[0].PrivatePort)
-	}
 	if port == "" {
+		for _, candidate := range service.Ports {
+			if candidate.Type == "tcp" {
+				port = strconv.Itoa(candidate.PrivatePort)
+				break
+			}
+		}
+	}
+	portNumber, err := strconv.Atoi(port)
+	if err != nil || portNumber < 1 || portNumber > 65535 {
 		return model.RouteConfig{}, false
 	}
 	exposure := strings.ToLower(labels["exposure.mode"])
@@ -166,7 +184,10 @@ func routeFromLabels(service model.ContainerService) (model.RouteConfig, bool) {
 	}
 	public := exposure == "" || exposure == "public" || exposure == "protected"
 	protected := exposure == "protected"
-	upstreamAddress := serviceUpstreamAddress(service)
+	upstreamAddress := SharedNetworkAddress(service, gatewayNetworks)
+	if upstreamAddress == "" {
+		return model.RouteConfig{}, false
+	}
 	healthPath := strings.TrimSpace(labels["caddy.health_path"])
 	return model.RouteConfig{
 		ID:         "docker-" + shortID(service.ID),
@@ -179,18 +200,8 @@ func routeFromLabels(service model.ContainerService) (model.RouteConfig, bool) {
 		Protected:  protected,
 		Source:     "docker",
 		Discovered: true,
-		Upstreams:  []model.UpstreamTarget{{Name: upstreamAddress, URL: fmt.Sprintf("http://%s:%s", upstreamAddress, port), HealthPath: healthPath}},
+		Upstreams:  []model.UpstreamTarget{{Name: upstreamAddress, URL: "http://" + net.JoinHostPort(upstreamAddress, port), HealthPath: healthPath}},
 	}, true
-}
-
-func serviceUpstreamAddress(service model.ContainerService) string {
-	if len(service.NetworkAddresses) > 0 {
-		return service.NetworkAddresses[0]
-	}
-	if name := strings.TrimSpace(service.Labels["com.docker.compose.service"]); name != "" {
-		return name
-	}
-	return service.Name
 }
 
 func cleanName(names []string) string {

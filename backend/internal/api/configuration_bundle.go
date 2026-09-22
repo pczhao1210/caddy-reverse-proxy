@@ -144,9 +144,6 @@ func (s *Server) importConfigurationBundle(w http.ResponseWriter, r *http.Reques
 		PreviousSettings:          persistedSettings,
 		PreviousCertificatePolicy: previousCertificatePolicy,
 	})
-	if updater, ok := s.reconciler.(runtimeConfigUpdater); ok {
-		updater.UpdateConfig(liveConfig)
-	}
 	s.audit("configuration.import.staged", map[string]any{
 		"listeners":           len(candidateStore.Listeners()),
 		"backendPools":        len(candidateStore.BackendPools()),
@@ -215,11 +212,11 @@ func (s *Server) desiredCertificatePolicy(fallback model.CertificateConfig) mode
 	return fallback
 }
 
-func (s *Server) persistConfigurationImport() error {
+func (s *Server) persistConfigurationImport(snapshot routes.Snapshot) error {
 	s.configurationMu.Lock()
 	defer s.configurationMu.Unlock()
 	if s.configurationDraft == nil {
-		return nil
+		return s.store.MarkApplied(snapshot)
 	}
 	draft := *s.configurationDraft
 	if err := s.settingsStore.Save(draft.Settings); err != nil {
@@ -229,7 +226,7 @@ func (s *Server) persistConfigurationImport() error {
 		rollbackErr := s.settingsStore.Save(draft.PreviousSettings)
 		return errors.Join(err, rollbackErr)
 	}
-	if err := s.store.PersistStaged(); err != nil {
+	if err := s.store.MarkApplied(snapshot); err != nil {
 		rollbackErr := errors.Join(
 			s.settingsStore.Save(draft.PreviousSettings),
 			s.certificateStore.Save(draft.PreviousCertificatePolicy),

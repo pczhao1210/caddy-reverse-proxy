@@ -1,12 +1,109 @@
 package azure
 
 import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dns/armdns"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
 	"github.com/aidockerfarm/gateway/internal/model"
 )
+
+type testTransport func(*http.Request) (*http.Response, error)
+
+func (transport testTransport) Do(request *http.Request) (*http.Response, error) {
+	return transport(request)
+}
+
+func sdkResponse(request *http.Request, status int, payload any) *http.Response {
+	data, _ := json.Marshal(payload)
+	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/json"}}, Body: io.NopCloser(strings.NewReader(string(data))), Request: request}
+}
+
+func TestInstanceIdentityIsStableAndDistinct(t *testing.T) {
+	directory := t.TempDir()
+	first, err := loadInstanceID(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := loadInstanceID(directory)
+	if err != nil || first != second {
+		t.Fatalf("identity changed: %q %q err=%v", first, second, err)
+	}
+	other, err := loadInstanceID(t.TempDir())
+	if err != nil || other == first {
+		t.Fatalf("independent gateways share identity: %v", err)
+	}
+}
+
+func TestDNSWritesRequireOwnershipAndETag(t *testing.T) {
+	for _, mode := range []string{"new", "foreign", "legacy", "unchanged", "changed", "conflict"} {
+		t.Run(mode, func(t *testing.T) {
+			manager := &Manager{instanceID: "owner", cfg: model.AppConfig{Azure: model.AzureConfig{ResourceGroup: "dns-rg", DNSZoneName: "example.com"}}}
+			writes := 0
+			client, err := armdns.NewRecordSetsClient("subscription", testTokenCredential{}, &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: testTransport(func(request *http.Request) (*http.Response, error) {
+				if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/A") {
+					return sdkResponse(request, 200, map[string]any{"value": []any{}}), nil
+				}
+				if request.Method == http.MethodGet {
+					if mode == "new" {
+						return sdkResponse(request, 404, map[string]any{"error": map[string]string{"code": "NotFound"}}), nil
+					}
+					metadata := manager.dnsMetadata("app.example.com")
+					if mode == "foreign" {
+						metadata[managedDNSOwnerKey] = to.Ptr("another-owner")
+					}
+					if mode == "legacy" {
+						delete(metadata, managedDNSOwnerKey)
+					}
+					address := "203.0.113.1"
+					if mode == "unchanged" {
+						address = "203.0.113.2"
+					}
+					return sdkResponse(request, 200, armdns.RecordSet{Etag: to.Ptr("revision-one"), Properties: &armdns.RecordSetProperties{TTL: to.Ptr[int64](300), Metadata: metadata, ARecords: []*armdns.ARecord{{IPv4Address: to.Ptr(address)}}}}), nil
+				}
+				if request.Method != http.MethodPut {
+					t.Fatalf("unexpected method %s", request.Method)
+				}
+				writes++
+				if mode == "new" {
+					if request.Header.Get("If-None-Match") != "*" {
+						t.Error("new record missing create-only condition")
+					}
+				} else if request.Header.Get("If-Match") != "revision-one" {
+					t.Error("update missing ETag condition")
+				}
+				if mode == "conflict" {
+					return sdkResponse(request, 412, map[string]any{"error": map[string]string{"code": "PreconditionFailed"}}), nil
+				}
+				return sdkResponse(request, 200, map[string]any{}), nil
+			})}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.dnsClient = client
+			_, _, _, err = manager.reconcileDNS(context.Background(), []model.RouteConfig{{Host: "app.example.com"}}, "203.0.113.2")
+			wantError := mode == "foreign" || mode == "legacy" || mode == "conflict"
+			if (err != nil) != wantError {
+				t.Fatalf("error=%v expectedError=%t", err, wantError)
+			}
+			wantWrites := 1
+			if mode == "foreign" || mode == "legacy" || mode == "unchanged" {
+				wantWrites = 0
+			}
+			if writes != wantWrites {
+				t.Fatalf("writes=%d want=%d", writes, wantWrites)
+			}
+		})
+	}
+}
 
 func TestRelativeRecordName(t *testing.T) {
 	tests := []struct {
@@ -26,6 +123,92 @@ func TestRelativeRecordName(t *testing.T) {
 			got, ok := relativeRecordName(test.host, test.zone)
 			if ok != test.ok || got != test.want {
 				t.Fatalf("relativeRecordName(%q, %q) = %q, %v; want %q, %v", test.host, test.zone, got, ok, test.want, test.ok)
+			}
+		})
+	}
+}
+
+func TestDNSCleanupOnlyDeletesOwnedRecordsConditionally(t *testing.T) {
+	manager := &Manager{instanceID: "owner"}
+	other := &Manager{instanceID: "other-owner"}
+	deleted := []string{}
+	client, err := armdns.NewRecordSetsClient("subscription", testTokenCredential{}, &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: testTransport(func(request *http.Request) (*http.Response, error) {
+		if request.Method == http.MethodGet {
+			records := []*armdns.RecordSet{
+				{Name: to.Ptr("mine"), Etag: to.Ptr("owned-revision"), Properties: &armdns.RecordSetProperties{Metadata: manager.dnsMetadata("mine.example.com")}},
+				{Name: to.Ptr("theirs"), Etag: to.Ptr("other-revision"), Properties: &armdns.RecordSetProperties{Metadata: other.dnsMetadata("theirs.example.com")}},
+				{Name: to.Ptr("legacy"), Properties: &armdns.RecordSetProperties{Metadata: managedDNSMetadata("legacy.example.com")}},
+			}
+			return sdkResponse(request, 200, map[string]any{"value": records}), nil
+		}
+		if request.Method != http.MethodDelete || !strings.HasSuffix(request.URL.Path, "/mine") || request.Header.Get("If-Match") != "owned-revision" {
+			t.Fatalf("unsafe cleanup request: %s %s ETag=%q", request.Method, request.URL.Path, request.Header.Get("If-Match"))
+		}
+		deleted = append(deleted, request.URL.Path)
+		return sdkResponse(request, 200, map[string]any{}), nil
+	})}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.dnsClient = client
+	count, warnings, err := manager.cleanupDNS(context.Background(), model.AzureDNSZoneConfig{ResourceGroup: "rg", Name: "example.com"}, nil)
+	if err != nil || count != 1 || len(deleted) != 1 || len(warnings) != 1 {
+		t.Fatalf("cleanup: count=%d warnings=%v err=%v", count, warnings, err)
+	}
+}
+
+func TestNSGOwnershipAndNoOpReconcile(t *testing.T) {
+	for _, mode := range []string{"unchanged", "changed", "foreign", "delete", "foreign-delete"} {
+		t.Run(mode, func(t *testing.T) {
+			manager := &Manager{instanceID: "owner", cfg: model.AppConfig{Azure: model.AzureConfig{ResourceGroup: "rg", NetworkSecurityGroupName: "edge"}}}
+			writes := 0
+			client, err := armnetwork.NewSecurityRulesClient("subscription", testTokenCredential{}, &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: testTransport(func(request *http.Request) (*http.Response, error) {
+				if !strings.HasSuffix(request.URL.Path, "/"+manager.nsgRuleName()) {
+					t.Fatalf("shared NSG rule targeted: %s", request.URL.Path)
+				}
+				if request.Method == http.MethodGet {
+					properties := nsgRuleProperties(manager.cfg.Azure, []int{80, 443})
+					properties.Description = to.Ptr(manager.nsgOwnerDescription())
+					if strings.HasPrefix(mode, "foreign") {
+						properties.Description = to.Ptr("another gateway")
+					}
+					if mode == "changed" {
+						properties.Priority = to.Ptr[int32](500)
+					}
+					return sdkResponse(request, 200, armnetwork.SecurityRule{Properties: properties}), nil
+				}
+				writes++
+				if request.Method == http.MethodDelete {
+					return sdkResponse(request, 200, map[string]any{}), nil
+				}
+				if request.Method != http.MethodPut {
+					t.Fatalf("unexpected method %s", request.Method)
+				}
+				var payload map[string]any
+				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+					t.Fatal(err)
+				}
+				payload["properties"].(map[string]any)["provisioningState"] = "Succeeded"
+				return sdkResponse(request, 200, payload), nil
+			})}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.nsgClient = client
+			ports := []int{80, 443}
+			if strings.HasSuffix(mode, "delete") {
+				ports = nil
+			}
+			_, _, err = manager.reconcileNSG(context.Background(), ports)
+			if (err != nil) != strings.HasPrefix(mode, "foreign") {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			wantWrites := 0
+			if mode == "changed" || mode == "delete" {
+				wantWrites = 1
+			}
+			if writes != wantWrites {
+				t.Fatalf("writes=%d want=%d", writes, wantWrites)
 			}
 		})
 	}

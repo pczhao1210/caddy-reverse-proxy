@@ -41,7 +41,7 @@ Usage: ./start.sh <command>
 
 Commands:
   build, --build      Build the local gateway image
-  push, --push        Push the image to Docker Hub
+  push, --push        Build, verify, and publish AMD64 + ARM64 to Docker Hub
   start, --start      Start one gateway container and wait for readiness
   stop, --stop        Stop the gateway container and preserve data
   restore, --restore  Remove the container, persisted data directory, and image
@@ -50,6 +50,7 @@ Commands:
 Environment:
   IMAGE             Gateway repository (tag is always latest)
   PUSH_IMAGE        Docker Hub repository (tag is always latest; default: IMAGE)
+  MULTIARCH_BUILDER Buildx builder for push (default: gateway-multiarch)
   ENV_FILE          Optional environment file (default: .env, then .env.example)
   CONTAINER_NAME    Container name (default: caddy-reverse-proxy)
   DATA_DIR          Persistent data (default: ~/docker_files/caddy-reverse-proxy)
@@ -256,12 +257,7 @@ case "$command_name" in
     require_docker
     resolve_push_image true
     validate_docker_hub_image
-    docker image inspect "$IMAGE" >/dev/null 2>&1 || fail "Local image $IMAGE does not exist. Run ./start.sh build first."
-    if [ "$PUSH_IMAGE" != "$IMAGE" ]; then
-      docker tag "$IMAGE" "$PUSH_IMAGE"
-    fi
-    printf 'Pushing %s to Docker Hub...\n' "$PUSH_IMAGE"
-    docker push "$PUSH_IMAGE"
+    sh "$ROOT_DIR/scripts/publish-multiarch.sh" "$PUSH_IMAGE"
     ;;
   start)
     require_docker

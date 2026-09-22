@@ -59,7 +59,9 @@ DOCKER_NETWORKS=frontend,internal ./start.sh start
 ./start.sh restore
 ```
 
-`build` 与 `push` 默认使用 `pczhao1210/caddy-reverse-proxy:latest`。如需发布其他仓库，可覆盖 `IMAGE` 或 `PUSH_IMAGE`；`start.sh` 会把传入的任何 tag 或 digest 都替换为 `latest`。`stop` 保留数据目录。`restore` 只删除受管容器、选定镜像及 `~/docker_files` 下经过路径保护的项目目录，不会修改 `.env` 或 Git 文件。端口、镜像仓库、network 与路径覆盖方式见 `./start.sh help`。
+`build` 生成构建机架构的本地镜像。`push` 会独立构建并验证 `linux/amd64` 和 `linux/arm64`，再发布统一的 `pczhao1210/caddy-reverse-proxy:latest` 索引，不要求先进行本地构建。Docker 会自动选择宿主机架构，包括 Ubuntu ARM64。发布需要预先配置 Buildx builder，并让本机 Docker 能执行两种架构，详见[多架构发布](docs/operations.zh-CN.md#多架构发布)。请在开发机上构建，不要让小规格网关 VM 承担编译。
+
+如需发布其他仓库，可覆盖 `IMAGE` 或 `PUSH_IMAGE`；`start.sh` 会把传入的任何 tag 或 digest 都替换为 `latest`。`stop` 保留数据目录。`restore` 只删除受管容器、选定镜像及 `~/docker_files` 下经过路径保护的项目目录，不会修改 `.env` 或 Git 文件。端口、镜像仓库、network 与路径覆盖方式见 `./start.sh help`。
 
 交互部署脚本支持两种模式：创建独立 Azure VM，或只在当前机器部署网关容器。Azure 模式需要 Azure Cloud Shell，或本地 Bash 4+ 与 Azure CLI；同机模式需要 Bash 4+，并会检测 Docker。Docker 未安装时，脚本可在 Debian/Ubuntu 上经确认安装；服务未启动或当前用户无标准 socket 权限时，也会在说明变更并征得确认后尝试修复。任选下面一段执行；两种方式都会先下载到临时文件，仅在下载成功后运行：
 

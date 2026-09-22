@@ -112,7 +112,7 @@ Host 网络模式可以代理上游，但权衡不同：
 |---|---|
 | `make test` | 在 Go 工具链容器中运行测试。 |
 | `make docker-build` | 构建 `IMAGE`，默认 `pczhao1210/caddy-reverse-proxy:latest`。 |
-| `make docker-push` | 检查 Docker daemon/登录状态后推送 `IMAGE`。 |
+| `make docker-push` | 为 `IMAGE` 构建、验证并发布 AMD64 + ARM64。 |
 | `make docker-run` | 使用 `ENV_FILE` 在 Docker bridge 网络上本地运行镜像，默认 `.env`。 |
 | `make compose-up` | 启动 VM 示例栈。 |
 | `make compose-up-proxy` | 通过 Docker socket proxy 启动 VM 示例栈。 |
@@ -130,6 +130,32 @@ make docker-push
 ```
 
 发布到其他仓库或不可变 tag 时覆盖 `IMAGE`。
+
+## 多架构发布
+
+`./start.sh push` 与 `make docker-push` 复用 `scripts/publish-multiarch.sh`，从源码构建 `linux/amd64` 和 `linux/arm64`，不依赖本地已打标签的镜像。`start.sh` 始终发布 `latest`；Make 保留显式的 `IMAGE=repository:tag`。`build` 仍是本地单架构构建，不是发布前置步骤。不要再对单架构本地镜像执行普通 `docker push ...:latest`，否则会覆盖多架构索引。
+
+发布机需要 Docker、Buildx、`jq` 和支持 `--retry-all-errors` 的 `curl`。请在终端直接使用 `docker login` 登录。builder 与本机 Docker daemon 都需要能够执行两种目标架构，以便进行运行时检查。以下一次性配置适用于 Linux AMD64 开发机；binfmt 命令具有特权，会更改宿主机级执行支持，必须获得宿主机所有者许可，不应在网关 VM 上执行：
+
+```sh
+docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
+docker buildx create --name gateway-multiarch --driver docker-container \
+	--driver-opt image=moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+docker buildx inspect gateway-multiarch --bootstrap
+./start.sh push
+```
+
+已有合适的 builder 时可通过 `MULTIARCH_BUILDER` 复用；脚本不会改变默认 builder，也不会自动安装模拟器。ARM 发布机则需要相应的 AMD64 执行支持。Go 与 xcaddy 在 `BUILDPLATFORM` 原生编译，明确指定目标 OS/架构；目标 Alpine 阶段仍执行 Caddy 版本/插件检查。Ubuntu 宿主机不需要 Ubuntu 容器基底。已配置的 builder 和缓存会保留，供后续发布复用。
+
+发布时先推送唯一的 `multiarch-*` 候选标签，验证不可变索引、各平台镜像配置、两个 ELF 的架构、Caddy 版本和 Azure DNS 插件，然后在隔离容器中验证就绪、存活、匿名 401 和带令牌的 API。状态为临时数据，仅映射随机回环管理端口，不挂载真实 Docker socket，也不开启云端集成。检查失败不会更新目标标签；临时容器会清理，候选标签保留供排查或手动按保留策略清理。
+
+更新目标标签前会确认它的摘要未在构建期间改变。这是乐观检查，不是 registry 原子比较交换；同一标签的发布仍需串行执行。更新时使用已验证的索引摘要，并在更新后再次核对；更新后的验证报错需要先检查仓库，不应盲目重试。保留输出中的旧摘要用于回退。经授权，可用 `docker buildx imagetools create --prefer-index=false --tag <repository:tag> <repository>@<previous-digest>` 恢复旧引用；恢复旧单架构 manifest 也会移除 ARM64 支持。
+
+可用 `docker buildx imagetools inspect pczhao1210/caddy-reverse-proxy:latest` 检查平台列表。AMD64 和 ARM64 用户都执行普通 `docker pull pczhao1210/caddy-reverse-proxy:latest`，由 Docker 自动选择。Buildx provenance 可能显示为 `unknown/unknown`，它们是证明元数据，不是额外可运行架构。发布不会重启已部署的容器。
+
+2026-09-22 发布索引为 `sha256:21edcc864fa5405df5ceecab2e0368220fa9a8ad2de51d5833020b9941eec852`，运行层压缩体积约 AMD64 29.1 MiB、ARM64 27.3 MiB。旧 AMD64 单架构 manifest 为 `sha256:d493c1622f67c5b905ef9abc212bb7b6ac5b0de4a146925f78ad92400555a255`。
+
+验证证据：`node --test scripts/publish-multiarch.test.cjs` 的 15 项隔离发布测试通过，覆盖失败路径和标签处理；原生全量 Go race/vet 与真实 Caddy 测试通过。交叉编译的 Caddy/证书测试包在 QEMU 的无网络 ARM64 容器中通过，包含 HTTP/TLS/Host/鉴权和存储锁检查；两个已发布架构均通过最终镜像冒烟测试。未验证原生 ARM 硬件性能、真实云端/ACME 或生产负载。下方安全例外仍未关闭，发布脚本本身不会自动运行漏洞扫描器。
 
 ## 依赖升级基线（2026-09-22）
 
@@ -153,6 +179,7 @@ Caddy 2.11 改变了 HTTPS 上游的默认 Host 行为。渲染器现在显式�
 
 - `govulncheck` 1.8.0 对 `./cmd/server` 未发现可达或已导入包漏洞，仍有仅模块级的 OpenPGP 告警。Trivy 0.74.0 对最终网关镜像的 OS 包扫描为零项（Alpine 3.22.6，共 18 个包）。
 - 最终 Caddy 二进制仍报告 CEL 0.28.1 的 [GO-2026-6094](https://pkg.go.dev/vuln/GO-2026-6094)，涉及 `NativeTypes`/`ParseStructTag`。修复版 CEL 0.30.0 与 Caddy 2.11.4 的 interpreter API 编译不兼容。另有不再维护的 OpenPGP 包 [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932)，公告没有列出修复版本。二进制扫描不等于证明当前网关配置可触达漏洞；兼容修复与可达性评估仍待完成。
+- 多架构发布时的 Trivy Go 包完整扫描还报告 `CVE-2026-81871`（中危，OTLP log gRPC exporter 0.19.0，修复版 0.21.0）和 `CVE-2026-81870`（低危，trace exporters/SDK，修复版 1.45.0）。AMD64 二进制与前一版字节完全一致，因此是本次新增记录的发现，而非架构改动引入的依赖。两个架构的发现相同，OS 包均无发现。Trivy 将 CEL 修复版列为 0.29.0，而 Go 公告列为 0.30.0，选择兼容修复前应核对差异。仅凭版本扫描不能证明实际可利用。
 - 固定的 socket proxy 镜像仍含 OpenSSL `libcrypto3`/`libssl3` 3.5.7-r0：共 10 个不同 CVE，其中 1 个高危，分布于 20 条包级记录。Alpine 列出的修复版本为 3.5.8-r0。需要等待上游镜像更新，或明确批准维护重建镜像，不应直接替换为可变 nightly tag。
 - 示例 httpbin 镜像没有 OS 扫描发现，但其 Go 1.26.5 二进制有 8 项标准库高危 CVE。该结果基于版本，并非调用链分析；相关修复从 Go 1.26.6 开始，需要上游重建。该示例不属于生产 Compose，不应对公网暴露。
 

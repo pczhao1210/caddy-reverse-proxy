@@ -10,7 +10,7 @@ help:
 	@printf '%s\n' 'Targets:'
 	@printf '%s\n' '  test          Run Go tests in a Go toolchain container'
 	@printf '%s\n' '  docker-build  Build the single platform gateway image'
-	@printf '%s\n' '  docker-push   Push IMAGE after checking Docker login state'
+	@printf '%s\n' '  docker-push   Build, verify, and publish AMD64 + ARM64 for IMAGE'
 	@printf '%s\n' '  docker-run    Run the image locally with ENV_FILE on Docker bridge'
 	@printf '%s\n' '  compose-up    Start the VM profile sample stack'
 	@printf '%s\n' '  compose-up-proxy Start the VM stack through a Docker socket proxy'
@@ -31,13 +31,7 @@ docker-build:
 	docker build -f backend/Dockerfile -t $(IMAGE) .
 
 docker-push:
-	@docker info >/dev/null 2>&1 || { printf '%s\n' 'Docker daemon is not reachable. Start Docker first.' >&2; exit 1; }
-	@config="$${DOCKER_CONFIG:-$$HOME/.docker}/config.json"; \
-	if ! test -f "$$config" || ! grep -Eq '"auths"|"credsStore"|"credHelpers"' "$$config"; then \
-		printf '%s\n' 'Docker does not look logged in. Run: docker login' >&2; \
-		exit 1; \
-	fi
-	docker push $(IMAGE)
+	sh scripts/publish-multiarch.sh "$(IMAGE)"
 
 docker-run:
 	@test -f $(ENV_FILE) || { printf '%s\n' 'Missing $(ENV_FILE). Create one first, for example: cp .env.example .env' >&2; exit 1; }

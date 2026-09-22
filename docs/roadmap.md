@@ -36,6 +36,12 @@ This document tracks what is currently implemented and what still needs to be co
 
 ## Further Hardening
 
+### Multi-Architecture Release (2026-09-22)
+
+- Implemented and published one `latest` index for `linux/amd64` and `linux/arm64`. Native cross-compilation, immutable candidate validation, shipping-image smoke checks, target-change detection and post-promotion digest verification are shared by `start.sh push` and `make docker-push`; local `build` remains single-platform.
+- Verification passed: 15 publishing regression tests, full native Go race/vet, QEMU ARM64 Caddy/certificate tests covering HTTP/TLS/Host/auth/storage locks, both candidate containers' health/auth/ELF checks, and registry platform/digest verification. Ordinary pull selects AMD64 on the development host. Release index, per-platform sizes, setup and rollback details are in [operations](operations.md#multi-architecture-publishing).
+- Remaining gates: native Ubuntu ARM64 deployment/performance and real cloud/ACME were not exercised. Dependency security exceptions remain, including newly recorded OpenTelemetry findings in unchanged AMD64 binaries. Publishing is not production deployment or a clean security attestation. Next smallest step: authorized ARM64 staging validation and separate dependency-risk remediation.
+
 ### Dependency Upgrade (2026-09-22)
 
 - Local implementation complete: Go 1.26.8, Caddy 2.11.4, xcaddy 0.4.7, aligned CertMagic 0.25.4, Azure SDK and Go security dependencies, Alpine Linux 3.22.6, Alpine.js 3.17.4, socket proxy v0.5.0 and sample httpbin 2.25.0. Base/companion images are digest-pinned; Azure DNS 0.6.0 is retained. HTTPS upstream Host compatibility is explicitly preserved with regression coverage.

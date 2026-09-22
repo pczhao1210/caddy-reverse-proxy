@@ -112,7 +112,7 @@ Use explicit routes for host-local upstreams, for example `http://127.0.0.1:3000
 |---|---|
 | `make test` | Run Go tests in a Go toolchain container. |
 | `make docker-build` | Build `IMAGE`, default `pczhao1210/caddy-reverse-proxy:latest`. |
-| `make docker-push` | Check Docker daemon/login state and push `IMAGE`. |
+| `make docker-push` | Build, verify, and publish AMD64 + ARM64 for `IMAGE`. |
 | `make docker-run` | Run the image locally with `ENV_FILE`, default `.env`, on Docker bridge. |
 | `make compose-up` | Start the VM sample stack. |
 | `make compose-up-proxy` | Start the VM stack with Docker discovery through a socket proxy. |
@@ -130,6 +130,32 @@ make docker-push
 ```
 
 Override `IMAGE` when publishing another repository or immutable tag.
+
+## Multi-Architecture Publishing
+
+`./start.sh push` and `make docker-push` share `scripts/publish-multiarch.sh`. They build both `linux/amd64` and `linux/arm64` from source, regardless of locally tagged images. `start.sh` always publishes `latest`; Make preserves an explicit `IMAGE=repository:tag`. `build` remains a local, single-platform command and is not a prerequisite for publishing. Do not subsequently run plain `docker push ...:latest` on a single-platform local image: that would replace the multi-platform index.
+
+The publishing machine needs Docker, Buildx, `jq`, and `curl` with `--retry-all-errors` support. Authenticate with `docker login` directly in your terminal. Both the builder and local Docker daemon must be able to execute the two target architectures for runtime checks. The following one-time setup is for a Linux AMD64 development host. The binfmt command is privileged and changes host-wide execution support; run it only with the host owner's approval, not on the gateway VM:
+
+```sh
+docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
+docker buildx create --name gateway-multiarch --driver docker-container \
+	--driver-opt image=moby/buildkit@sha256:6c2fa84a6b61ccd72899dde4239f8d5717f05f9a8ca6f3cad185fb1a95a94de3
+docker buildx inspect gateway-multiarch --bootstrap
+./start.sh push
+```
+
+Reuse an existing suitable builder via `MULTIARCH_BUILDER`; the script does not select a new default builder or install emulators automatically. An ARM publishing host needs equivalent AMD64 execution support. Go and xcaddy compile on `BUILDPLATFORM` with explicit target OS/architecture; the target Alpine stage still executes Caddy version/module checks. The Ubuntu host does not require an Ubuntu container base. The prepared builder and cache are retained for subsequent releases.
+
+Publication first pushes a unique `multiarch-*` candidate tag. It validates the immutable index, per-platform image configuration, both ELF architectures, Caddy version and Azure DNS module, then runs isolated containers for readiness, liveness, unauthenticated 401 and authenticated API checks. State is temporary, only a random loopback management port is published, and neither real Docker sockets nor cloud integration are enabled. Failed checks do not promote the target tag; temporary containers are removed, and candidate tags remain available for investigation/manual retention management.
+
+Immediately before promotion, the script checks that the target digest has not changed since the build began. This is an optimistic check, not registry compare-and-swap: serialize publishers to the same tag. Promotion uses the verified index digest and verifies it again afterwards. A post-promotion error requires registry inspection rather than blind retry. Keep the printed previous digest for rollback. With appropriate authorization, restore that reference using `docker buildx imagetools create --prefer-index=false --tag <repository:tag> <repository>@<previous-digest>`; restoring a legacy single-architecture manifest also removes ARM64 availability.
+
+Verify the published platform list with `docker buildx imagetools inspect pczhao1210/caddy-reverse-proxy:latest`. Consumers use the same ordinary `docker pull pczhao1210/caddy-reverse-proxy:latest` on AMD64 or ARM64. Buildx provenance entries may appear as `unknown/unknown`; they are attestations, not additional runnable architectures. Publishing does not restart deployed containers.
+
+The 2026-09-22 release index is `sha256:21edcc864fa5405df5ceecab2e0368220fa9a8ad2de51d5833020b9941eec852`. Compressed runtime layers total approximately 29.1 MiB for AMD64 and 27.3 MiB for ARM64. The previous AMD64-only manifest was `sha256:d493c1622f67c5b905ef9abc212bb7b6ac5b0de4a146925f78ad92400555a255`.
+
+Verification: `node --test scripts/publish-multiarch.test.cjs` passes 15 isolated publishing tests, including failure paths and tag handling. Native full Go race/vet and real Caddy tests passed. Cross-compiled Caddy/certificate test packages passed in network-isolated ARM64 containers under QEMU, including HTTP/TLS/Host/auth and storage-lock checks. Both published architectures passed the shipping-image smoke tests. Native ARM hardware performance, real cloud/ACME and production workloads were not tested. Security exceptions below remain open; the publisher does not automatically run a vulnerability scanner.
 
 ## Dependency Upgrade Baseline (2026-09-22)
 
@@ -153,6 +179,7 @@ Security results are a dated snapshot, **not a clean production release gate**:
 
 - `govulncheck` 1.8.0 found no reachable or imported-package vulnerabilities in `./cmd/server`; its module-only OpenPGP warning remains. Trivy 0.74.0 found no OS-package vulnerabilities in the final gateway image (Alpine 3.22.6, 18 packages).
 - The final Caddy binary still reports [GO-2026-6094](https://pkg.go.dev/vuln/GO-2026-6094) in CEL 0.28.1 (`NativeTypes`/`ParseStructTag`). The fixed CEL 0.30.0 fails to compile against Caddy 2.11.4's interpreter API. It also reports [GO-2026-5932](https://pkg.go.dev/vuln/GO-2026-5932) in the unmaintained OpenPGP package, for which no patched version is listed. Binary findings do not establish exposure through this gateway's configuration; compatibility fixes and reachability review remain required.
+- The multi-architecture release's full Trivy Go-package scan also reports `CVE-2026-81871` (medium, OTLP log gRPC exporter 0.19.0; fixed 0.21.0) and `CVE-2026-81870` (low, trace exporters/SDK; fixed 1.45.0). AMD64 binaries are byte-identical to the preceding release, so these are newly recorded findings, not dependencies introduced by the architecture change. Both architectures have identical findings and no OS-package findings. Trivy lists CEL 0.29.0 as fixed while the Go advisory lists 0.30.0; reconcile this difference before selecting a compatible fix. Version findings alone do not prove reachable exploitation.
 - The pinned socket proxy image contains OpenSSL `libcrypto3`/`libssl3` 3.5.7-r0: 10 distinct CVEs, including one high-severity CVE, across 20 package findings. Alpine lists 3.5.8-r0 as fixed. Await an updated upstream image or explicitly approve a maintained rebuilt image; do not substitute a mutable nightly tag.
 - The sample httpbin image has no reported OS findings, but its Go 1.26.5 binary has eight high-severity standard-library CVE findings. These are version-based findings, not a call-path analysis. The relevant fixes start at Go 1.26.6; an upstream rebuild is needed. This sample is not part of the production Compose file and should not be publicly exposed.
 

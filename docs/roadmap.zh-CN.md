@@ -36,6 +36,12 @@
 
 ## 后续强化
 
+### 多架构发布（2026-09-22）
+
+- 已实现并发布同时包含 `linux/amd64` 与 `linux/arm64` 的统一 `latest` 索引。原生交叉编译、不可变候选验证、最终镜像冒烟检查、目标并发变更检测及发布后摘要核验，由 `start.sh push` 与 `make docker-push` 共用；本地 `build` 仍保持单架构。
+- 验证通过：15 项发布回归，原生全量 Go race/vet，QEMU ARM64 Caddy/证书测试（HTTP/TLS/Host/鉴权/存储锁），两个候选容器的健康/鉴权/ELF 检查，以及远端平台/摘要核验。本机普通 pull 自动选择 AMD64。发布索引、分架构体积、环境准备及回退说明见[运维指南](operations.zh-CN.md#多架构发布)。
+- 剩余门槛：未进行原生 Ubuntu ARM64 部署/性能及真实云端/ACME 验证。依赖安全例外仍保留，包括在未变化的 AMD64 二进制中新增记录的 OpenTelemetry 告警。发布不等于生产部署或安全清零。下一最小步骤：授权 ARM64 预发布验证，并单独处理依赖风险。
+
 ### 依赖升级（2026-09-22）
 
 - 本地实施完成：Go 1.26.8、Caddy 2.11.4、xcaddy 0.4.7、两端一致的 CertMagic 0.25.4、Azure SDK 与 Go 安全依赖、Alpine Linux 3.22.6、Alpine.js 3.17.4、socket proxy v0.5.0 及示例 httpbin 2.25.0。基础/附属镜像固定 digest，保留 Azure DNS 0.6.0；显式保留 HTTPS 上游 Host 兼容行为并增加回归测试。

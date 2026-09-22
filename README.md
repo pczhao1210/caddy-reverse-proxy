@@ -59,7 +59,9 @@ Other lifecycle commands accept either form, such as `build` or `--build`:
 ./start.sh restore
 ```
 
-`build` and `push` use `pczhao1210/caddy-reverse-proxy:latest` by default. Set `IMAGE` or `PUSH_IMAGE` to select another repository; `start.sh` always replaces any supplied tag or digest with `latest`. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image repository, network, and path overrides.
+`build` creates a local image for the build host. `push` independently builds and verifies both `linux/amd64` and `linux/arm64`, then publishes one `pczhao1210/caddy-reverse-proxy:latest` index; a prior local build is not required. Docker automatically selects the host architecture, including Ubuntu ARM64. Publishing requires a prepared Buildx builder and local execution support for both architectures; see [multi-architecture publishing](docs/operations.md#multi-architecture-publishing). Build on a development machine, not a small gateway VM.
+
+Set `IMAGE` or `PUSH_IMAGE` to select another repository; `start.sh` always replaces any supplied tag or digest with `latest`. `stop` preserves the data directory. `restore` removes only the managed container, the selected image, and the guarded project directory below `~/docker_files`; it does not modify `.env` or Git files. Run `./start.sh help` for port, image repository, network, and path overrides.
 
 The interactive deployment script supports two modes: create a standalone Azure VM, or deploy only the gateway container on the current machine. Azure mode requires Azure Cloud Shell or local Bash 4+ with Azure CLI; local mode requires Bash 4+ and checks Docker. It can offer to install missing Docker on Debian/Ubuntu after confirmation. It can also explain and offer to repair a stopped service or missing access to the standard socket. Choose one block below; each downloads the script to a temporary file and runs it only after a successful download:
 

@@ -73,11 +73,26 @@ if (args[0] === 'buildx' && args[1] === 'build') {
   if (scenario === 'arm64-run-failure' && arm) process.exit(1);
   console.log(arm ? 'fixture-arm64' : 'fixture-amd64');
 } else if (args[0] === 'exec') {
-  if (scenario === 'wrong-elf' && args[1] === 'fixture-arm64' && args[2] === '/bin/sh') process.exit(1);
+  if (args[2] === '/bin/sh') {
+    if (scenario === 'arm64-exits-before-elf' && args[1] === 'fixture-arm64') {
+      console.error('container is not running');
+      process.exit(1);
+    }
+    console.log(args[1] === 'fixture-arm64' && scenario !== 'wrong-elf' ? '183\\n183' : '62\\n62');
+  }
   if (args[3] === 'version') console.log(scenario === 'wrong-caddy-version' ? 'v2.11.4 fixture' : 'v2.11.7 fixture');
   if (args[3] === 'list-modules') console.log('dns.providers.azure');
 } else if (args[0] === 'container' && args[1] === 'inspect') {
-  emit({'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'28080'}]});
+  if (args.includes('{{json .State}}')) {
+    const arm = args[2] === 'fixture-arm64';
+    const countFile = work + '/state-' + args[2];
+    const count = fs.existsSync(countFile) ? Number(fs.readFileSync(countFile,'utf8')) : 0;
+    fs.writeFileSync(countFile,String(count+1));
+    const stopped = arm && (scenario === 'arm64-startup-exit' || (scenario === 'arm64-exits-before-elf' && count > 0));
+    emit({Status:stopped ? 'exited' : 'running',Running:!stopped,ExitCode:stopped ? 255 : 0,OOMKilled:false,Error:''});
+  } else emit({'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'28080'}]});
+} else if (args[0] === 'logs') {
+  if (scenario === 'arm64-startup-exit' || scenario === 'arm64-exits-before-elf') console.log('exec /usr/local/bin/platform: exec format error');
 }
 `;
 const curlStub = `#!/usr/bin/env node
@@ -136,6 +151,26 @@ test('an older Caddy runtime cannot be promoted', () => {
   const result = run('wrong-caddy-version');
   assert.notEqual(result.status, 0);
   assert.equal(promotions(result).length, 0);
+});
+
+for (const scenario of ['arm64-startup-exit', 'arm64-exits-before-elf']) {
+  test(`${scenario} reports startup diagnostics, not a wrong ELF architecture`, () => {
+    const result = run(scenario);
+    assert.notEqual(result.status, 0);
+    assert.equal(promotions(result).length, 0);
+    assert.match(result.stderr, /exec format error/);
+    assert.match(result.stderr, /"ExitCode":255/);
+    assert.doesNotMatch(result.stderr, /Wrong ELF architecture/);
+    assert(result.commands.some(command => command[1] === 'logs' && command.at(-1) === 'fixture-arm64'));
+    assert(result.commands.some(command => command[1] === 'rm' && command.at(-1) === 'fixture-arm64'));
+  });
+}
+
+test('a genuine ELF mismatch still blocks promotion', () => {
+  const result = run('wrong-elf');
+  assert.notEqual(result.status, 0);
+  assert.equal(promotions(result).length, 0);
+  assert.match(result.stderr, /Wrong ELF architecture/);
 });
 
 test('both architectures are verified before promoting the immutable candidate', () => {

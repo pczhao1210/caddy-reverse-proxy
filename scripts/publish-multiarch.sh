@@ -69,6 +69,17 @@ validate_index() {
   ' "$1" >/dev/null || fail "Candidate must contain exactly linux/amd64 and linux/arm64 runtime manifests."
 }
 
+runtime_failure() {
+  printf 'Runtime diagnostics for %s:\n' "$platform" >&2
+  if ! docker container inspect "$container" --format '{{json .State}}' >&2; then
+    printf 'Could not inspect the candidate container state.\n' >&2
+  fi
+  if ! docker logs --tail 30 "$container" >&2; then
+    printf 'Could not read the candidate startup logs.\n' >&2
+  fi
+  fail "$1"
+}
+
 previous=$(target_digest)
 suffix=$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')
 candidate="$repository:multiarch-$(date -u +%Y%m%d%H%M%S)-$suffix"
@@ -92,22 +103,40 @@ for architecture in amd64 arm64; do
   docker image inspect "$reference" --format '{{json .}}' >"$work/image.json"
   jq -e --arg architecture "$architecture" '.Architecture == $architecture and .Os == "linux"' "$work/image.json" >/dev/null || fail "Image config does not match $platform."
   sh "$root/scripts/scan-image.sh" "$reference" "$work/security-$architecture" || fail "$platform evidence-bound vulnerability scan failed; target tag was not promoted."
-  container=$(docker run -d --platform "$platform" --label io.caddy-reverse-proxy.test=multiarch \
+  if ! container=$(docker run -d --platform "$platform" --label io.caddy-reverse-proxy.test=multiarch \
     --security-opt no-new-privileges:true --tmpfs /data:rw,nosuid,nodev,size=64m \
     -p 127.0.0.1::8080 -e GATEWAY_DOCKER_ENABLED=false -e GATEWAY_AZURE_ENABLED=false \
-    -e GATEWAY_AUTH_REQUIRED=true -e GATEWAY_ADMIN_TOKEN=multiarch-smoke-only "$reference")
+    -e GATEWAY_AUTH_REQUIRED=true -e GATEWAY_ADMIN_TOKEN=multiarch-smoke-only "$reference"); then
+    fail "$platform candidate could not start; check Docker and native/binfmt execution support."
+  fi
+  if ! docker container inspect "$container" --format '{{json .State}}' >"$work/runtime-state.json"; then
+    runtime_failure "Cannot inspect the $platform candidate after startup."
+  fi
+  if ! jq -e '.Running == true' "$work/runtime-state.json" >/dev/null; then
+    runtime_failure "$platform candidate exited before runtime validation; check startup logs and native/binfmt execution support."
+  fi
   case "$architecture" in
     amd64) machine=62 ;;
     arm64) machine=183 ;;
   esac
-  docker exec "$container" /bin/sh -ec '
+  if ! docker exec "$container" /bin/sh -ec '
     for binary in /usr/bin/caddy /usr/local/bin/platform; do
-      machine=$(od -An -tu2 -j18 -N2 "$binary" | tr -d " ")
-      test "$machine" = "$1"
+      machine=$(od -An -tu2 -j18 -N2 "$binary")
+      printf "%s\n" "$machine" | tr -d " "
     done
-  ' check "$machine" || fail "Wrong ELF architecture in $platform image."
-  docker exec "$container" caddy version | grep -q '^v2[.]11[.]7 '
-  docker exec "$container" caddy list-modules | grep -qx 'dns.providers.azure'
+  ' >"$work/elf-machines"; then
+    runtime_failure "Cannot execute ELF inspection in the $platform candidate; check startup logs and native/binfmt execution support."
+  fi
+  expected_machines=$(printf '%s\n%s' "$machine" "$machine")
+  [ "$(cat "$work/elf-machines")" = "$expected_machines" ] || runtime_failure "Wrong ELF architecture in $platform image."
+  if ! docker exec "$container" caddy version >"$work/caddy-version"; then
+    runtime_failure "Cannot execute Caddy in the $platform candidate."
+  fi
+  grep -q '^v2[.]11[.]7 ' "$work/caddy-version" || runtime_failure "Unexpected Caddy version in the $platform candidate."
+  if ! docker exec "$container" caddy list-modules >"$work/caddy-modules"; then
+    runtime_failure "Cannot inspect Caddy modules in the $platform candidate."
+  fi
+  grep -qx 'dns.providers.azure' "$work/caddy-modules" || runtime_failure "Azure DNS module is missing in the $platform candidate."
   port=$(docker container inspect "$container" --format '{{json .NetworkSettings.Ports}}' | jq -er '."8080/tcp"[] | select(.HostIp == "127.0.0.1") | .HostPort')
   base="http://127.0.0.1:$port"
   if ! curl --noproxy '*' --silent --show-error --fail --retry 45 --retry-connrefused \

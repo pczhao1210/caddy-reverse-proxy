@@ -148,6 +148,10 @@ docker buildx inspect gateway-multiarch --bootstrap
 
 已有合适的 builder 时可通过 `MULTIARCH_BUILDER` 复用；脚本不会改变默认 builder，也不会自动安装模拟器。ARM 发布机则需要相应的 AMD64 执行支持。Go 与 xcaddy 在 `BUILDPLATFORM` 原生编译，明确指定目标 OS/架构；目标 Alpine 阶段仍执行 Caddy 版本/插件检查。Ubuntu 宿主机不需要 Ubuntu 容器基底。已配置的 builder 和缓存会保留，供后续发布复用。
 
+即使宿主机 Docker daemon 无法运行 ARM64，BuildKit 自带的模拟能力仍可能完成 ARM64 镜像构建。因此，异构容器退出并报 `exec format error`，不代表 ELF 头架构错误。发布脚本现在分别报告容器状态/启动日志与真正的 ELF machine 不匹配；只扫描不启动的容器也会显式选择镜像平台。获批的 binfmt 命令注册的是当前宿主机内核，宿主机重启后可能需要重新注册。不要为绕过启动失败而静默执行特权配置或重建 builder。
+
+2026-10-30 追加执行验证时，已先取得宿主机所有者明确授权，仅注册 ARM64 binfmt。两个实际不可变候选均通过启动、ELF、Caddy/Azure 插件、就绪/存活及匿名/认证 API 检查，没有晋升 registry 目标标签。全部后端普通 Go 测试以 ARM64 可执行文件在 QEMU 下运行，使用候选镜像的真实 ARM64 Caddy，只读挂载测试/源码，无外部网络、云端集成或 Docker socket，覆盖路由、TLS、HTTP/3、内部 CA 与证书；AMD64 通过原生 race/vet。两个候选的原始/SBOM/适用性扫描也通过，44 项扫描/发布回归通过，覆盖启动即退出及 ELF 检查前退出的竞争。未运行 ARM64 race、原生 ARM 硬件/性能或真实云端/ACME 验证。下方此前“ARM64 无法执行”的记录属于注册前基线。
+
 发布时先推送唯一的 `multiarch-*` 候选标签，验证不可变索引、各平台镜像配置，对两个架构执行下述绑定证据的漏洞门槛，再核验 ELF 架构、Caddy 版本和 Azure DNS 插件，并在隔离容器中验证就绪、存活、匿名 401 和带令牌的 API。证据缺失/被篡改或仍有漏洞都会阻止晋升。状态为临时数据，仅映射随机回环管理端口，不挂载真实 Docker socket，也不开启云端集成。检查失败不会更新目标标签；临时容器会清理，候选标签保留供排查或手动按保留策略清理。
 
 更新目标标签前会确认它的摘要未在构建期间改变。这是乐观检查，不是 registry 原子比较交换；同一标签的发布仍需串行执行。更新时使用已验证的索引摘要，并在更新后再次核对；更新后的验证报错需要先检查仓库，不应盲目重试。保留输出中的旧摘要用于回退。经授权，可用 `docker buildx imagetools create --prefer-index=false --tag <repository:tag> <repository>@<previous-digest>` 恢复旧引用；恢复旧单架构 manifest 也会移除 ARM64 支持。

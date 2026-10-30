@@ -141,6 +141,8 @@ for (const mode of ['valid', 'tampered-binary', 'wrong-architecture', 'wrong-pro
       });
       assert.equal(result.status, mode === 'valid' ? 0 : 1, result.stdout + result.stderr);
       const calls = readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse);
+      const create = calls.find(call => call[0] === 'docker' && call[1] === 'create');
+      assert.equal(create[create.indexOf('--platform') + 1], 'linux/amd64');
       const scans = calls.filter(call => call[0] === 'trivy');
       assert.equal(scans.length, ['valid', 'remaining-vulnerability', ...ambientModes].includes(mode) ? 3 : ['dependency-vulnerability', 'unparsed-sbom'].includes(mode) ? 2 : ['extra-binary', 'raw-scan-failure'].includes(mode) ? 1 : 0);
       for (const scan of scans.filter(scan => scan[1] === 'image')) assert.equal(scan.at(-1), imageID);

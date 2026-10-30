@@ -36,6 +36,12 @@ This document tracks what is currently implemented and what still needs to be co
 
 ## Further Hardening
 
+### ARM64 Runtime Execution Follow-up (2026-10-30)
+
+- Diagnosed the failed candidate as missing host ARM64 execution support, not incorrect binaries: both ELF machines were ARM64 and the bounded probe failed with `exec format error`. Registered only ARM64 binfmt after explicit host-owner approval, without changing the builder or publishing.
+- Both actual AMD64/ARM64 candidates passed isolated startup/ELF/Caddy-module/health/auth checks and raw/SBOM/scoped scans. All backend ordinary Go tests ran under QEMU as ARM64 code with real candidate Caddy; AMD64 passed native full race/vet.
+- Startup/ELF-execution failures now expose state/logs and are not mislabeled as architecture mismatches; scan containers explicitly select the image platform. All 44 scan/publish regressions passed. ARM64 race, native ARM hardware/performance and real cloud/ACME checks remain open. No tag promotion or deployment was performed during this follow-up.
+
 ### JOSE v4 Remediation And Scoped VEX (2026-10-30)
 
 - Post-review policy isolation: all three Trivy scans ignore ambient filtering/config/ignore rules while retaining transport/cache settings; only the verified VEX may filter findings. Passed 41 scan/publish regressions, including an unfixed unrelated vulnerability under hostile filters, and real same-image control/hostile-environment comparisons. This shell-only follow-up did not rebuild images or close the ARM64 runtime gate.

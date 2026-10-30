@@ -48,7 +48,7 @@ scan_with_policy() (
 id=$(docker image inspect "$image" --format '{{.Id}}')
 printf '%s\n' "$id" | jq -Re 'test("^sha256:[a-f0-9]{64}$")' >/dev/null || fail "Invalid local image identity"
 architecture=$(docker image inspect "$id" --format '{{.Architecture}}')
-container=$(docker create --network none "$id")
+container=$(docker create --platform "linux/$architecture" --network none "$id")
 docker cp "$container:/usr/share/gateway/security/." "$output/"
 docker cp "$container:/usr/bin/caddy" "$output/caddy"
 docker cp "$container:/usr/local/bin/platform" "$output/platform"

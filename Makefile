@@ -1,15 +1,18 @@
 SHELL := /bin/sh
 
 IMAGE ?= pczhao1210/caddy-reverse-proxy:latest
+SOCKET_PROXY_IMAGE ?= caddy-reverse-proxy-socket-proxy:0.5.0-haproxy3.4.7
+HTTPBIN_IMAGE ?= caddy-reverse-proxy-httpbin:2.26.0-go1.27.3
 BACKEND_DIR := backend
 ENV_FILE ?= .env
 
-.PHONY: help test test-e2e docker-build docker-push docker-run compose-up compose-up-proxy compose-prod-up compose-prod-down compose-down azure-vm-deploy container-deploy
+.PHONY: help test test-e2e docker-build docker-build-companions docker-push docker-run compose-up compose-up-proxy compose-prod-up compose-prod-down compose-down azure-vm-deploy container-deploy
 
 help:
 	@printf '%s\n' 'Targets:'
 	@printf '%s\n' '  test          Run Go tests in a Go toolchain container'
 	@printf '%s\n' '  docker-build  Build the single platform gateway image'
+	@printf '%s\n' '  docker-build-companions Build patched socket proxy and sample httpbin locally'
 	@printf '%s\n' '  docker-push   Build, verify, and publish AMD64 + ARM64 for IMAGE'
 	@printf '%s\n' '  docker-run    Run the image locally with ENV_FILE on Docker bridge'
 	@printf '%s\n' '  compose-up    Start the VM profile sample stack'
@@ -22,13 +25,17 @@ help:
 	@printf '%s\n' '  compose-down  Stop the VM profile sample stack'
 
 test:
-	docker run --rm -v "$$(pwd)/$(BACKEND_DIR):/src" -w /src golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c go test ./...
+	docker run --rm -v "$$(pwd)/$(BACKEND_DIR):/src" -w /src golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb go test ./...
 
 test-e2e:
 	ENV_FILE=$(ENV_FILE) ./scripts/e2e-caddy-routing.sh
 
 docker-build:
 	docker build -f backend/Dockerfile -t $(IMAGE) .
+
+docker-build-companions:
+	docker build -f deploy/vm/Dockerfile.socket-proxy -t $(SOCKET_PROXY_IMAGE) .
+	docker build -f deploy/vm/Dockerfile.httpbin -t $(HTTPBIN_IMAGE) .
 
 docker-push:
 	sh scripts/publish-multiarch.sh "$(IMAGE)"

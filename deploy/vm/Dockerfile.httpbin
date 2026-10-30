@@ -1,0 +1,15 @@
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
+WORKDIR /src
+RUN go mod init gateway-httpbin-build \
+    && go get github.com/mccutchen/go-httpbin/v2@v2.26.0
+ARG TARGETOS
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -o /out/go-httpbin github.com/mccutchen/go-httpbin/v2/cmd/go-httpbin
+
+FROM alpine:3.24.3@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
+RUN apk add --no-cache ca-certificates
+COPY --from=builder /out/go-httpbin /bin/go-httpbin
+USER 65532:65532
+EXPOSE 8080
+CMD ["/bin/go-httpbin"]

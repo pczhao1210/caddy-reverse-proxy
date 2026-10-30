@@ -7,6 +7,8 @@ AI Docker Farm 边缘网关是一个面向 Docker 与 Azure 工作负载的自�
 已发布镜像：`docker.io/pczhao1210/caddy-reverse-proxy:latest`  
 当前 digest：`sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e03030aa94c52`
 
+[2026-10-30 依赖与配置修复](docs/operations.zh-CN.md#依赖升级与配置修复2026-10-30) 目前仅为源码/本地构建变更，并非新的 `latest` 发布，包含[可审计的本地 JOSE v4 补丁与证据绑定扫描](docs/operations.zh-CN.md#本地-jose-迁移与证据绑定扫描)，发布现在要求安装 Trivy。socket-proxy Compose 部署需要按该说明预先准备受控配套镜像。
+
 ## MVP 范围
 
 - 单一网关容器镜像。

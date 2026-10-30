@@ -67,7 +67,10 @@ services:
       - gateway
 
   httpbin:
-    image: mccutchen/go-httpbin:2.25.0@sha256:20739736d4eb8dc1b998dff701f437b8bd62dcc46492bd0d861e89890ca36500
+    build:
+      context: ../..
+      dockerfile: deploy/vm/Dockerfile.httpbin
+    image: ${HTTPBIN_IMAGE:-caddy-reverse-proxy-httpbin:2.26.0-go1.27.3}
     labels:
       caddy.enable: "true"
       caddy.host: "httpbin.localhost"

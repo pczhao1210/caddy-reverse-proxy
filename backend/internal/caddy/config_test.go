@@ -22,6 +22,7 @@ import (
 	"github.com/aidockerfarm/gateway/internal/auth"
 	certificates "github.com/aidockerfarm/gateway/internal/certificate"
 	"github.com/aidockerfarm/gateway/internal/model"
+	"github.com/quic-go/quic-go/http3"
 )
 
 func TestRenderSeparatesHTTPAndHTTPSListeners(t *testing.T) {
@@ -175,6 +176,52 @@ func TestRuntimeMixedListeners(t *testing.T) {
 			t.Errorf("%s%s (%s): got %d, want %d", test.host, test.path, test.header, response.StatusCode, test.status)
 		}
 	}
+	t.Run("HTTP3", func(t *testing.T) {
+		transport := &http3.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+		defer transport.Close()
+		client := &http.Client{Timeout: 3 * time.Second, Transport: transport}
+		for _, test := range []struct {
+			host  string
+			token string
+			code  int
+		}{
+			{host: "app.example.test", code: http.StatusOK},
+			{host: "protected.example.test", code: http.StatusUnauthorized},
+			{host: "protected.example.test", token: authConfig.AdminToken, code: http.StatusOK},
+		} {
+			request, err := http.NewRequest(http.MethodGet, "https://"+httpsAddress+"/", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			request.Host = test.host
+			if test.token != "" {
+				request.Header.Set("Authorization", "Bearer "+test.token)
+			}
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, err := io.ReadAll(response.Body)
+			response.Body.Close()
+			if err != nil || response.ProtoMajor != 3 || response.StatusCode != test.code {
+				t.Fatalf("HTTP/3 %s: protocol=%s status=%d body=%q err=%v", test.host, response.Proto, response.StatusCode, body, err)
+			}
+			if test.code == http.StatusOK && string(body) != "upstream-ok" {
+				t.Fatalf("HTTP/3 %s: unexpected upstream body %q", test.host, body)
+			}
+		}
+	})
+	t.Run("metrics", func(t *testing.T) {
+		response, err := client.Get("http://" + adminAddress + "/metrics")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, err := io.ReadAll(response.Body)
+		if err != nil || response.StatusCode != http.StatusOK || !strings.Contains(string(body), "go_goroutines") {
+			t.Fatalf("metrics: status=%d body=%q err=%v", response.StatusCode, body, err)
+		}
+	})
 }
 
 func TestRuntimeHTTPSUpstreamHeaders(t *testing.T) {
@@ -251,12 +298,112 @@ func TestRuntimeCertMagicVersion(t *testing.T) {
 		if dependency.Replace != nil {
 			dependency = dependency.Replace
 		}
-		if dependency.Version != "v0.25.4" {
-			t.Fatalf("Caddy CertMagic=%s; archive storage locks require the tested v0.25.4 baseline", dependency.Version)
+		if dependency.Version != "v0.25.6" {
+			t.Fatalf("Caddy CertMagic=%s; archive storage locks require the tested v0.25.6 baseline", dependency.Version)
 		}
 		return
 	}
 	t.Fatal("Caddy CertMagic build metadata is missing")
+}
+
+func TestRuntimeJOSEMigration(t *testing.T) {
+	binary := os.Getenv("CADDY_TEST_BIN")
+	if binary == "" {
+		t.Skip("set CADDY_TEST_BIN to verify the patched JOSE dependency")
+	}
+	info, err := buildinfo.ReadFile(binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, dependency := range info.Deps {
+		if dependency.Path == "github.com/go-jose/go-jose/v3" {
+			t.Fatal("Caddy still links the vulnerable JOSE v3 module")
+		}
+		if dependency.Path == "github.com/go-jose/go-jose/v4" {
+			if dependency.Replace != nil {
+				dependency = dependency.Replace
+			}
+			if dependency.Version != "v4.1.6" {
+				t.Fatalf("Caddy JOSE=%s, want v4.1.6", dependency.Version)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Caddy JOSE v4 build metadata is missing")
+	}
+	modules, err := exec.Command(binary, "list-modules").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, module := range []string{"pki", "http.handlers.acme_server", "tls.issuance.internal", "dns.providers.azure"} {
+		if !strings.Contains("\n"+string(modules), "\n"+module+"\n") {
+			t.Fatalf("Caddy module %s was removed", module)
+		}
+	}
+}
+
+func TestRuntimeInternalCA(t *testing.T) {
+	binary := os.Getenv("CADDY_TEST_BIN")
+	if binary == "" {
+		t.Skip("set CADDY_TEST_BIN to verify Smallstep certificate issuance")
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, "internal-ca-ok")
+	}))
+	defer upstream.Close()
+	httpAddress, _ := testListenerAddress(t)
+	httpsAddress, httpsPort := testListenerAddress(t)
+	adminAddress, _ := testListenerAddress(t)
+	data, err := NewRenderer(model.AppConfig{Gateway: model.GatewayConfig{
+		HTTPListen: httpAddress, HTTPSListen: httpsAddress, CaddyAdminEndpoint: "http://" + adminAddress, CaddyDataDir: t.TempDir(),
+	}}).Render([]model.RouteConfig{{
+		ID: "internal-ca", Host: "issuer.example.test", Enabled: true, HTTPS: true, ListenerPort: httpsPort, ListenerProtocol: "https",
+		Upstreams: []model.UpstreamTarget{{URL: upstream.URL}},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config map[string]any
+	if err := json.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	apps := config["apps"].(map[string]any)
+	apps["pki"] = map[string]any{"certificate_authorities": map[string]any{"local": map[string]any{"install_trust": false}}}
+	apps["tls"] = map[string]any{"automation": map[string]any{"policies": []any{map[string]any{
+		"subjects": []string{"issuer.example.test"}, "issuers": []any{map[string]any{"module": "internal"}},
+	}}}}
+	data, err = json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	startTestCaddy(t, binary, data, adminAddress)
+	client := &http.Client{Timeout: time.Second, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, ServerName: "issuer.example.test"},
+	}}
+	defer client.CloseIdleConnections()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		request, err := http.NewRequest(http.MethodGet, "https://"+httpsAddress, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Host = "issuer.example.test"
+		response, err := client.Do(request)
+		if err == nil {
+			body, readErr := io.ReadAll(response.Body)
+			response.Body.Close()
+			if readErr != nil || response.StatusCode != http.StatusOK || string(body) != "internal-ca-ok" || response.TLS == nil || len(response.TLS.PeerCertificates) == 0 {
+				t.Fatalf("internal CA response: status=%d body=%q err=%v", response.StatusCode, body, readErr)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("internal CA did not issue a serving certificate: %v", err)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
 }
 
 func testListenerAddress(t *testing.T) (string, int) {

@@ -13,6 +13,7 @@ function createApp() {
     Alpine: { data: (_, callback) => { factory = callback; } },
     localStorage: {
       getItem: (key) => storage.get(key),
+      setItem: (key, value) => storage.set(key, value),
       removeItem: (key) => storage.delete(key)
     }
   });
@@ -22,6 +23,25 @@ function createApp() {
   app.openLogin = () => { app.loginOpened = true; };
   app.translateBackendText = (text) => text;
   return { app, storage };
+}
+
+for (const committed of [false, true]) {
+  test(`token rotation updates browser credentials only after commit: ${committed}`, async () => {
+    const { app, storage } = createApp();
+    app.systemForm.adminToken = 'replacement-token';
+    app.setSettingsForms = () => {};
+    app.refreshAll = async () => {};
+    app.showNotice = () => { throw new Error('unexpected success notice'); };
+    app.api = async () => {
+      if (!committed) throw Object.assign(new Error('reload failed'), { status: 503 });
+      return { settings: {}, reconcile: { caddyLoaded: true, error: 'Azure reconciliation failed' } };
+    };
+    await app.saveSystemSettings();
+    assert.equal(app.token, committed ? 'replacement-token' : 'valid-token');
+    assert.equal(storage.get('gatewayToken'), app.token);
+    assert.match(app.alert, committed ? /Azure reconciliation failed/ : /reload failed/);
+    assert.equal(Boolean(app.loginOpened), false);
+  });
 }
 
 for (const method of ['runAction', 'refreshAll']) {

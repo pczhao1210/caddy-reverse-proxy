@@ -1,0 +1,25 @@
+These Apache-2.0 patch diffs are derived from:
+
+Smallstep Crypto v0.91.1
+https://github.com/smallstep/crypto/tree/v0.91.1
+Go module checksum: h1:ZMMdj/A2rQ+Zr8hyCo4BHJd++c5T8VQIXJ8Sljg57p0=
+Migration starting point: smallstep/crypto pull request 1157
+https://github.com/smallstep/crypto/pull/1157
+Reviewed head: 00c45432f48558f92a6e7da6d885d94e90db4d7a
+
+Smallstep Certificates v0.30.2
+https://github.com/smallstep/certificates/tree/v0.30.2
+Go module checksum: h1:1G3xBi8sJ740iA1mMPW2Svv7EIZKJ4Zf/iQtA5QlN0Y=
+
+Local modifications select go-jose v4.1.6 instead of the PR's v4.1.4.
+They retain the old all-audience validation and JWT builder interfaces,
+adapt non-embedding XEdDSA signing through the supported opaque API, and
+update the associated tests. No go-jose validation is disabled. Invalid
+Ed25519 public/private pairs and undersized HMAC keys remain rejected.
+Encryption tests use round trips rather than the removed RandReader API.
+ACME EAB tests use valid-length synthetic HMAC keys without relaxing the
+production key-size requirement.
+
+The patches include local modifications and are not an upstream release.
+The accompanying LICENSE applies to these derived patches and additions.
+See docs/operations.md for validation, scanning scope and removal criteria.

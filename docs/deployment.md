@@ -13,6 +13,8 @@ No Azure Load Balancer or NAT Gateway is required. The VM public IP handles inbo
 
 ## Common preparation
 
+The [2026-10-30 source upgrade](operations.md#dependency-upgrade-and-configuration-fixes-2026-10-30) has not been published to `latest`. For the production socket-proxy Compose profile, build the patched companion on a development machine for the target architecture and preload it on the VM; see [controlled companion builds](operations.md#controlled-companion-builds). That profile will neither build nor pull the proxy automatically.
+
 The public image is ready to use:
 
 ```sh

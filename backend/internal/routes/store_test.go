@@ -1,8 +1,12 @@
 package routes
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -313,6 +317,116 @@ func TestReplaceRejectsDuplicateHostAndPath(t *testing.T) {
 	second.PathPrefix = first.PathPrefix
 	if _, err := store.Replace(second); err == nil {
 		t.Fatal("Replace() error = nil, want duplicate host and path error")
+	}
+}
+
+func rootPathTestResources(prefix string) ResourceSet {
+	return ResourceSet{
+		Version:      ResourceSetVersion,
+		Listeners:    []model.Listener{{ID: "listener", Name: "Root", Hostname: "root.example.test", Port: 80, Protocol: "http"}},
+		BackendPools: []model.BackendPool{{ID: "pool", Name: "Root", Targets: []model.BackendTarget{{Address: "127.0.0.1"}}}},
+		RoutingRules: []model.RoutingRule{{ID: "root", Name: "Root", ListenerID: "listener", BackendPoolID: "pool", BackendPort: 8080, BackendProtocol: "http", PathPrefix: prefix, Enabled: true}},
+	}
+}
+
+func TestEquivalentRootPathsCannotCreateOverlappingRules(t *testing.T) {
+	for _, prefix := range []string{"", "/", " / "} {
+		for _, operation := range []string{"add", "replace", "stage", "replace-resources", "legacy-add", "legacy-replace"} {
+			t.Run(prefix+"/"+operation, func(t *testing.T) {
+				store := NewStore("")
+				if err := store.ReplaceResources(rootPathTestResources(prefix)); err != nil {
+					t.Fatal(err)
+				}
+				if store.List()[0].PathPrefix != "" || store.RoutingRules()[0].PathPrefix != "" {
+					t.Fatal("root path was not normalized")
+				}
+				rule := store.RoutingRules()[0]
+				rule.ID, rule.Name, rule.PathPrefix = "second", "Second", "/"
+				if operation == "replace" || operation == "legacy-replace" {
+					rule.PathPrefix = "/other"
+					if _, err := store.AddRoutingRule(rule); err != nil {
+						t.Fatal(err)
+					}
+					rule.PathPrefix = "/"
+				}
+				before := store.DesiredSnapshot()
+				var err error
+				switch operation {
+				case "add":
+					_, err = store.AddRoutingRule(rule)
+				case "replace":
+					_, err = store.ReplaceRoutingRule(rule)
+				case "stage", "replace-resources":
+					resources := store.Resources()
+					resources.RoutingRules = append(resources.RoutingRules, rule)
+					if operation == "stage" {
+						err = store.StageResources(resources)
+					} else {
+						err = store.ReplaceResources(resources)
+					}
+				case "legacy-add":
+					_, err = store.Add(model.RouteConfig{Host: "root.example.test", PathPrefix: "/", Upstreams: []model.UpstreamTarget{{URL: "http://127.0.0.1:8080"}}})
+				case "legacy-replace":
+					route := store.List()[1]
+					route.PathPrefix = "/"
+					_, err = store.Replace(route)
+				}
+				if err == nil || !strings.Contains(err.Error(), "already exists") {
+					t.Fatalf("error=%v, want duplicate root path rejection", err)
+				}
+				if !reflect.DeepEqual(before, store.DesiredSnapshot()) {
+					t.Fatal("rejected root path mutation changed desired state")
+				}
+			})
+		}
+	}
+}
+
+func TestLoadNormalizesRootPathsWithoutDiscardingAmbiguousFiles(t *testing.T) {
+	for _, version := range []int{1, 2, 3} {
+		for _, duplicate := range []bool{false, true} {
+			t.Run(fmt.Sprintf("v%d/duplicate=%v", version, duplicate), func(t *testing.T) {
+				resources := rootPathTestResources("/")
+				payload := fileFormat{Version: version, Listeners: resources.Listeners, BackendPools: resources.BackendPools, RoutingRules: resources.RoutingRules}
+				if duplicate {
+					rule := resources.RoutingRules[0]
+					rule.ID, rule.PathPrefix = "duplicate", ""
+					payload.RoutingRules = append(payload.RoutingRules, rule)
+				}
+				if version == 1 {
+					payload.Listeners, payload.BackendPools, payload.RoutingRules = nil, nil, nil
+					payload.Routes = []model.RouteConfig{{ID: "root", Host: "root.example.test", PathPrefix: "/", Upstreams: []model.UpstreamTarget{{URL: "http://127.0.0.1:8080"}}}}
+					if duplicate {
+						route := payload.Routes[0]
+						route.ID, route.PathPrefix = "duplicate", ""
+						payload.Routes = append(payload.Routes, route)
+					}
+				} else if version == 3 {
+					payload.Revision, payload.AppliedRevision, payload.Applied = 1, 1, &resources
+				}
+				data, err := json.Marshal(payload)
+				if err != nil {
+					t.Fatal(err)
+				}
+				path := filepath.Join(t.TempDir(), "routes.json")
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				store := NewStore(path)
+				err = store.Load()
+				if duplicate {
+					if err == nil || !strings.Contains(err.Error(), "already exists") {
+						t.Fatalf("error=%v, want ambiguous root path rejection", err)
+					}
+					after, readErr := os.ReadFile(path)
+					if readErr != nil || !bytes.Equal(data, after) || len(store.List()) != 0 {
+						t.Fatal("rejected legacy file was modified or partially loaded")
+					}
+				} else if err != nil || store.List()[0].PathPrefix != "" || store.AppliedSnapshot().Routes[0].PathPrefix != "" {
+					t.Fatalf("single legacy root path was not preserved and normalized: %v", err)
+				}
+			})
+		}
 	}
 }
 

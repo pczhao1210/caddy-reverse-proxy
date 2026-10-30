@@ -36,6 +36,27 @@ This document tracks what is currently implemented and what still needs to be co
 
 ## Further Hardening
 
+### JOSE v4 Remediation And Scoped VEX (2026-10-30)
+
+- Post-review policy isolation: all three Trivy scans ignore ambient filtering/config/ignore rules while retaining transport/cache settings; only the verified VEX may filter findings. Passed 41 scan/publish regressions, including an unfixed unrelated vulnerability under hostile filters, and real same-image control/hostile-environment comparisons. This shell-only follow-up did not rebuild images or close the ARM64 runtime gate.
+- Added checksum-pinned Smallstep source patches using go-jose v4.1.6, preserving all-audience validation, legacy JWT builder interfaces and XEdDSA key IDs. Invalid Ed25519 key pairs/short HMAC keys remain rejected. The default Caddy PKI/local ACME/Azure modules were not removed.
+- Builds verify exact source/binary module graphs and emit target-specific hashes, source/patch provenance and OpenPGP-only VEX. The scan wrapper locks the image ID, verifies both executables, refuses extra Go binaries, and separately scans the patched upstream base versions to avoid local-replacement version blind spots. Both multi-architecture candidates must pass before target promotion; Trivy is now required.
+- Verification passed: dependency race suites, full real-Caddy Go race/vet including isolated internal-CA issuance, 37 Node regressions, Compose/shell checks and final-image desktop/390px browser workflows. AMD64 raw findings are now two OpenPGP module records; scoped applicable findings and patched-base SBOM findings are zero in this snapshot.
+- ARM64 binaries and their independent source-graph evidence cross-build successfully; full ARM64 runtime/image and real cloud/ACME gates remain open. No image was published or deployed. These local patches require maintenance until compatible, fixed upstream releases can replace them; details and removal criteria are in [operations](operations.md#local-jose-migration-and-evidence-bound-scanning).
+
+### Dependency And Configuration Repairs (2026-10-30)
+
+This records the earlier same-day baseline; the JOSE remediation above supersedes its residual-risk status.
+
+- Latest-stable follow-up implemented in order: Go 1.27.3/Alpine 3.24.3 and HAProxy 3.4.7, Caddy's CEL 0.33.1/QUIC 0.64.1/OpenTelemetry 1.47.0/Prometheus family and other transitive updates, then Azure Network SDK v12.1.0. Reviewed and pinned the commit-based updates; runtime dependency metadata is checked rather than inferring versions from requested replacements.
+- Added real HTTP/3 routing/authentication and metrics regressions, plus Azure SDK request-version/path/body, missing-resource and read-error checks. Production topology and ownership semantics are unchanged; real cloud API availability remains an unverified gate.
+- Upgraded the control-plane and custom Caddy dependency graphs, shared Go build toolchain, runtime base and vendored Alpine.js. Added controlled socket-proxy/httpbin rebuilds; production requires a preloaded socket-proxy image rather than building or pulling implicitly. Exact versions and preparation steps are in [operations](operations.md#dependency-upgrade-and-configuration-fixes-2026-10-30).
+- Fixed immediate security/token/certificate updates to persist only after Caddy accepts the candidate, preserve pending routes, and restore the previous runtime after load/persistence failure. Regression coverage includes cancellation, lost acknowledgments, rollback failures and cloud errors after commit; this does not guarantee crash atomicity.
+- Canonicalized empty and `/` root paths across CRUD, bundle import and v1/v2/v3 persistence loading. Ambiguous legacy files are rejected without modifying them, rather than silently shadowing a route.
+- Verification passed: full Go race/vet with real upgraded Caddy, 24 Node tests, Compose validation, native AMD64 gateway/companion builds, mock-socket and non-root httpbin smoke tests, and desktop/390px browser workflows. ARM64 control-plane/Caddy/httpbin cross-compilation and ELF checks passed. ARM64 runtime/full-image verification remains blocked by the host's `exec format error`; earlier ARM64 results below are historical, not validation of this upgrade.
+- Local AMD64 gateway findings decreased from 62 to 5 package records; both rebuilt companions have zero findings in the same scanner database. Unpatched go-jose v3 and OpenPGP advisories remain a security release gate. No image was published or deployed, and no real cloud/ACME, production certificate or destructive E2E operations were performed.
+- Next gate: resolve or explicitly assess the remaining advisories and validate complete ARM64 images in an approved native/emulated environment before considering a release.
+
 ### Multi-Architecture Release (2026-09-22)
 
 - Implemented and published one `latest` index for `linux/amd64` and `linux/arm64`. Native cross-compilation, immutable candidate validation, shipping-image smoke checks, target-change detection and post-promotion digest verification are shared by `start.sh push` and `make docker-push`; local `build` remains single-platform.

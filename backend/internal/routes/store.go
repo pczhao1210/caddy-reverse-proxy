@@ -391,7 +391,7 @@ func validateRouteHost(host string) error {
 
 func normalize(route *model.RouteConfig) {
 	route.Host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(route.Host)), ".")
-	route.PathPrefix = strings.TrimSpace(route.PathPrefix)
+	route.PathPrefix = normalizePathPrefix(route.PathPrefix)
 	for index := range route.Upstreams {
 		route.Upstreams[index].URL = strings.TrimSpace(route.Upstreams[index].URL)
 	}
@@ -399,9 +399,6 @@ func normalize(route *model.RouteConfig) {
 	route.Security.AdditionalDeniedPathPrefixes = normalizePathPrefixes(route.Security.AdditionalDeniedPathPrefixes)
 	route.Security.AllowedCIDRs = normalizeStrings(route.Security.AllowedCIDRs)
 	route.Security.BlockedCIDRs = normalizeStrings(route.Security.BlockedCIDRs)
-	if route.PathPrefix != "/" {
-		route.PathPrefix = strings.TrimRight(route.PathPrefix, "/")
-	}
 	route.Exposure = strings.ToLower(strings.TrimSpace(route.Exposure))
 	if route.Source == "" {
 		route.Source = "explicit"

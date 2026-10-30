@@ -29,6 +29,7 @@ type Discoverer interface {
 type Reconciler interface {
 	Sync(context.Context) model.ReconcileResult
 	SyncWithoutPendingRoutingChanges(context.Context) model.ReconcileResult
+	SyncConfigWithCommit(context.Context, model.AppConfig, func() error) model.ReconcileResult
 	Last() model.ReconcileResult
 }
 
@@ -45,10 +46,6 @@ type routingChangeController interface {
 type RuntimeStatus interface {
 	Ready() bool
 	LastError() error
-}
-
-type certificateUpdater interface {
-	UpdateCertificate(model.CertificateConfig)
 }
 
 type runtimeConfigUpdater interface {
@@ -719,14 +716,13 @@ func (s *Server) handleCertificate(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "certificate persistence is unavailable")
 			return
 		}
-		if err := s.certificateStore.Save(cert); err != nil {
-			writeError(w, http.StatusInternalServerError, err.Error())
+		cfg.Gateway.Certificate = cert
+		result, ok := s.commitLiveConfig(w, r, cfg, func() error { return s.certificateStore.Save(cert) })
+		if !ok {
 			return
 		}
-		s.updateCertificate(cert)
 		s.audit("certificate.update", map[string]any{"issuer": cert.Issuer, "emailConfigured": cert.Email != "", "staging": cert.Staging, "customCA": cert.CADirectory != "", "subjects": len(cert.Subjects), "dnsProvider": cert.DNSChallenge.Provider})
-		reconcile := s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
-		writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(r.Context(), cert), "reconcile": reconcile})
+		writeJSON(w, http.StatusOK, map[string]any{"certificate": s.certificateResponse(r.Context(), cert), "reconcile": result})
 	default:
 		methodNotAllowed(w)
 	}
@@ -806,15 +802,6 @@ func (s *Server) audit(event string, fields map[string]any) {
 	}
 	if err := s.auditLog.Record(context.Background(), event, fields); err != nil && s.logger != nil {
 		s.logger.Warn("write audit event failed", "error", err)
-	}
-}
-
-func (s *Server) updateCertificate(cert model.CertificateConfig) {
-	s.mu.Lock()
-	s.cfg.Gateway.Certificate = cert
-	s.mu.Unlock()
-	if updater, ok := s.reconciler.(certificateUpdater); ok {
-		updater.UpdateCertificate(cert)
 	}
 }
 

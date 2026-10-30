@@ -7,6 +7,8 @@ AI Docker Farm Edge Gateway is a self-hosted ingress platform for Docker and Azu
 Published image: `docker.io/pczhao1210/caddy-reverse-proxy:latest`  
 Current digest: `sha256:0e75a5bbeccb3b9354516e757bb805803a501cf6cca03988028e03030aa94c52`
 
+The [2026-10-30 dependency and configuration fixes](docs/operations.md#dependency-upgrade-and-configuration-fixes-2026-10-30) are currently source/local-build changes, not a new publication of `latest`. They include [audited local JOSE v4 patches and evidence-bound scanning](docs/operations.md#local-jose-migration-and-evidence-bound-scanning); publishing now requires Trivy. The socket-proxy Compose profiles require the controlled companion build described there.
+
 ## MVP scope
 
 - Single gateway container image.

@@ -5,19 +5,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	gatewayazure "github.com/aidockerfarm/gateway/internal/azure"
+	"github.com/aidockerfarm/gateway/internal/caddy"
 	"github.com/aidockerfarm/gateway/internal/certificate"
 	appconfig "github.com/aidockerfarm/gateway/internal/config"
 	"github.com/aidockerfarm/gateway/internal/logs"
 	"github.com/aidockerfarm/gateway/internal/model"
+	"github.com/aidockerfarm/gateway/internal/reconcile"
 	"github.com/aidockerfarm/gateway/internal/routes"
 )
 
@@ -172,6 +177,16 @@ func (r *testCertificateReconciler) Sync(context.Context) model.ReconcileResult 
 
 func (r *testCertificateReconciler) SyncWithoutPendingRoutingChanges(context.Context) model.ReconcileResult {
 	r.preservedSyncCalls++
+	return model.ReconcileResult{CaddyLoaded: true}
+}
+
+func (r *testCertificateReconciler) SyncConfigWithCommit(_ context.Context, cfg model.AppConfig, commit func() error) model.ReconcileResult {
+	r.preservedSyncCalls++
+	if err := commit(); err != nil {
+		return model.ReconcileResult{Error: err.Error()}
+	}
+	r.config = cfg
+	r.certificate = cfg.Gateway.Certificate
 	return model.ReconcileResult{CaddyLoaded: true}
 }
 
@@ -663,6 +678,209 @@ func authenticatedRequest(method, path, body, token string) *http.Request {
 	request := httptest.NewRequest(method, path, strings.NewReader(body))
 	request.Header.Set("Authorization", "Bearer "+token)
 	return request
+}
+
+type transactionLoader struct {
+	active []byte
+	fault  string
+	cancel context.CancelFunc
+}
+
+func (l *transactionLoader) Config(ctx context.Context) ([]byte, error) {
+	return bytes.Clone(l.active), ctx.Err()
+}
+
+func (l *transactionLoader) Load(ctx context.Context, data []byte) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	fault := l.fault
+	l.fault = ""
+	if fault == "load" {
+		return errors.New("injected reload failure")
+	}
+	l.active = bytes.Clone(data)
+	if fault == "acknowledgment" {
+		return errors.New("injected lost reload acknowledgment")
+	}
+	if fault == "cancel" {
+		l.cancel()
+		return ctx.Err()
+	}
+	return nil
+}
+
+type transactionSettingsStore struct {
+	*appconfig.SettingsStore
+	fail bool
+}
+
+func (s *transactionSettingsStore) Save(value appconfig.Settings) error {
+	if s.fail {
+		return errors.New("injected settings persistence failure")
+	}
+	return s.SettingsStore.Save(value)
+}
+
+type transactionCertificateStore struct {
+	*appconfig.CertificateStore
+	fail bool
+}
+
+func (s *transactionCertificateStore) Save(value model.CertificateConfig) error {
+	if s.fail {
+		return errors.New("injected certificate persistence failure")
+	}
+	return s.CertificateStore.Save(value)
+}
+
+type transactionAzureManager struct{ err string }
+
+func (m *transactionAzureManager) Reconcile(context.Context, []model.RouteConfig) model.AzureResult {
+	return model.AzureResult{Error: m.err}
+}
+
+func TestLiveSettingsCommitPreservesRuntimePersistenceAndDrafts(t *testing.T) {
+	for _, kind := range []string{"security", "token", "certificate"} {
+		for _, fault := range []string{"", "load", "acknowledgment", "cancel", "persist", "azure"} {
+			t.Run(kind+"/"+fault, func(t *testing.T) {
+				cfg := settingsTestConfig()
+				cfg.Gateway.HTTPListen = "127.0.0.1:19080"
+				cfg.Gateway.HTTPSListen = "127.0.0.1:19443"
+				cfg.Gateway.CaddyDataDir = t.TempDir()
+				directory := t.TempDir()
+				store := routes.NewStore(filepath.Join(directory, "routes.json"))
+				resources := configurationTestResources("active.example.test", "127.0.0.1")
+				resources.RoutingRules[0].Exposure = "protected"
+				if err := store.ReplaceResources(resources); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				loader := &transactionLoader{cancel: cancel}
+				azure := &transactionAzureManager{}
+				controller := reconcile.New(reconcile.Options{
+					Config: cfg, Store: store, Loader: loader, Renderer: caddy.NewRenderer(cfg),
+					AzureManager: azure, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+				})
+				if result := controller.Sync(ctx); !result.CaddyLoaded || result.Error != "" {
+					t.Fatalf("initial load failed: %s", result.Error)
+				}
+				originalRuntime := bytes.Clone(loader.active)
+				appliedRevision := store.AppliedSnapshot().Revision
+				if _, err := store.Add(model.RouteConfig{Host: "draft.example.test", Enabled: true, Upstreams: []model.UpstreamTarget{{URL: "http://127.0.0.1:8081"}}}); err != nil {
+					t.Fatal(err)
+				}
+				desiredRevision := store.DesiredSnapshot().Revision
+				settingsStore := &transactionSettingsStore{SettingsStore: appconfig.NewSettingsStore(filepath.Join(directory, "settings.json"))}
+				certificateStore := &transactionCertificateStore{CertificateStore: appconfig.NewCertificateStore(filepath.Join(directory, "certificate.json"))}
+				if err := settingsStore.Save(appconfig.SettingsFromConfig(cfg)); err != nil {
+					t.Fatal(err)
+				}
+				if err := certificateStore.Save(cfg.Gateway.Certificate); err != nil {
+					t.Fatal(err)
+				}
+				server := NewServer(Options{Config: cfg, Store: store, Reconciler: controller, SettingsStore: settingsStore, CertificateStore: certificateStore})
+				path, body := "/api/settings/security", `{"security":{"enabled":true,"maxRequestBodyBytes":2097152},"internalSourceRanges":["10.0.0.0/8"],"protectedRoutes":{"allowBearerToken":true,"allowAdminTokenHeader":true}}`
+				switch kind {
+				case "token":
+					path, body = "/api/settings/system", `{"deploymentMode":"azure-vm","adminToken":"replacement-token","azure":{"enabled":false,"manageDNS":false,"manageNSG":false}}`
+				case "certificate":
+					path, body = "/api/certificate", `{"issuer":"letsencrypt","email":"updated@example.test"}`
+				}
+				if fault == "persist" {
+					settingsStore.fail = kind != "certificate"
+					certificateStore.fail = kind == "certificate"
+				} else if fault == "azure" {
+					azure.err = "injected Azure reconciliation failure"
+				} else {
+					loader.fault = fault
+				}
+				response := httptest.NewRecorder()
+				server.Handler().ServeHTTP(response, authenticatedRequest(http.MethodPut, path, body, cfg.Auth.AdminToken).WithContext(ctx))
+				committed := fault == "" || fault == "azure"
+				wantStatus := http.StatusServiceUnavailable
+				if committed {
+					wantStatus = http.StatusOK
+				}
+				if response.Code != wantStatus {
+					t.Fatalf("status=%d, want %d: %s", response.Code, wantStatus, response.Body)
+				}
+				savedSettings, found, err := settingsStore.Load()
+				if err != nil || !found {
+					t.Fatalf("load settings: found=%v, error=%v", found, err)
+				}
+				savedCertificate, found, err := certificateStore.Load()
+				if err != nil || !found {
+					t.Fatalf("load certificate: found=%v, error=%v", found, err)
+				}
+				active := server.configSnapshot()
+				if !committed {
+					if !reflect.DeepEqual(active, cfg) || !reflect.DeepEqual(savedSettings, appconfig.SettingsFromConfig(cfg)) || !reflect.DeepEqual(savedCertificate, cfg.Gateway.Certificate) {
+						t.Fatal("failed transaction changed API state or persisted settings")
+					}
+					if !bytes.Equal(originalRuntime, loader.active) {
+						t.Fatal("failed transaction did not restore the exact previous Caddy configuration")
+					}
+				} else {
+					switch kind {
+					case "security":
+						if active.Security.MaxRequestBodyBytes != 2097152 || savedSettings.Security.MaxRequestBodyBytes != 2097152 || !bytes.Contains(loader.active, []byte("2097152")) {
+							t.Fatal("security update was not committed consistently")
+						}
+					case "token":
+						if active.Auth.AdminToken != "replacement-token" || savedSettings.Auth.AdminToken != "replacement-token" || !bytes.Contains(loader.active, []byte("replacement-token")) {
+							t.Fatal("token update was not committed consistently")
+						}
+						if active.DeploymentMode != cfg.DeploymentMode || savedSettings.DeploymentMode != model.ModeAzureVM {
+							t.Fatal("token rotation activated restart-only settings")
+						}
+					case "certificate":
+						if active.Gateway.Certificate.Email != "updated@example.test" || savedCertificate.Email != "updated@example.test" || !bytes.Contains(loader.active, []byte("updated@example.test")) {
+							t.Fatal("certificate update was not committed consistently")
+						}
+					}
+				}
+				oldTokenResponse := httptest.NewRecorder()
+				server.Handler().ServeHTTP(oldTokenResponse, authenticatedRequest(http.MethodGet, "/api/settings", "", cfg.Auth.AdminToken))
+				wantTokenStatus := http.StatusOK
+				if committed && kind == "token" {
+					wantTokenStatus = http.StatusUnauthorized
+				}
+				if oldTokenResponse.Code != wantTokenStatus {
+					t.Fatalf("old token status=%d, want %d", oldTokenResponse.Code, wantTokenStatus)
+				}
+				if !store.Pending() || store.AppliedSnapshot().Revision != appliedRevision || store.DesiredSnapshot().Revision != desiredRevision || bytes.Contains(loader.active, []byte("draft.example.test")) {
+					t.Fatal("live settings transaction applied or lost pending route edits")
+				}
+			})
+		}
+	}
+}
+
+func TestConfigurationImportRejectsEquivalentRootPaths(t *testing.T) {
+	cfg := settingsTestConfig()
+	store := routes.NewStore("")
+	resources := configurationTestResources("root.example.test", "127.0.0.1")
+	duplicate := resources.RoutingRules[0]
+	duplicate.ID = "duplicate"
+	duplicate.PathPrefix = "/"
+	resources.RoutingRules = append(resources.RoutingRules, duplicate)
+	data, err := appconfig.ExportConfigurationBundle(resources, appconfig.SettingsFromConfig(cfg), cfg.Gateway.Certificate, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := NewServer(Options{Config: cfg, Store: store, SettingsStore: &testSettingsStore{}, CertificateStore: &testCertificateStore{}})
+	request := httptest.NewRequest(http.MethodPost, "/api/settings/configuration", bytes.NewReader(data))
+	request.Header.Set("Authorization", "Bearer "+cfg.Auth.AdminToken)
+	response := httptest.NewRecorder()
+	server.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "already exists") {
+		t.Fatalf("status=%d, body=%s", response.Code, response.Body)
+	}
+	if server.configurationImportPending() || store.Pending() || len(store.List()) != 0 {
+		t.Fatal("rejected import changed desired state")
+	}
 }
 
 func TestContainerBindPolicySharedNetworkAllowsBind(t *testing.T) {

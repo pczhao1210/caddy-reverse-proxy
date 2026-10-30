@@ -31,7 +31,8 @@ services:
       - no-new-privileges:true
 
   docker-socket-proxy:
-    image: tecnativa/docker-socket-proxy:v0.5.0@sha256:1f5038b54f06c3e18422902cf00ba21803d1c97805aae032e5e6673d532d3459
+    image: ${SOCKET_PROXY_IMAGE:-caddy-reverse-proxy-socket-proxy:0.5.0-haproxy3.4.7}
+    pull_policy: never
     restart: unless-stopped
     environment:
       CONTAINERS: 1

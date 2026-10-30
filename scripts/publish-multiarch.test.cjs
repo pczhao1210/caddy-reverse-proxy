@@ -9,6 +9,8 @@ const root = resolve(__dirname, '..');
 const index = 'sha256:' + '1'.repeat(64);
 const dockerStub = `#!/usr/bin/env node
 const fs = require('node:fs');
+const crypto = require('node:crypto');
+const path = require('node:path');
 const args = process.argv.slice(2);
 const scenario = process.env.SCENARIO;
 const work = process.env.FIXTURE_DIR;
@@ -41,14 +43,38 @@ if (args[0] === 'buildx' && args[1] === 'build') {
 } else if (args[0] === 'buildx' && args[1] === 'imagetools' && args[2] === 'create') {
   fs.writeFileSync(work+'/promoted','yes');
 } else if (args[0] === 'image' && args[1] === 'inspect') {
-  emit({Os:'linux',Architecture:args[2].includes(digest('3')) ? 'arm64' : 'amd64'});
+  const arm = args[2].includes(digest('3')) || args[2] === digest('7');
+  if (args.includes('{{.Id}}')) console.log(digest(arm ? '7' : '6'));
+  else if (args.includes('{{.Architecture}}')) console.log(arm ? 'arm64' : 'amd64');
+  else emit({Os:'linux',Architecture:arm ? 'arm64' : 'amd64'});
+} else if (args[0] === 'create') {
+  console.log(args.at(-1) === digest('7') ? 'fixture-scan-arm64' : 'fixture-scan-amd64');
+} else if (args[0] === 'cp') {
+  const hash = data => crypto.createHash('sha256').update(data).digest('hex');
+  if (args[1].endsWith('/security/.')) {
+    const architecture = args[1].includes('arm64') ? 'arm64' : 'amd64';
+    const sources = [{Path:'go.step.sm/crypto',Version:'v0.91.1'},{Path:'github.com/smallstep/certificates',Version:'v0.30.2'}];
+    const proof = JSON.stringify({version:1,sources,artifacts:['caddy','platform'].map(name => ({
+      path:name === 'caddy' ? '/usr/bin/caddy' : '/usr/local/bin/platform',
+      sha256:hash(name + '-fixture'),goos:'linux',goarch:architecture,cryptoVersion:'v0.58.0',packageCount:100,moduleCount:20
+    }))}) + '\\n';
+    fs.writeFileSync(path.join(args[2],'evidence.json'),proof);
+    fs.writeFileSync(path.join(args[2],'openpgp.vex.json'),JSON.stringify({
+      '@context':'https://openvex.dev/ns/v0.2.0','@id':'urn:sha256:' + hash(proof),
+      statements:[{vulnerability:{name:'GO-2026-5932'},status:'not_affected',justification:'vulnerable_code_not_present',
+        products:[{'@id':'pkg:golang/golang.org/x/crypto@v0.58.0'}]}]
+    }));
+  } else {
+    const name = path.basename(args[1]);
+    fs.writeFileSync(args[2],scenario === 'scan-evidence-tampered' && name === 'caddy' ? 'tampered' : name + '-fixture');
+  }
 } else if (args[0] === 'run') {
   const arm = args.includes('linux/arm64');
   if (scenario === 'arm64-run-failure' && arm) process.exit(1);
   console.log(arm ? 'fixture-arm64' : 'fixture-amd64');
 } else if (args[0] === 'exec') {
   if (scenario === 'wrong-elf' && args[1] === 'fixture-arm64' && args[2] === '/bin/sh') process.exit(1);
-  if (args[3] === 'version') console.log('v2.11.4 fixture');
+  if (args[3] === 'version') console.log(scenario === 'wrong-caddy-version' ? 'v2.11.4 fixture' : 'v2.11.7 fixture');
   if (args[3] === 'list-modules') console.log('dns.providers.azure');
 } else if (args[0] === 'container' && args[1] === 'inspect') {
   emit({'8080/tcp':[{HostIp:'127.0.0.1',HostPort:'28080'}]});
@@ -63,12 +89,28 @@ if (args.includes('--write-out')) process.stdout.write(process.env.SCENARIO === 
 const output = args[args.indexOf('--output')+1];
 if (output && output !== '/dev/null') fs.writeFileSync(output,'{}');
 `;
+const trivyStub = `#!/usr/bin/env node
+const fs = require('node:fs');
+const args = process.argv.slice(2);
+fs.appendFileSync(process.env.FIXTURE_DIR+'/commands',JSON.stringify(['trivy',...args])+'\\n');
+const report = {Results:[
+  {Type:'gobinary',Target:'usr/bin/caddy'},{Type:'gobinary',Target:'usr/local/bin/platform'}
+]};
+if (args[0] === 'sbom') {
+  const bom = JSON.parse(fs.readFileSync(args.at(-1),'utf8'));
+  report.Results = [{Type:'gobinary',Packages:bom.components.map(component => ({Name:component.name,Version:component.version}))}];
+}
+fs.writeFileSync(args[args.indexOf('--output')+1],JSON.stringify(report));
+if (process.env.SCENARIO === 'scan-vulnerability' && args.includes('--vex') &&
+    (process.env.TRIVY_IGNORE_UNFIXED !== 'true' || args.includes('--ignore-unfixed=false'))) process.exit(1);
+`;
 
 function run(scenario, command = ['sh', join(__dirname, 'publish-multiarch.sh'), 'example/gateway:latest'], overrides = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'gateway-publish-test-'));
   try {
     writeFileSync(join(directory, 'docker'), dockerStub, { mode: 0o755 });
     writeFileSync(join(directory, 'curl'), curlStub, { mode: 0o755 });
+    writeFileSync(join(directory, 'trivy'), trivyStub, { mode: 0o755 });
     const result = spawnSync(command[0], command.slice(1), {
       cwd: root,
       encoding: 'utf8',
@@ -84,6 +126,18 @@ function run(scenario, command = ['sh', join(__dirname, 'publish-multiarch.sh'),
 
 const promotions = result => result.commands.filter(command => command.slice(0, 4).join(' ') === 'docker buildx imagetools create');
 
+test('ambient ignore-unfixed cannot bypass the publishing vulnerability gate', () => {
+  const result = run('scan-vulnerability', undefined, { TRIVY_IGNORE_UNFIXED: 'true', TRIVY_SEVERITY: 'CRITICAL' });
+  assert.notEqual(result.status, 0);
+  assert.equal(promotions(result).length, 0);
+});
+
+test('an older Caddy runtime cannot be promoted', () => {
+  const result = run('wrong-caddy-version');
+  assert.notEqual(result.status, 0);
+  assert.equal(promotions(result).length, 0);
+});
+
 test('both architectures are verified before promoting the immutable candidate', () => {
   const result = run('success');
   assert.equal(result.status, 0, result.stderr);
@@ -95,16 +149,17 @@ test('both architectures are verified before promoting the immutable candidate',
   const containers = result.commands.filter(command => command[1] === 'run');
   assert.equal(containers.length, 2);
   assert(containers.every(command => !command.includes('-v') && command.includes('GATEWAY_DOCKER_ENABLED=false')));
-  assert.deepEqual(result.commands.filter(command => command[1] === 'rm').map(command => command.at(-1)), ['fixture-amd64', 'fixture-arm64']);
+  assert.deepEqual(result.commands.filter(command => command[1] === 'rm').map(command => command.at(-1)), ['fixture-scan-amd64', 'fixture-amd64', 'fixture-scan-arm64', 'fixture-arm64']);
+  assert.equal(result.commands.filter(command => command[0] === 'trivy').length, 6);
   assert(!result.commands.some(command => command[1] === 'push'));
 });
 
-for (const scenario of ['missing-builder', 'build-failure', 'missing-arm64', 'duplicate-platform', 'arm64-run-failure', 'wrong-elf', 'unready', 'auth-bypass', 'concurrent-publisher', 'registry-error']) {
+for (const scenario of ['missing-builder', 'build-failure', 'missing-arm64', 'duplicate-platform', 'arm64-run-failure', 'wrong-elf', 'unready', 'auth-bypass', 'concurrent-publisher', 'registry-error', 'scan-vulnerability', 'scan-evidence-tampered']) {
   test(`${scenario} cannot update the target tag`, () => {
     const result = run(scenario);
     assert.notEqual(result.status, 0);
     assert.equal(promotions(result).length, 0);
-    assert(result.commands.filter(command => command[1] === 'rm').every(command => /^fixture-(amd64|arm64)$/.test(command.at(-1))));
+    assert(result.commands.filter(command => command[1] === 'rm').every(command => /^fixture-(scan-)?(amd64|arm64)$/.test(command.at(-1))));
   });
 }
 

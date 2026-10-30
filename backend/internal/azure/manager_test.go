@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,7 +13,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dns/armdns"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork/v12"
 	"github.com/aidockerfarm/gateway/internal/model"
 )
 
@@ -158,15 +159,22 @@ func TestDNSCleanupOnlyDeletesOwnedRecordsConditionally(t *testing.T) {
 }
 
 func TestNSGOwnershipAndNoOpReconcile(t *testing.T) {
-	for _, mode := range []string{"unchanged", "changed", "foreign", "delete", "foreign-delete"} {
+	for _, mode := range []string{"unchanged", "changed", "missing", "foreign", "read-error", "delete", "missing-delete", "foreign-delete"} {
 		t.Run(mode, func(t *testing.T) {
 			manager := &Manager{instanceID: "owner", cfg: model.AppConfig{Azure: model.AzureConfig{ResourceGroup: "rg", NetworkSecurityGroupName: "edge"}}}
 			writes := 0
 			client, err := armnetwork.NewSecurityRulesClient("subscription", testTokenCredential{}, &arm.ClientOptions{ClientOptions: azcore.ClientOptions{Transport: testTransport(func(request *http.Request) (*http.Response, error) {
-				if !strings.HasSuffix(request.URL.Path, "/"+manager.nsgRuleName()) {
-					t.Fatalf("shared NSG rule targeted: %s", request.URL.Path)
+				wantPath := "/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Network/networkSecurityGroups/edge/securityRules/" + manager.nsgRuleName()
+				if request.URL.Path != wantPath || request.URL.Query().Get("api-version") != "2026-03-01" {
+					t.Fatalf("unexpected NSG SDK request: %s", request.URL)
 				}
 				if request.Method == http.MethodGet {
+					if mode == "missing" || mode == "missing-delete" {
+						return sdkResponse(request, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "ResourceNotFound"}}), nil
+					}
+					if mode == "read-error" {
+						return sdkResponse(request, http.StatusForbidden, map[string]any{"error": map[string]string{"code": "AuthorizationFailed"}}), nil
+					}
 					properties := nsgRuleProperties(manager.cfg.Azure, []int{80, 443})
 					properties.Description = to.Ptr(manager.nsgOwnerDescription())
 					if strings.HasPrefix(mode, "foreign") {
@@ -184,11 +192,16 @@ func TestNSGOwnershipAndNoOpReconcile(t *testing.T) {
 				if request.Method != http.MethodPut {
 					t.Fatalf("unexpected method %s", request.Method)
 				}
-				var payload map[string]any
+				var payload armnetwork.SecurityRule
 				if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
 					t.Fatal(err)
 				}
-				payload["properties"].(map[string]any)["provisioningState"] = "Succeeded"
+				want := nsgRuleProperties(manager.cfg.Azure, []int{80, 443})
+				want.Description = to.Ptr(manager.nsgOwnerDescription())
+				if !reflect.DeepEqual(payload.Properties, want) {
+					t.Fatalf("NSG payload changed: got %+v, want %+v", payload.Properties, want)
+				}
+				payload.Properties.ProvisioningState = to.Ptr(armnetwork.ProvisioningStateSucceeded)
 				return sdkResponse(request, 200, payload), nil
 			})}})
 			if err != nil {
@@ -200,11 +213,11 @@ func TestNSGOwnershipAndNoOpReconcile(t *testing.T) {
 				ports = nil
 			}
 			_, _, err = manager.reconcileNSG(context.Background(), ports)
-			if (err != nil) != strings.HasPrefix(mode, "foreign") {
+			if (err != nil) != (strings.HasPrefix(mode, "foreign") || mode == "read-error") {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			wantWrites := 0
-			if mode == "changed" || mode == "delete" {
+			if mode == "changed" || mode == "missing" || mode == "delete" {
 				wantWrites = 1
 			}
 			if writes != wantWrites {

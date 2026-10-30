@@ -18,7 +18,7 @@ esac
 repository=${target%:*}
 root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 builder=${MULTIARCH_BUILDER:-gateway-multiarch}
-for tool in docker jq curl; do
+for tool in docker jq curl trivy sha256sum; do
   command -v "$tool" >/dev/null 2>&1 || fail "Required publishing tool is missing: $tool"
 done
 docker info >/dev/null
@@ -91,6 +91,7 @@ for architecture in amd64 arm64; do
   docker pull --platform "$platform" "$reference" >/dev/null
   docker image inspect "$reference" --format '{{json .}}' >"$work/image.json"
   jq -e --arg architecture "$architecture" '.Architecture == $architecture and .Os == "linux"' "$work/image.json" >/dev/null || fail "Image config does not match $platform."
+  sh "$root/scripts/scan-image.sh" "$reference" "$work/security-$architecture" || fail "$platform evidence-bound vulnerability scan failed; target tag was not promoted."
   container=$(docker run -d --platform "$platform" --label io.caddy-reverse-proxy.test=multiarch \
     --security-opt no-new-privileges:true --tmpfs /data:rw,nosuid,nodev,size=64m \
     -p 127.0.0.1::8080 -e GATEWAY_DOCKER_ENABLED=false -e GATEWAY_AZURE_ENABLED=false \
@@ -105,7 +106,7 @@ for architecture in amd64 arm64; do
       test "$machine" = "$1"
     done
   ' check "$machine" || fail "Wrong ELF architecture in $platform image."
-  docker exec "$container" caddy version | grep -q '^v2[.]11[.]4 '
+  docker exec "$container" caddy version | grep -q '^v2[.]11[.]7 '
   docker exec "$container" caddy list-modules | grep -qx 'dns.providers.azure'
   port=$(docker container inspect "$container" --format '{{json .NetworkSettings.Ports}}' | jq -er '."8080/tcp"[] | select(.HostIp == "127.0.0.1") | .HostPort')
   base="http://127.0.0.1:$port"

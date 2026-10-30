@@ -857,13 +857,10 @@ func normalizeRoutingRule(rule *model.RoutingRule) {
 	rule.ListenerID = strings.TrimSpace(rule.ListenerID)
 	rule.BackendPoolID = strings.TrimSpace(rule.BackendPoolID)
 	rule.BackendProtocol = strings.ToLower(strings.TrimSpace(rule.BackendProtocol))
-	rule.PathPrefix = strings.TrimSpace(rule.PathPrefix)
+	rule.PathPrefix = normalizePathPrefix(rule.PathPrefix)
 	rule.HealthPath = strings.TrimSpace(rule.HealthPath)
 	rule.Exposure = strings.ToLower(strings.TrimSpace(rule.Exposure))
 	rule.Source = strings.ToLower(strings.TrimSpace(rule.Source))
-	if rule.PathPrefix != "/" {
-		rule.PathPrefix = strings.TrimRight(rule.PathPrefix, "/")
-	}
 	if rule.BackendProtocol == "" {
 		rule.BackendProtocol = "http"
 	}
@@ -874,6 +871,10 @@ func normalizeRoutingRule(rule *model.RoutingRule) {
 	rule.Security.AdditionalDeniedPathPrefixes = normalizePathPrefixes(rule.Security.AdditionalDeniedPathPrefixes)
 	rule.Security.AllowedCIDRs = normalizeStrings(rule.Security.AllowedCIDRs)
 	rule.Security.BlockedCIDRs = normalizeStrings(rule.Security.BlockedCIDRs)
+}
+
+func normalizePathPrefix(prefix string) string {
+	return strings.TrimRight(strings.TrimSpace(prefix), "/")
 }
 
 func sameListener(left, right model.Listener) bool {

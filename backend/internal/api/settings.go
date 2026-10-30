@@ -84,15 +84,14 @@ func (s *Server) handleSecuritySettings(w http.ResponseWriter, r *http.Request) 
 	desired.InternalSourceRanges = append([]string(nil), candidate.Gateway.InternalSourceRanges...)
 	desired.Auth.AllowBearerToken = candidate.Auth.ProtectedRoutes.AllowBearerToken
 	desired.Auth.AllowAdminTokenHeader = candidate.Auth.ProtectedRoutes.AllowAdminTokenHeader
-	if err := s.settingsStore.Save(desired); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	result, ok := s.commitLiveConfig(w, r, candidate, func() error { return s.settingsStore.Save(desired) })
+	if !ok {
 		return
 	}
-	s.applyLiveConfig(candidate)
 	s.audit("settings.security.update", map[string]any{"enabled": candidate.Security.Enabled})
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":  settingsResponse(candidate, desired, true),
-		"reconcile": s.reconciler.SyncWithoutPendingRoutingChanges(r.Context()),
+		"reconcile": result,
 	})
 }
 
@@ -134,16 +133,18 @@ func (s *Server) handleSystemSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	desired = appconfig.SettingsFromConfig(desiredCandidate)
-	if err := s.settingsStore.Save(desired); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	var reconcile any
 	if newToken != "" {
 		active.Auth.AdminToken = newToken
 		active.Auth.AdminTokens = nil
-		s.applyLiveConfig(active)
-		reconcile = s.reconciler.SyncWithoutPendingRoutingChanges(r.Context())
+		result, ok := s.commitLiveConfig(w, r, active, func() error { return s.settingsStore.Save(desired) })
+		if !ok {
+			return
+		}
+		reconcile = result
+	} else if err := s.settingsStore.Save(desired); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	s.audit("settings.system.update", map[string]any{"deploymentMode": desired.DeploymentMode, "azureEnabled": desired.Azure.Enabled, "tokenRotated": newToken != ""})
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -207,6 +208,26 @@ func (s *Server) applyLiveConfig(cfg model.AppConfig) {
 	if updater, ok := s.reconciler.(runtimeConfigUpdater); ok {
 		updater.UpdateConfig(cfg)
 	}
+}
+
+func (s *Server) commitLiveConfig(w http.ResponseWriter, r *http.Request, cfg model.AppConfig, persist func() error) (model.ReconcileResult, bool) {
+	if s.reconciler == nil {
+		writeError(w, http.StatusServiceUnavailable, "configuration reconciliation is unavailable")
+		return model.ReconcileResult{}, false
+	}
+	committed := false
+	result := s.reconciler.SyncConfigWithCommit(r.Context(), cfg, func() error {
+		if err := persist(); err != nil {
+			return err
+		}
+		s.applyLiveConfig(cfg)
+		committed = true
+		return nil
+	})
+	if !committed {
+		writeError(w, http.StatusServiceUnavailable, result.Error)
+	}
+	return result, committed
 }
 
 func settingsResponse(active model.AppConfig, desired appconfig.Settings, persistenceAvailable bool) map[string]any {

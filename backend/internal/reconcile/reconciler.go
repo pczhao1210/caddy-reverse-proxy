@@ -136,6 +136,10 @@ func (r *Reconciler) SyncWithCommit(ctx context.Context, cfg *model.AppConfig, c
 	return r.sync(ctx, false, cfg, commit)
 }
 
+func (r *Reconciler) SyncConfigWithCommit(ctx context.Context, cfg model.AppConfig, commit func() error) model.ReconcileResult {
+	return r.sync(ctx, true, &cfg, func(routes.Snapshot) error { return commit() })
+}
+
 func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool, candidate *model.AppConfig, commit func(routes.Snapshot) error) model.ReconcileResult {
 	r.syncMu.Lock()
 	locked := true
@@ -159,6 +163,18 @@ func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool, candi
 	previousConfig := r.configSnapshot()
 	previous := r.store.AppliedSnapshot()
 	previousDiscovered := append([]model.RouteConfig(nil), r.lastDiscovered...)
+	var previousRuntime []byte
+	if candidate != nil {
+		if reader, ok := r.loader.(interface {
+			Config(context.Context) ([]byte, error)
+		}); ok {
+			var err error
+			previousRuntime, err = reader.Config(ctx)
+			if err != nil {
+				return r.finish(model.ReconcileResult{StartedAt: started, Profile: string(previousConfig.Profile), Error: "read previous runtime configuration: " + err.Error()}, generation)
+			}
+		}
+	}
 	if candidate != nil {
 		r.UpdateConfig(*candidate)
 	}
@@ -169,6 +185,28 @@ func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool, candi
 	}
 	explicitRoutes := snapshot.Routes
 	result := model.ReconcileResult{StartedAt: started, Profile: string(cfg.Profile), ExplicitRoutes: len(explicitRoutes)}
+	restoreRuntime := func() {
+		if candidate != nil {
+			r.UpdateConfig(previousConfig)
+		}
+		rollbackRoutes := append(previous.Routes, previousDiscovered...)
+		rollback := previousRuntime
+		var rollbackErr error
+		if len(rollback) == 0 {
+			rollback, rollbackErr = r.renderer.Render(rollbackRoutes)
+		}
+		if rollbackErr == nil {
+			rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			rollbackErr = r.loader.Load(rollbackCtx, rollback)
+			cancel()
+		}
+		if rollbackErr != nil {
+			result.Error += fmt.Sprintf("; restore previous runtime configuration: %v", rollbackErr)
+		} else {
+			result.CaddyLoaded = false
+			result.AppliedRoutes = len(rollbackRoutes)
+		}
+	}
 
 	allRoutes := append([]model.RouteConfig{}, explicitRoutes...)
 	if r.discoverer != nil {
@@ -192,36 +230,21 @@ func (r *Reconciler) sync(ctx context.Context, preservePendingRoutes bool, candi
 		return r.finish(result, generation)
 	}
 	if err := r.loader.Load(ctx, rendered); err != nil {
-		if candidate != nil {
-			r.UpdateConfig(previousConfig)
-		}
 		result.Error = err.Error()
+		if candidate != nil {
+			restoreRuntime()
+		}
 		return r.finish(result, generation)
 	}
 	result.AppliedRoutes = len(allRoutes)
 	result.CaddyLoaded = true
-	if !preservePendingRoutes {
-		if commit == nil {
-			commit = r.store.MarkApplied
-		}
+	if commit == nil && !preservePendingRoutes {
+		commit = r.store.MarkApplied
+	}
+	if commit != nil {
 		if err := commit(snapshot); err != nil {
-			if candidate != nil {
-				r.UpdateConfig(previousConfig)
-			}
-			rollbackRoutes := append(previous.Routes, previousDiscovered...)
-			rollback, rollbackErr := r.renderer.Render(rollbackRoutes)
-			if rollbackErr == nil {
-				rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
-				rollbackErr = r.loader.Load(rollbackCtx, rollback)
-				cancel()
-			}
 			result.Error = fmt.Sprintf("persist applied configuration: %v", err)
-			if rollbackErr != nil {
-				result.Error += fmt.Sprintf("; restore previous runtime configuration: %v", rollbackErr)
-			} else {
-				result.CaddyLoaded = false
-				result.AppliedRoutes = len(rollbackRoutes)
-			}
+			restoreRuntime()
 			return r.finish(result, generation)
 		}
 	}

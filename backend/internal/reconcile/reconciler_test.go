@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -30,10 +31,13 @@ func (r *captureRenderer) Render(routes []model.RouteConfig) ([]byte, error) {
 
 type testLoader struct{}
 
-type runtimeConfigLoader struct{ testLoader }
+type runtimeConfigLoader struct {
+	testLoader
+	err error
+}
 
-func (runtimeConfigLoader) Config(context.Context) ([]byte, error) {
-	return []byte(`{"active":true}`), nil
+func (l runtimeConfigLoader) Config(context.Context) ([]byte, error) {
+	return []byte(`{"active":true}`), l.err
 }
 
 func TestRuntimeInspectionHoldsConfigurationLock(t *testing.T) {
@@ -123,6 +127,38 @@ func TestApplyPersistenceFailureRestoresRuntime(t *testing.T) {
 	result := controller.SyncWithCommit(context.Background(), nil, func(routes.Snapshot) error { return errors.New("disk unavailable") })
 	if result.Error == "" || result.CaddyLoaded || loads != 2 || len(renderer.routes) != 0 || !store.Pending() {
 		t.Fatalf("failed commit did not restore previous runtime: result=%+v loads=%d", result, loads)
+	}
+}
+
+func TestConfigCommitRejectsUnknownPreviousRuntime(t *testing.T) {
+	previous := model.AppConfig{Auth: model.AuthConfig{AdminToken: "old-token"}}
+	candidate := model.AppConfig{Auth: model.AuthConfig{AdminToken: "new-token"}}
+	controller := New(Options{
+		Config: previous, Store: routes.NewStore(""), Renderer: testRenderer{},
+		Loader: runtimeConfigLoader{err: errors.New("runtime unavailable")},
+	})
+	committed := false
+	result := controller.SyncConfigWithCommit(context.Background(), candidate, func() error { committed = true; return nil })
+	if committed || result.CaddyLoaded || !strings.Contains(result.Error, "read previous runtime configuration") || controller.configSnapshot().Auth.AdminToken != previous.Auth.AdminToken {
+		t.Fatalf("unknown runtime was not rejected safely: %+v", result)
+	}
+}
+
+func TestConfigCommitReportsRollbackFailure(t *testing.T) {
+	loads := 0
+	controller := New(Options{
+		Store: routes.NewStore(""), Renderer: testRenderer{},
+		Loader: callbackLoader(func() error {
+			loads++
+			if loads == 2 {
+				return errors.New("runtime restoration failed")
+			}
+			return nil
+		}),
+	})
+	result := controller.SyncConfigWithCommit(context.Background(), model.AppConfig{}, func() error { return errors.New("disk full") })
+	if loads != 2 || !result.CaddyLoaded || !strings.Contains(result.Error, "disk full") || !strings.Contains(result.Error, "runtime restoration failed") {
+		t.Fatalf("rollback failure was hidden: loads=%d, result=%+v", loads, result)
 	}
 }
 

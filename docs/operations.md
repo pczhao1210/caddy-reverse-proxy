@@ -112,6 +112,7 @@ Use explicit routes for host-local upstreams, for example `http://127.0.0.1:3000
 |---|---|
 | `make test` | Run Go tests in a Go toolchain container. |
 | `make docker-build` | Build `IMAGE`, default `pczhao1210/caddy-reverse-proxy:latest`. |
+| `make docker-build-companions` | Build the controlled socket-proxy and sample httpbin images locally; does not publish them. |
 | `make docker-push` | Build, verify, and publish AMD64 + ARM64 for `IMAGE`. |
 | `make docker-run` | Run the image locally with `ENV_FILE`, default `.env`, on Docker bridge. |
 | `make compose-up` | Start the VM sample stack. |
@@ -135,7 +136,7 @@ Override `IMAGE` when publishing another repository or immutable tag.
 
 `./start.sh push` and `make docker-push` share `scripts/publish-multiarch.sh`. They build both `linux/amd64` and `linux/arm64` from source, regardless of locally tagged images. `start.sh` always publishes `latest`; Make preserves an explicit `IMAGE=repository:tag`. `build` remains a local, single-platform command and is not a prerequisite for publishing. Do not subsequently run plain `docker push ...:latest` on a single-platform local image: that would replace the multi-platform index.
 
-The publishing machine needs Docker, Buildx, `jq`, and `curl` with `--retry-all-errors` support. Authenticate with `docker login` directly in your terminal. Both the builder and local Docker daemon must be able to execute the two target architectures for runtime checks. The following one-time setup is for a Linux AMD64 development host. The binfmt command is privileged and changes host-wide execution support; run it only with the host owner's approval, not on the gateway VM:
+The publishing machine needs Docker, Buildx, `jq`, `sha256sum`, Trivy (validated with 0.76.1), and `curl` with `--retry-all-errors` support. Authenticate with `docker login` directly in your terminal. Both the builder and local Docker daemon must be able to execute the two target architectures for runtime checks. The following one-time setup is for a Linux AMD64 development host. The binfmt command is privileged and changes host-wide execution support; run it only with the host owner's approval, not on the gateway VM:
 
 ```sh
 docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
@@ -147,7 +148,7 @@ docker buildx inspect gateway-multiarch --bootstrap
 
 Reuse an existing suitable builder via `MULTIARCH_BUILDER`; the script does not select a new default builder or install emulators automatically. An ARM publishing host needs equivalent AMD64 execution support. Go and xcaddy compile on `BUILDPLATFORM` with explicit target OS/architecture; the target Alpine stage still executes Caddy version/module checks. The Ubuntu host does not require an Ubuntu container base. The prepared builder and cache are retained for subsequent releases.
 
-Publication first pushes a unique `multiarch-*` candidate tag. It validates the immutable index, per-platform image configuration, both ELF architectures, Caddy version and Azure DNS module, then runs isolated containers for readiness, liveness, unauthenticated 401 and authenticated API checks. State is temporary, only a random loopback management port is published, and neither real Docker sockets nor cloud integration are enabled. Failed checks do not promote the target tag; temporary containers are removed, and candidate tags remain available for investigation/manual retention management.
+Publication first pushes a unique `multiarch-*` candidate tag. It validates the immutable index and per-platform image configuration, runs the evidence-bound vulnerability gate below for both architectures, verifies ELF architectures, Caddy version and Azure DNS module, then runs isolated containers for readiness, liveness, unauthenticated 401 and authenticated API checks. Missing/tampered evidence or remaining vulnerabilities block promotion. State is temporary, only a random loopback management port is published, and neither real Docker sockets nor cloud integration are enabled. Failed checks do not promote the target tag; temporary containers are removed, and candidate tags remain available for investigation/manual retention management.
 
 Immediately before promotion, the script checks that the target digest has not changed since the build began. This is an optimistic check, not registry compare-and-swap: serialize publishers to the same tag. Promotion uses the verified index digest and verifies it again afterwards. A post-promotion error requires registry inspection rather than blind retry. Keep the printed previous digest for rollback. With appropriate authorization, restore that reference using `docker buildx imagetools create --prefer-index=false --tag <repository:tag> <repository>@<previous-digest>`; restoring a legacy single-architecture manifest also removes ARM64 availability.
 
@@ -156,6 +157,76 @@ Verify the published platform list with `docker buildx imagetools inspect pczhao
 The 2026-09-22 release index is `sha256:21edcc864fa5405df5ceecab2e0368220fa9a8ad2de51d5833020b9941eec852`. Compressed runtime layers total approximately 29.1 MiB for AMD64 and 27.3 MiB for ARM64. The previous AMD64-only manifest was `sha256:d493c1622f67c5b905ef9abc212bb7b6ac5b0de4a146925f78ad92400555a255`.
 
 Verification: `node --test scripts/publish-multiarch.test.cjs` passes 15 isolated publishing tests, including failure paths and tag handling. Native full Go race/vet and real Caddy tests passed. Cross-compiled Caddy/certificate test packages passed in network-isolated ARM64 containers under QEMU, including HTTP/TLS/Host/auth and storage-lock checks. Both published architectures passed the shipping-image smoke tests. Native ARM hardware performance, real cloud/ACME and production workloads were not tested. Security exceptions below remain open; the publisher does not automatically run a vulnerability scanner.
+
+## Dependency Upgrade And Configuration Fixes (2026-10-30)
+
+This is the current **source/local-build** baseline, not a published release. Neither `latest` nor a running deployment was changed. The September results below are historical, not verification of these changes.
+
+| Component | Selected version |
+|---|---|
+| Both Go build toolchains | 1.27.3 |
+| Caddy / xcaddy / Azure DNS plugin | 2.11.7 / 0.4.7 / 0.6.0 |
+| CertMagic, control plane and Caddy | 0.25.6 |
+| Azure azcore / azidentity | 1.23.3 / 1.15.0 |
+| Azure DNS / Network SDK | 1.2.0 / 12.1.0 (`2026-03-01` Network API) |
+| `x/crypto` / `x/net` / `x/text` | 0.58.0 / 0.62.0 / 0.43.0 |
+| Caddy CEL / Chi / go-jose v4 | `cel.dev/cel-go` 0.33.1 / 5.5.0 / 4.1.6 |
+| Caddy OpenTelemetry / gRPC / compress / smallstep crypto | 1.47.0 / 1.85.0 / 1.20.3 / 0.91.1 with local v4 migration |
+| Smallstep certificates | 0.30.2 with the local migration test/module adaptation |
+| Caddy QUIC / Prometheus client | 0.64.1 / 1.25.0 |
+| Gateway runtime Alpine Linux / UI Alpine.js | 3.24.3 / 3.17.5 |
+| Rebuilt socket proxy / sample httpbin | 0.5.0 on HAProxy 3.4.7 / 2.26.0 built with Go 1.27.3 |
+
+Both binaries use the same digest-pinned Go/Alpine base. Caddy 2.11.7 uses the renamed CEL module, so the old incompatible `github.com/google/cel-go` replacement was removed. OpenTelemetry resolves as one compatible family: core and Logs API/SDK 1.47.0, log exporters 0.23.0, and contrib 0.72.0. Parent-module pins bring in their matching exporters and SDKs without replacing every child separately. Latest-version checks also cover newly introduced transitive modules, not just the original graph. Commit-based modules are pinned after review: SCEP's update is documentation-only, fallback roots refresh the CA bundle, and the RPC protobuf snapshot aligns with the API snapshot. The two Go dependency graphs remain independent and must both be scanned. HTTPS upstream Host behavior and CertMagic storage-lock compatibility remain regression gates.
+
+The control plane now imports Azure Network SDK `/v12`; its SecurityRules requests use API `2026-03-01`. Mock-transport regressions preserve instance-scoped names, ownership checks, no-op behavior, create-after-404, delete-after-404, read-error handling and the serialized rule body. DNS remains on its current stable SDK with ETag-conditional updates/deletes. Real Azure compatibility, including sovereign/cloud-specific API availability, is not established by these mock tests. The matching quic-go module in the control-plane manifest is used for real HTTP/3 regression tests, not linked into the shipped control-plane executable. Graph-only dependencies are not forcibly added to the executable merely to change their reported versions.
+
+Before the local JOSE migration, the AMD64 gateway's Trivy 0.76.1 scan decreased from 62 to 5 package records: three go-jose v3 advisories and two OpenPGP module records. The migration below removes the linked v3 module rather than hiding or renaming it. Raw package matching and evidence-filtered results are kept separately; zero applicable findings are not a guarantee of permanent security.
+
+`govulncheck` 1.9.0, rebuilt with Go 1.27.3, found no reachable vulnerabilities from `./cmd/server` and one module-only OpenPGP warning. Build the scanner with `GOTOOLCHAIN=go1.27.3 go install golang.org/x/vuln/cmd/govulncheck@v1.9.0`; its default installation can otherwise select an older compiler that cannot analyze Go 1.27 source. The earlier Caddy wildcard “symbol” result was not proof that OpenPGP was linked: stripped-binary analysis can fall back to module-level precision. Exact source import graphs now establish applicability during each build. Both controlled companion images scanned with zero findings in the earlier database snapshot, not a permanent security guarantee.
+
+### Local JOSE Migration And Evidence-Bound Scanning
+
+The [source patches](../backend/patches/) start from Smallstep Crypto 0.91.1 and Certificates 0.30.2, verified against fixed Go module checksums before zero-fuzz patch application. Provenance and Apache-2.0 licensing are in [NOTICE](../backend/patches/NOTICE). The reviewed basis is [smallstep/crypto#1157](https://github.com/smallstep/crypto/pull/1157), head `00c45432f48558f92a6e7da6d885d94e90db4d7a`, but the local build uses **go-jose v4.1.6**, not that PR's vulnerable v4.1.4.
+
+The compatibility layer retains all-expected-audience validation, claim error precedence, compact/JSON JWT builder interfaces, and XEdDSA signing/key IDs through the supported non-embedding opaque signer API. It does not relax go-jose's key checks. Previously accepted mismatched Ed25519 public/private pairs and undersized HMAC keys are now rejected; replace invalid keys rather than disabling validation. JSON JWT parsing requires one protected signature and rejects unprotected headers or multiple signatures. Encryption tests use round trips because v4 removed `RandReader`. PKI, the internal CA, the local ACME server module and Azure DNS remain available; no Caddy capability was removed to reduce scanner counts.
+
+Each build's native [security-evidence tool](../backend/cmd/security-evidence/) compares the actual target binaries with their exact source dependency graphs, rejects imported OpenPGP packages, checks JOSE v4.1.6/no linked v3, and writes binary hashes, target architecture, package/module counts, upstream checksums and patch hashes under `/usr/share/gateway/security`, alongside an OpenPGP-only OpenVEX statement. The patched upstream base-version SBOM is reconstructed from that evidence on the scanning machine, not embedded in the runtime image: Trivy otherwise counts its embedded SBOM as another language target. The separate SBOM scan prevents local replacements' unversioned build metadata from creating a new advisory-monitoring blind spot.
+
+Use the [scan wrapper](../scripts/scan-image.sh) with a new output directory:
+
+```sh
+sh scripts/scan-image.sh gateway-jose-v4-check:20261030 /tmp/gateway-security-report
+```
+
+It locks the local image ID, extracts but never starts it, checks both binary hashes and evidence/VEX/SBOM consistency, and refuses extra unverified Go binaries. It saves `raw.json`, `dependencies.json`, `filtered.json` and the evidence; patched-source advisories or any remaining filtered findings return failure. Do not reuse the VEX as a global ignore file or apply it directly to another image. These are trusted-build applicability records, not signed attestations authenticating arbitrary third-party images. Source, plugins, architecture or binaries changing requires regeneration. `publish-multiarch.sh` runs this gate for both pulled candidates before target promotion; it now requires Trivy and does not silently skip scanning.
+
+All three Trivy invocations use a controlled policy: configuration/ignore-file loading is disabled, unfixed findings are included, and every severity (including UNKNOWN) is retained. The wrapper removes inherited `TRIVY_*` settings except `TRIVY_CACHE_DIR`, `TRIVY_DB_REPOSITORY`, `TRIVY_JAVA_DB_REPOSITORY`, registry username/password/token, timeout and progress settings. Proxy, Docker and custom-CA environment settings remain available. Thus global filtering variables, external VEX settings, and current-directory `trivy.yaml`/`.trivyignore` files cannot weaken the gate; only the hash-verified VEX is supplied to the filtered scan. The policy-isolation follow-up passed 41 scan/publish regressions and real Trivy same-image control/hostile-environment checks: raw findings stayed at two OpenPGP records and applicable findings stayed at zero. No image rebuild or ARM64 runtime verification was performed for this shell-only follow-up.
+
+These are local dependency patches, not an upstream release or publication of `latest`. Remove them only after upstream releases replace the linked v3 code with a fixed v4 version and downstream compatibility is verified. Re-run dependency unit tests, real Caddy HTTP/TLS/HTTP3/Host/auth/internal-CA/storage-lock regressions, target-specific evidence checks and both raw/applicability scans. Keep auditing the pinned upstream base modules while local replacements remain.
+
+JOSE-migration verification passed: patched Crypto JOSE/Azure KMS and Certificates ACME/ACME API/StepCAS/authority/provisioner race suites; uncached full control-plane Go race/vet with the actual shipping Caddy, including HTTP/3, authentication, metrics, storage locks and isolated internal-CA issuance without installing host trust; 37 UI/publishing/scanning Node regressions; all three Compose configurations; and final-image desktop/390px browser login, security save, token rotation, injected HTTP 503 and nested certificate forms. The final AMD64 raw scan contains only two `GO-2026-5932` module records, no JOSE v3 or OS findings; the scoped scan contains zero applicable findings, and both patched upstream base versions are recognized and have zero findings in the supplementary SBOM scan. Source reachability scanning finds no called/imported control-plane vulnerability. Target-specific Caddy/control-plane cross-builds and no-OpenPGP evidence generation pass for ARM64; ARM64 execution/full-image validation remains unrun because this host lacks execution support. Prior companion/httpbin checks are historical, not rerun by this JOSE-only change. No privileged emulation changes, real cloud/ACME operations, production certificate actions or destructive Compose E2E were performed.
+
+### Controlled Companion Builds
+
+The upstream socket-proxy release has not been rebuilt with the required fixes, and upstream httpbin 2.26.0 still contains an older Go toolchain. The repository therefore provides [Dockerfile.socket-proxy](../deploy/vm/Dockerfile.socket-proxy) and [Dockerfile.httpbin](../deploy/vm/Dockerfile.httpbin). The proxy copies the entrypoint and ACL template from digest-pinned upstream v0.5.0 onto digest-pinned HAProxy 3.4.7/Alpine 3.24.3. It preserves all upstream application permission defaults, command, root user and stop signal; it does not copy the old vulnerable runtime libraries. Httpbin is rebuilt from versioned Go source with Go 1.27.3 on Alpine 3.24.3 and still runs as UID/GID 65532.
+
+Build on a development machine for the deployment architecture:
+
+```sh
+make docker-build-companions
+docker save -o gateway-companions-20261030.tar \
+  caddy-reverse-proxy-socket-proxy:0.5.0-haproxy3.4.7 \
+  caddy-reverse-proxy-httpbin:2.26.0-go1.27.3
+```
+
+Transfer the archive through an approved channel, then `docker load -i gateway-companions-20261030.tar` on the target host. The production Compose profile deliberately has **no build step** and uses `pull_policy: never` for the proxy: preload the approved image before starting it. An approved registry image may be selected with `SOCKET_PROXY_IMAGE`, but it must also be pulled beforehand. Sample profiles have local build definitions; `SOCKET_PROXY_IMAGE` and `HTTPBIN_IMAGE` override their tags. The normal multi-architecture publisher still publishes only the gateway, not these companion images.
+
+### Configuration Update Safety
+
+Security policy, token rotation and certificate policy updates are serialized with Caddy configuration commits. They use applied routes, confirm Caddy loading, then persist and publish the new management state. A failed reload (including a lost acknowledgment or canceled request) or failed persistence triggers restoration of the previous runtime configuration and returns HTTP 503 without changing browser credentials. Rollback failure is explicitly reported and requires operator attention; this is compensating rollback, not crash-atomic storage across Caddy and files. A later health/cloud failure does not undo an already committed token rotation.
+
+Empty and `/` routing-rule prefixes now normalize to the same empty root prefix. Duplicate roots are rejected by CRUD, imports and v1/v2/v3 file loading; valid single-root legacy configurations still work. Ambiguous legacy files are preserved and rejected, not silently deduplicated. Before upgrading such an installation, use the old Console to remove the redundant rule and Apply, then back up state.
 
 ## Dependency Upgrade Baseline (2026-09-22)
 
@@ -225,7 +296,7 @@ The Console composes a route from a Listener, Backend Pool, and Routing Rule:
 - A backend pool normally contains one address per line without a scheme or port. Private IPs such as `10.0.0.5`, reachable public IPs, and DNS names such as `ex.example.com` are accepted. DNS names are resolved from the gateway runtime, and every address must be network-reachable from that runtime. For HTTPS backends, the certificate must validate for the address or hostname used.
 - The routing rule's backend protocol and port are shared by all pool targets. The API and migration layer retain an optional per-target port override for legacy routes, but new Console configurations should use the shared rule port.
 - A backend address controls where Caddy connects; it does not change the incoming HTTP `Host` by default. Leave **Backend Host header** empty for applications that route on the frontend hostname. Set it to `ex.example.com` when proxying to an external virtual host that expects that hostname.
-- An empty route path prefix matches every path on the listener. `/api` matches `/api` and `/api/...`; Caddy preserves that prefix when forwarding upstream.
+- An empty route path prefix or `/` matches every path on the listener; both are stored as an empty prefix and cannot coexist as separate root rules on one listener. `/api` matches `/api` and `/api/...`; Caddy preserves that prefix when forwarding upstream.
 - The health path is optional. Empty uses `health.defaultPath`, which defaults to `/`. HTTP 2xx and 3xx responses are healthy. If `/` returns 404, enter a real readiness path such as `/healthz`. Probe failure marks status only; it does not stop proxying or withdraw DNS.
 - `public` permits any client that can reach the listener, subject to the global security baseline. `protected` additionally requires an enabled gateway token header. `internal` accepts only direct client IPs in `gateway.internalSourceRanges` and does not participate in managed public DNS/NSG reconciliation.
 - Caddy's HTTP reverse proxy automatically handles WebSocket Upgrade requests over HTTP or HTTPS. No routing-rule WebSocket switch is required.

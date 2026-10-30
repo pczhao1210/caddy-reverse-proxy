@@ -112,6 +112,7 @@ Host 网络模式可以代理上游，但权衡不同：
 |---|---|
 | `make test` | 在 Go 工具链容器中运行测试。 |
 | `make docker-build` | 构建 `IMAGE`，默认 `pczhao1210/caddy-reverse-proxy:latest`。 |
+| `make docker-build-companions` | 在本地构建受控 socket-proxy 与示例 httpbin 镜像，不发布镜像。 |
 | `make docker-push` | 为 `IMAGE` 构建、验证并发布 AMD64 + ARM64。 |
 | `make docker-run` | 使用 `ENV_FILE` 在 Docker bridge 网络上本地运行镜像，默认 `.env`。 |
 | `make compose-up` | 启动 VM 示例栈。 |
@@ -135,7 +136,7 @@ make docker-push
 
 `./start.sh push` 与 `make docker-push` 复用 `scripts/publish-multiarch.sh`，从源码构建 `linux/amd64` 和 `linux/arm64`，不依赖本地已打标签的镜像。`start.sh` 始终发布 `latest`；Make 保留显式的 `IMAGE=repository:tag`。`build` 仍是本地单架构构建，不是发布前置步骤。不要再对单架构本地镜像执行普通 `docker push ...:latest`，否则会覆盖多架构索引。
 
-发布机需要 Docker、Buildx、`jq` 和支持 `--retry-all-errors` 的 `curl`。请在终端直接使用 `docker login` 登录。builder 与本机 Docker daemon 都需要能够执行两种目标架构，以便进行运行时检查。以下一次性配置适用于 Linux AMD64 开发机；binfmt 命令具有特权，会更改宿主机级执行支持，必须获得宿主机所有者许可，不应在网关 VM 上执行：
+发布机需要 Docker、Buildx、`jq`、`sha256sum`、Trivy（已验证 0.76.1）和支持 `--retry-all-errors` 的 `curl`。请在终端直接使用 `docker login` 登录。builder 与本机 Docker daemon 都需要能够执行两种目标架构，以便进行运行时检查。以下一次性配置适用于 Linux AMD64 开发机；binfmt 命令具有特权，会更改宿主机级执行支持，必须获得宿主机所有者许可，不应在网关 VM 上执行：
 
 ```sh
 docker run --privileged --rm tonistiigi/binfmt@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 --install arm64
@@ -147,7 +148,7 @@ docker buildx inspect gateway-multiarch --bootstrap
 
 已有合适的 builder 时可通过 `MULTIARCH_BUILDER` 复用；脚本不会改变默认 builder，也不会自动安装模拟器。ARM 发布机则需要相应的 AMD64 执行支持。Go 与 xcaddy 在 `BUILDPLATFORM` 原生编译，明确指定目标 OS/架构；目标 Alpine 阶段仍执行 Caddy 版本/插件检查。Ubuntu 宿主机不需要 Ubuntu 容器基底。已配置的 builder 和缓存会保留，供后续发布复用。
 
-发布时先推送唯一的 `multiarch-*` 候选标签，验证不可变索引、各平台镜像配置、两个 ELF 的架构、Caddy 版本和 Azure DNS 插件，然后在隔离容器中验证就绪、存活、匿名 401 和带令牌的 API。状态为临时数据，仅映射随机回环管理端口，不挂载真实 Docker socket，也不开启云端集成。检查失败不会更新目标标签；临时容器会清理，候选标签保留供排查或手动按保留策略清理。
+发布时先推送唯一的 `multiarch-*` 候选标签，验证不可变索引、各平台镜像配置，对两个架构执行下述绑定证据的漏洞门槛，再核验 ELF 架构、Caddy 版本和 Azure DNS 插件，并在隔离容器中验证就绪、存活、匿名 401 和带令牌的 API。证据缺失/被篡改或仍有漏洞都会阻止晋升。状态为临时数据，仅映射随机回环管理端口，不挂载真实 Docker socket，也不开启云端集成。检查失败不会更新目标标签；临时容器会清理，候选标签保留供排查或手动按保留策略清理。
 
 更新目标标签前会确认它的摘要未在构建期间改变。这是乐观检查，不是 registry 原子比较交换；同一标签的发布仍需串行执行。更新时使用已验证的索引摘要，并在更新后再次核对；更新后的验证报错需要先检查仓库，不应盲目重试。保留输出中的旧摘要用于回退。经授权，可用 `docker buildx imagetools create --prefer-index=false --tag <repository:tag> <repository>@<previous-digest>` 恢复旧引用；恢复旧单架构 manifest 也会移除 ARM64 支持。
 
@@ -156,6 +157,76 @@ docker buildx inspect gateway-multiarch --bootstrap
 2026-09-22 发布索引为 `sha256:21edcc864fa5405df5ceecab2e0368220fa9a8ad2de51d5833020b9941eec852`，运行层压缩体积约 AMD64 29.1 MiB、ARM64 27.3 MiB。旧 AMD64 单架构 manifest 为 `sha256:d493c1622f67c5b905ef9abc212bb7b6ac5b0de4a146925f78ad92400555a255`。
 
 验证证据：`node --test scripts/publish-multiarch.test.cjs` 的 15 项隔离发布测试通过，覆盖失败路径和标签处理；原生全量 Go race/vet 与真实 Caddy 测试通过。交叉编译的 Caddy/证书测试包在 QEMU 的无网络 ARM64 容器中通过，包含 HTTP/TLS/Host/鉴权和存储锁检查；两个已发布架构均通过最终镜像冒烟测试。未验证原生 ARM 硬件性能、真实云端/ACME 或生产负载。下方安全例外仍未关闭，发布脚本本身不会自动运行漏洞扫描器。
+
+## 依赖升级与配置修复（2026-10-30）
+
+这是当前的**源码/本地构建**基线，而不是已发布版本。没有修改 `latest` 或运行中的部署。下方九月的结果仅是历史记录，不能作为本次变更的验证。
+
+| 组件 | 选定版本 |
+|---|---|
+| 两个 Go 构建工具链 | 1.27.3 |
+| Caddy / xcaddy / Azure DNS 插件 | 2.11.7 / 0.4.7 / 0.6.0 |
+| 控制平面与 Caddy 的 CertMagic | 0.25.6 |
+| Azure azcore / azidentity | 1.23.3 / 1.15.0 |
+| Azure DNS / Network SDK | 1.2.0 / 12.1.0（Network API 为 `2026-03-01`） |
+| `x/crypto` / `x/net` / `x/text` | 0.58.0 / 0.62.0 / 0.43.0 |
+| Caddy CEL / Chi / go-jose v4 | `cel.dev/cel-go` 0.33.1 / 5.5.0 / 4.1.6 |
+| Caddy OpenTelemetry / gRPC / compress / smallstep crypto | 1.47.0 / 1.85.0 / 1.20.3 / 带本地 v4 迁移的 0.91.1 |
+| Smallstep certificates | 带本地迁移测试/模块适配的 0.30.2 |
+| Caddy QUIC / Prometheus client | 0.64.1 / 1.25.0 |
+| 网关运行时 Alpine Linux / UI Alpine.js | 3.24.3 / 3.17.5 |
+| 重建 socket proxy / 示例 httpbin | 运行于 HAProxy 3.4.7 的 0.5.0 / 使用 Go 1.27.3 构建的 2.26.0 |
+
+两个二进制使用同一个固定 digest 的 Go/Alpine 基础镜像。Caddy 2.11.7 使用更名后的 CEL 模块，因此移除了原先不兼容的 `github.com/google/cel-go` 替换。OpenTelemetry 按兼容系列整体解析：核心与日志 API/SDK 为 1.47.0，日志 exporter 为 0.23.0，contrib 为 0.72.0。固定父模块即可带入匹配的 exporter 和 SDK，不逐项重复替换子模块。最新版检查也覆盖升级后新引入的间接模块，不仅检查原始依赖图。提交型模块经审阅后固定：SCEP 仅改文档，fallback roots 更新 CA 根证书包，RPC protobuf 快照与 API 快照对齐。两个 Go 依赖图仍相互独立，必须分别扫描；HTTPS 上游 Host 行为与 CertMagic 存储锁兼容性仍是回归门槛。
+
+控制平面现使用 Azure Network SDK `/v12`，SecurityRules 请求采用 API `2026-03-01`。mock transport 回归保留实例级命名、所有权检查、无变化时不写、404 后创建、删除时已不存在、读取失败处理和规则序列化请求体。DNS 维持当前稳定版 SDK，保留 ETag 条件更新/删除。mock 测试不能证明真实 Azure（包括主权云等环境）的 API 可用性。控制平面清单中的匹配 quic-go 模块用于真实 HTTP/3 回归测试，不会链接进发布的控制平面可执行文件。不会仅为改变报告版本而强行把图级依赖加入可执行文件。
+
+本地 JOSE 迁移前，AMD64 网关的 Trivy 0.76.1 扫描从 62 条包记录降为 5 条：三条 go-jose v3 公告和两条 OpenPGP 模块记录。下述迁移会真正移除链接的 v3 模块，而非隐藏或重命名。原始包版本匹配与证据过滤后的结果分别保留；适用告警为零不代表永久安全保证。
+
+使用 Go 1.27.3 重新构建的 `govulncheck` 1.9.0 对 `./cmd/server` 未发现可达漏洞，仅剩模块级 OpenPGP 告警。安装扫描器应使用 `GOTOOLCHAIN=go1.27.3 go install golang.org/x/vuln/cmd/govulncheck@v1.9.0`；默认安装可能选择旧编译器，无法分析 Go 1.27 源码。此前 Caddy 的通配符“符号”结果不证明 OpenPGP 已被链接：剥离符号后的扫描可能退化到模块级精度。现在每次构建通过准确的源码导入图判定适用性。两个受控重建的配套镜像在此前数据库快照中均为零项，不代表永久安全保证。
+
+### 本地 JOSE 迁移与证据绑定扫描
+
+[源码补丁](../backend/patches/) 基于 Smallstep Crypto 0.91.1 与 Certificates 0.30.2，先核验固定 Go 模块校验和，再以零 fuzz 应用补丁。来源和 Apache-2.0 许可见 [NOTICE](../backend/patches/NOTICE)。审阅的基础是 [smallstep/crypto#1157](https://github.com/smallstep/crypto/pull/1157)，head 为 `00c45432f48558f92a6e7da6d885d94e90db4d7a`，但本地使用 **go-jose v4.1.6**，不是该 PR 中仍有漏洞的 v4.1.4。
+
+兼容层保留全部期望 audience 校验、声明错误优先级、compact/JSON JWT builder 接口，并通过受支持的非嵌入 opaque signer API 保留 XEdDSA 签名/key ID，不放宽 go-jose 密钥检查。以前接受的 Ed25519 公私钥不匹配数据及长度不足的 HMAC 密钥现在会被拒绝，应替换无效密钥，而不是关闭校验。JSON JWT 解析要求一个受保护签名，拒绝无保护 Header 或多个签名。v4 移除 `RandReader` 后，加密测试改为往返验证。PKI、内部 CA、本地 ACME server 模块与 Azure DNS 均保留，没有通过删除 Caddy 能力降低扫描数。
+
+每次构建由原生 [security-evidence 工具](../backend/cmd/security-evidence/) 对照实际目标二进制与准确源码依赖图，拒绝 OpenPGP 包导入，核验 JOSE v4.1.6/没有链接 v3，并将二进制哈希、目标架构、包/模块计数、上游校验和及补丁哈希写入 `/usr/share/gateway/security`，附带仅针对 OpenPGP 的 OpenVEX。补丁上游基础版本 SBOM 在扫描机上从该证据重建，不嵌入运行镜像，否则 Trivy 会把内嵌 SBOM 计为额外语言目标。单独扫描该 SBOM，避免本地替换的无版本构建元数据造成新的公告监测盲点。
+
+使用[扫描包装脚本](../scripts/scan-image.sh)，输出目录必须尚不存在：
+
+```sh
+sh scripts/scan-image.sh gateway-jose-v4-check:20261030 /tmp/gateway-security-report
+```
+
+它锁定本地 image ID，只提取、不启动容器，核验两个二进制哈希及证据/VEX/SBOM 一致性，并拒绝额外的未核验 Go 二进制。输出保留 `raw.json`、`dependencies.json`、`filtered.json` 与证据；补丁源版本出现公告或过滤后仍有告警时返回失败。不要把 VEX 当成全局忽略文件，也不要直接用于其他镜像。它是可信构建的适用性记录，不是用于认证任意第三方镜像的签名证明。源码、插件、架构或二进制改变后都必须重新生成。`publish-multiarch.sh` 在两个已拉取候选晋升目标标签前执行该门槛；现在要求安装 Trivy，不会静默跳过扫描。
+
+三次 Trivy 调用统一使用受控策略：禁用配置/忽略文件加载，包含无修复版本的告警，并保留全部严重级别（包括 UNKNOWN）。包装脚本清除继承的 `TRIVY_*` 设置，仅保留 `TRIVY_CACHE_DIR`、`TRIVY_DB_REPOSITORY`、`TRIVY_JAVA_DB_REPOSITORY`、registry 用户名/密码/token、超时及进度设置。代理、Docker 和自定义 CA 环境设置仍可使用。因此，全局过滤变量、外部 VEX 设置和当前目录的 `trivy.yaml`/`.trivyignore` 都不能削弱发布门槛；过滤扫描只接收已核验哈希的 VEX。本次策略隔离追加修复通过 41 项扫描/发布回归和真实 Trivy 同镜像正常/敌对环境对照：原始告警均保持两条 OpenPGP 记录，适用告警均为零。本次仅修改 shell 工作流，未重建镜像，也未执行 ARM64 运行验证。
+
+这些是本地依赖补丁，不是上游正式发布，也没有更新 `latest`。只有上游版本已将链接的 v3 替换为修复后的 v4，且下游兼容性完成验证后，才能移除补丁。届时须重跑依赖单测、真实 Caddy HTTP/TLS/HTTP3/Host/鉴权/内部 CA/存储锁回归、目标架构证据核验及原始/适用性扫描；本地替换仍存在时，应持续审计固定的上游基础模块。
+
+本次 JOSE 迁移验证通过：补丁后的 Crypto JOSE/Azure KMS 与 Certificates ACME/ACME API/StepCAS/authority/provisioner race 测试；使用实际发布形态 Caddy 的控制平面无缓存全量 Go race/vet（含 HTTP/3、鉴权、metrics、存储锁及不安装宿主机信任的隔离内部 CA 签发）；37 项 UI/发布/扫描 Node 回归；三个 Compose 配置；最终镜像桌面/390px 浏览器登录、安全策略保存、令牌轮换、注入 HTTP 503 及嵌套证书表单。最终 AMD64 原始扫描仅保留两条 `GO-2026-5932` 模块记录，没有 JOSE v3 或 OS 告警；绑定证据后的适用告警为零，补充 SBOM 扫描准确识别两个补丁上游基础版本，告警也为零。控制平面源码扫描无调用/导入级漏洞。ARM64 的 Caddy/控制平面交叉构建和独立无 OpenPGP 证据生成通过；宿主机缺少执行支持，未完成 ARM64 执行/完整镜像验证。此前配套服务/httpbin 检查属于历史记录，本次仅 JOSE 变更未重跑。未修改特权模拟配置，未运行真实云端/ACME、生产证书操作或破坏性 Compose E2E。
+
+### 受控配套镜像构建
+
+上游 socket-proxy 尚未用所需补丁重建，上游 httpbin 2.26.0 镜像也仍使用旧 Go 工具链。因此仓库提供 [Dockerfile.socket-proxy](../deploy/vm/Dockerfile.socket-proxy) 和 [Dockerfile.httpbin](../deploy/vm/Dockerfile.httpbin)。代理将固定 digest 的上游 v0.5.0 入口与 ACL 模板复制到固定 digest 的 HAProxy 3.4.7/Alpine 3.24.3，保留全部应用权限默认值、命令、root 用户及停止信号，不复制旧运行库。Httpbin 从固定版本的 Go 源码以 Go 1.27.3 重建，运行于 Alpine 3.24.3，仍使用 UID/GID 65532。
+
+在开发机上为目标部署架构构建：
+
+```sh
+make docker-build-companions
+docker save -o gateway-companions-20261030.tar \
+  caddy-reverse-proxy-socket-proxy:0.5.0-haproxy3.4.7 \
+  caddy-reverse-proxy-httpbin:2.26.0-go1.27.3
+```
+
+通过批准的方式传输归档，在目标主机执行 `docker load -i gateway-companions-20261030.tar`。生产 Compose 刻意**不包含构建步骤**，代理使用 `pull_policy: never`，启动前必须预载入已批准的镜像。可用 `SOCKET_PROXY_IMAGE` 选择批准的 registry 镜像，但也须提前 pull。示例配置提供本地构建定义，可用 `SOCKET_PROXY_IMAGE` 和 `HTTPBIN_IMAGE` 覆盖标签。现有多架构发布脚本仍只发布网关，不发布这些配套镜像。
+
+### 配置更新安全性
+
+安全策略、令牌轮换和证书策略更新与 Caddy 配置提交串行执行：使用已应用路由，确认 Caddy 加载后再落盘并公开新的管理状态。重载失败（包括确认丢失或请求取消）及落盘失败会触发旧运行配置恢复，并返回 HTTP 503，浏览器不会切换凭据。恢复失败会明确报错，需要运维介入；这是补偿式回滚，不是 Caddy 与文件之间的崩溃原子存储。后续健康检查/云端操作失败，不会撤销已提交的令牌轮换。
+
+空路径和 `/` 现在统一规范化为空根前缀。CRUD、导入及 v1/v2/v3 文件加载都会拒绝重复根规则，合法的单根旧配置仍兼容。有歧义的旧文件会被保留并拒绝加载，不会静默去重。存在这种配置时，应在升级前用旧版 Console 删除冗余规则并 Apply，再备份状态。
 
 ## 依赖升级基线（2026-09-22）
 
@@ -225,7 +296,7 @@ Console 使用 Listener、Backend Pool 和 Routing Rule 组合一条路由：
 - 后端池通常每行只填写一个地址，不带协议和端口。支持 `10.0.0.5` 这样的私网 IP、网关可达的公网 IP，以及 `ex.example.com` 这样的 DNS 名称。DNS 名称由网关运行环境解析，每个地址都必须从该环境网络可达。HTTPS 后端的证书必须能校验所使用的地址或主机名。
 - 路由规则中的后端协议和端口由池内所有目标共用。API 和迁移层为旧路由保留单目标端口覆盖能力，但新建 Console 配置应使用路由规则的共享端口。
 - 后端地址决定 Caddy 连接到哪里，默认不会改变传入 HTTP `Host`。按前端域名路由的应用应把**后端 Host Header**留空；代理到要求自身域名的外部虚拟主机时填写 `ex.example.com`。
-- 路由路径前缀留空表示匹配该 Listener 的所有路径。填写 `/api` 时匹配 `/api` 和 `/api/...`；Caddy 转发到上游时会保留此前缀。
+- 路由路径前缀留空或填写 `/` 均匹配该 Listener 的所有路径，两者统一保存为空前缀，不能在同一 Listener 上作为两条根规则共存。填写 `/api` 时匹配 `/api` 和 `/api/...`；Caddy 转发到上游时会保留此前缀。
 - 健康检查路径可以留空。留空时使用 `health.defaultPath`，默认是 `/`；HTTP 2xx 和 3xx 视为健康。如果服务的 `/` 返回 404，应填写真实的就绪路径，例如 `/healthz`。探针失败只标记状态，不会停止代理或撤销 DNS。
 - `public` 允许任何能访问 Listener 的客户端，但仍受全局安全基线约束；`protected` 还要求提供已启用的网关令牌 Header；`internal` 只允许直接客户端 IP 位于 `gateway.internalSourceRanges`，且不参与托管公网 DNS/NSG 协调。
 - Caddy 的 HTTP 反向代理会自动处理 HTTP 或 HTTPS 上的 WebSocket Upgrade，不需要单独的路由规则 WebSocket 开关。
